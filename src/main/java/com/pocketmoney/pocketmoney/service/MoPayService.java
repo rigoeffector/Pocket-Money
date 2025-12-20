@@ -18,8 +18,8 @@ public class MoPayService {
 
     private final RestTemplate restTemplate;
 
-    public MoPayService() {
-        this.restTemplate = new RestTemplate();
+    public MoPayService(RestTemplate restTemplate) {
+        this.restTemplate = restTemplate;
     }
 
     public MoPayResponse initiatePayment(MoPayInitiateRequest request) {
