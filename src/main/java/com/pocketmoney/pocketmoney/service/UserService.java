@@ -192,6 +192,15 @@ public class UserService {
         userRepository.save(user);
     }
 
+    public void resetPin(UUID userId, String newPin) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new RuntimeException("User not found with id: " + userId));
+
+        // Reset PIN without verification (admin action)
+        user.setPin(passwordEncoder.encode(newPin));
+        userRepository.save(user);
+    }
+
     private UserResponse mapToResponse(User user) {
         UserResponse response = new UserResponse();
         response.setId(user.getId());

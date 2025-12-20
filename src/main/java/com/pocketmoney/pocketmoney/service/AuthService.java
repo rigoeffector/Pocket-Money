@@ -10,6 +10,8 @@ import com.pocketmoney.pocketmoney.util.JwtUtil;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
+import java.util.UUID;
+
 @Service
 public class AuthService {
 
@@ -86,6 +88,24 @@ public class AuthService {
         response.setUpdatedAt(auth.getUpdatedAt());
 
         return response;
+    }
+
+    public void resetPassword(UUID authId, String newPassword) {
+        Auth auth = authRepository.findById(authId)
+                .orElseThrow(() -> new RuntimeException("User not found with id: " + authId));
+
+        // Reset password (admin action - no current password verification needed)
+        auth.setPassword(passwordEncoder.encode(newPassword));
+        authRepository.save(auth);
+    }
+
+    public void resetPasswordByUsername(String username, String newPassword) {
+        Auth auth = authRepository.findByUsername(username)
+                .orElseThrow(() -> new RuntimeException("User not found with username: " + username));
+
+        // Reset password (admin action - no current password verification needed)
+        auth.setPassword(passwordEncoder.encode(newPassword));
+        authRepository.save(auth);
     }
 }
 

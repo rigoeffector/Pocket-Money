@@ -120,5 +120,18 @@ public class UserController {
                     .body(ApiResponse.error(e.getMessage()));
         }
     }
+
+    @PutMapping("/{id}/pin/reset")
+    public ResponseEntity<ApiResponse<Void>> resetPin(
+            @PathVariable UUID id,
+            @Valid @RequestBody ResetPinRequest request) {
+        try {
+            userService.resetPin(id, request.getNewPin());
+            return ResponseEntity.ok(ApiResponse.success("PIN reset successfully", null));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
 }
 

@@ -160,6 +160,15 @@ public class ReceiverService {
         return mapToResponse(updatedReceiver);
     }
 
+    public void resetPassword(UUID receiverId, String newPassword) {
+        Receiver receiver = receiverRepository.findById(receiverId)
+                .orElseThrow(() -> new RuntimeException("Receiver not found with id: " + receiverId));
+
+        // Reset password (admin action - no current password verification needed)
+        receiver.setPassword(passwordEncoder.encode(newPassword));
+        receiverRepository.save(receiver);
+    }
+
     public void deleteReceiver(UUID id) {
         if (!receiverRepository.existsById(id)) {
             throw new RuntimeException("Receiver not found with id: " + id);

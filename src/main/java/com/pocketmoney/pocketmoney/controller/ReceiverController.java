@@ -4,6 +4,7 @@ import com.pocketmoney.pocketmoney.dto.ApiResponse;
 import com.pocketmoney.pocketmoney.dto.CreateReceiverRequest;
 import com.pocketmoney.pocketmoney.dto.ReceiverResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverWalletResponse;
+import com.pocketmoney.pocketmoney.dto.ResetPasswordRequest;
 import com.pocketmoney.pocketmoney.dto.UpdateReceiverRequest;
 import com.pocketmoney.pocketmoney.entity.ReceiverStatus;
 import com.pocketmoney.pocketmoney.service.ReceiverService;
@@ -130,6 +131,19 @@ public class ReceiverController {
             return ResponseEntity.ok(ApiResponse.success("Receiver wallet retrieved successfully", response));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PutMapping("/{id}/reset-password")
+    public ResponseEntity<ApiResponse<Void>> resetPassword(
+            @PathVariable UUID id,
+            @Valid @RequestBody ResetPasswordRequest request) {
+        try {
+            receiverService.resetPassword(id, request.getNewPassword());
+            return ResponseEntity.ok(ApiResponse.success("Receiver password reset successfully", null));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.error(e.getMessage()));
         }
     }

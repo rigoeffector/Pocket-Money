@@ -4,11 +4,14 @@ import com.pocketmoney.pocketmoney.dto.ApiResponse;
 import com.pocketmoney.pocketmoney.dto.AuthResponse;
 import com.pocketmoney.pocketmoney.dto.LoginRequest;
 import com.pocketmoney.pocketmoney.dto.RegisterRequest;
+import com.pocketmoney.pocketmoney.dto.ResetPasswordRequest;
 import com.pocketmoney.pocketmoney.service.AuthService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/auth")
@@ -38,6 +41,32 @@ public class AuthController {
             return ResponseEntity.ok(ApiResponse.success("Login successful", response));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PutMapping("/{id}/reset-password")
+    public ResponseEntity<ApiResponse<Void>> resetPassword(
+            @PathVariable UUID id,
+            @Valid @RequestBody ResetPasswordRequest request) {
+        try {
+            authService.resetPassword(id, request.getNewPassword());
+            return ResponseEntity.ok(ApiResponse.success("Password reset successfully", null));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PutMapping("/reset-password/{username}")
+    public ResponseEntity<ApiResponse<Void>> resetPasswordByUsername(
+            @PathVariable String username,
+            @Valid @RequestBody ResetPasswordRequest request) {
+        try {
+            authService.resetPasswordByUsername(username, request.getNewPassword());
+            return ResponseEntity.ok(ApiResponse.success("Password reset successfully", null));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.error(e.getMessage()));
         }
     }
