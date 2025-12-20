@@ -75,18 +75,9 @@ public class PaymentService {
         // Create transfer to user's card (receiver)
         MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
         transfer.setAmount(request.getAmount());
-        // Convert phone string to Long and ensure 12 digits (MoPay API requires 12 digits)
-        String userPhone = user.getPhoneNumber().replaceAll("[^0-9]", ""); // Remove any non-digit characters
-        // Normalize phone number to 12 digits - if it starts with 250, use as is, otherwise add 250 prefix
-        if (!userPhone.startsWith("250")) {
-            // If phone doesn't start with 250, add it (remove leading 0 if present)
-            if (userPhone.startsWith("0")) {
-                userPhone = "250" + userPhone.substring(1);
-            } else {
-                userPhone = "250" + userPhone;
-            }
-        }
-        transfer.setPhone(Long.parseLong(userPhone));
+        // Normalize user phone to 12 digits (MoPay API requires 12 digits)
+        String normalizedUserPhone = normalizePhoneTo12Digits(user.getPhoneNumber());
+        transfer.setPhone(Long.parseLong(normalizedUserPhone));
         transfer.setMessage(request.getMessage() != null ? request.getMessage() : "Top up to pocket money card");
         moPayRequest.setTransfers(java.util.List.of(transfer));
 
