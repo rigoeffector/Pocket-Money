@@ -27,6 +27,10 @@ public class Transaction {
     @JoinColumn(name = "user_id", nullable = false)
     private User user;
 
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "payment_category_id")
+    private PaymentCategory paymentCategory;
+
     @Column(name = "transaction_type", nullable = false)
     @Enumerated(EnumType.STRING)
     private TransactionType transactionType;

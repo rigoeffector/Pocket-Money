@@ -1,10 +1,12 @@
 package com.pocketmoney.pocketmoney.service;
 
 import com.pocketmoney.pocketmoney.dto.*;
+import com.pocketmoney.pocketmoney.entity.PaymentCategory;
 import com.pocketmoney.pocketmoney.entity.Transaction;
 import com.pocketmoney.pocketmoney.entity.TransactionStatus;
 import com.pocketmoney.pocketmoney.entity.TransactionType;
 import com.pocketmoney.pocketmoney.entity.User;
+import com.pocketmoney.pocketmoney.repository.PaymentCategoryRepository;
 import com.pocketmoney.pocketmoney.repository.TransactionRepository;
 import com.pocketmoney.pocketmoney.repository.UserRepository;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -21,13 +23,15 @@ public class PaymentService {
 
     private final UserRepository userRepository;
     private final TransactionRepository transactionRepository;
+    private final PaymentCategoryRepository paymentCategoryRepository;
     private final MoPayService moPayService;
     private final PasswordEncoder passwordEncoder;
 
     public PaymentService(UserRepository userRepository, TransactionRepository transactionRepository,
-                         MoPayService moPayService, PasswordEncoder passwordEncoder) {
+                         PaymentCategoryRepository paymentCategoryRepository, MoPayService moPayService, PasswordEncoder passwordEncoder) {
         this.userRepository = userRepository;
         this.transactionRepository = transactionRepository;
+        this.paymentCategoryRepository = paymentCategoryRepository;
         this.moPayService = moPayService;
         this.passwordEncoder = passwordEncoder;
     }
@@ -89,6 +93,14 @@ public class PaymentService {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new RuntimeException("User not found"));
 
+        // Verify payment category exists
+        PaymentCategory paymentCategory = paymentCategoryRepository.findById(request.getPaymentCategoryId())
+                .orElseThrow(() -> new RuntimeException("Payment category not found"));
+
+        if (!paymentCategory.getIsActive()) {
+            throw new RuntimeException("Payment category is not active");
+        }
+
         // Verify PIN
         if (!passwordEncoder.matches(request.getPin(), user.getPin())) {
             throw new RuntimeException("Invalid PIN");
@@ -120,6 +132,7 @@ public class PaymentService {
         // Create transaction record
         Transaction transaction = new Transaction();
         transaction.setUser(user);
+        transaction.setPaymentCategory(paymentCategory);
         transaction.setTransactionType(TransactionType.PAYMENT);
         transaction.setAmount(request.getAmount());
         transaction.setPhoneNumber(request.getReceiverPhone());

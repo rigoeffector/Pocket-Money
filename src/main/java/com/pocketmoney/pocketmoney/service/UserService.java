@@ -165,6 +165,33 @@ public class UserService {
         userRepository.deleteById(id);
     }
 
+    public void createPin(UUID userId, String pin) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new RuntimeException("User not found with id: " + userId));
+
+        // Check if PIN already exists (non-null and not empty)
+        if (user.getPin() != null && !user.getPin().isEmpty()) {
+            throw new RuntimeException("PIN already exists. Use update PIN endpoint to change it.");
+        }
+
+        user.setPin(passwordEncoder.encode(pin));
+        userRepository.save(user);
+    }
+
+    public void updatePin(UUID userId, String currentPin, String newPin) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new RuntimeException("User not found with id: " + userId));
+
+        // Verify current PIN
+        if (!passwordEncoder.matches(currentPin, user.getPin())) {
+            throw new RuntimeException("Current PIN is incorrect");
+        }
+
+        // Update to new PIN
+        user.setPin(passwordEncoder.encode(newPin));
+        userRepository.save(user);
+    }
+
     private UserResponse mapToResponse(User user) {
         UserResponse response = new UserResponse();
         response.setId(user.getId());

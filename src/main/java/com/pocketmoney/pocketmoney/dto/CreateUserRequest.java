@@ -20,7 +20,7 @@ public class CreateUserRequest {
     private String email;
 
     @NotBlank(message = "PIN is required")
-    @Pattern(regexp = "^[0-9]{4,6}$", message = "PIN must be between 4 and 6 digits")
+    @Pattern(regexp = "^[0-9]{4}$", message = "PIN must be exactly 4 digits")
     private String pin;
 
     private String nfcCardId;

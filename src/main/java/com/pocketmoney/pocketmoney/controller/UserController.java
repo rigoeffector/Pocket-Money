@@ -1,9 +1,6 @@
 package com.pocketmoney.pocketmoney.controller;
 
-import com.pocketmoney.pocketmoney.dto.ApiResponse;
-import com.pocketmoney.pocketmoney.dto.CreateUserRequest;
-import com.pocketmoney.pocketmoney.dto.UpdateUserRequest;
-import com.pocketmoney.pocketmoney.dto.UserResponse;
+import com.pocketmoney.pocketmoney.dto.*;
 import com.pocketmoney.pocketmoney.service.UserService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -94,6 +91,32 @@ public class UserController {
             return ResponseEntity.ok(ApiResponse.success("User deleted successfully", null));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PostMapping("/{id}/pin")
+    public ResponseEntity<ApiResponse<Void>> createPin(
+            @PathVariable UUID id,
+            @Valid @RequestBody CreatePinRequest request) {
+        try {
+            userService.createPin(id, request.getPin());
+            return ResponseEntity.ok(ApiResponse.success("PIN created successfully", null));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PutMapping("/{id}/pin")
+    public ResponseEntity<ApiResponse<Void>> updatePin(
+            @PathVariable UUID id,
+            @Valid @RequestBody UpdatePinRequest request) {
+        try {
+            userService.updatePin(id, request.getCurrentPin(), request.getNewPin());
+            return ResponseEntity.ok(ApiResponse.success("PIN updated successfully", null));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.error(e.getMessage()));
         }
     }
