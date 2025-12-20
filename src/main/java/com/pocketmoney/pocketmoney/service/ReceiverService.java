@@ -1,12 +1,14 @@
 package com.pocketmoney.pocketmoney.service;
 
 import com.pocketmoney.pocketmoney.dto.CreateReceiverRequest;
+import com.pocketmoney.pocketmoney.dto.ReceiverLoginResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverWalletResponse;
 import com.pocketmoney.pocketmoney.dto.UpdateReceiverRequest;
 import com.pocketmoney.pocketmoney.entity.Receiver;
 import com.pocketmoney.pocketmoney.entity.ReceiverStatus;
 import com.pocketmoney.pocketmoney.repository.ReceiverRepository;
+import com.pocketmoney.pocketmoney.util.JwtUtil;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -21,10 +23,12 @@ public class ReceiverService {
 
     private final ReceiverRepository receiverRepository;
     private final PasswordEncoder passwordEncoder;
+    private final JwtUtil jwtUtil;
 
-    public ReceiverService(ReceiverRepository receiverRepository, PasswordEncoder passwordEncoder) {
+    public ReceiverService(ReceiverRepository receiverRepository, PasswordEncoder passwordEncoder, JwtUtil jwtUtil) {
         this.receiverRepository = receiverRepository;
         this.passwordEncoder = passwordEncoder;
+        this.jwtUtil = jwtUtil;
     }
 
     public ReceiverResponse createReceiver(CreateReceiverRequest request) {
@@ -174,6 +178,47 @@ public class ReceiverService {
             throw new RuntimeException("Receiver not found with id: " + id);
         }
         receiverRepository.deleteById(id);
+    }
+
+    @Transactional(readOnly = true)
+    public ReceiverLoginResponse login(String username, String password) {
+        Receiver receiver = receiverRepository.findByUsername(username)
+                .orElseThrow(() -> new RuntimeException("Invalid username or password"));
+
+        // Verify password
+        if (!passwordEncoder.matches(password, receiver.getPassword())) {
+            throw new RuntimeException("Invalid username or password");
+        }
+
+        // Check if receiver is active
+        if (receiver.getStatus() != ReceiverStatus.ACTIVE) {
+            throw new RuntimeException("Receiver account is not active. Status: " + receiver.getStatus());
+        }
+
+        // Generate JWT token
+        String token = jwtUtil.generateReceiverToken(receiver.getUsername());
+
+        // Map to login response
+        ReceiverLoginResponse response = new ReceiverLoginResponse();
+        response.setToken(token);
+        response.setTokenType("Bearer");
+        response.setId(receiver.getId());
+        response.setCompanyName(receiver.getCompanyName());
+        response.setManagerName(receiver.getManagerName());
+        response.setUsername(receiver.getUsername());
+        response.setReceiverPhone(receiver.getReceiverPhone());
+        response.setAccountNumber(receiver.getAccountNumber());
+        response.setStatus(receiver.getStatus());
+        response.setEmail(receiver.getEmail());
+        response.setAddress(receiver.getAddress());
+        response.setDescription(receiver.getDescription());
+        response.setWalletBalance(receiver.getWalletBalance());
+        response.setTotalReceived(receiver.getTotalReceived());
+        response.setLastTransactionDate(receiver.getLastTransactionDate());
+        response.setCreatedAt(receiver.getCreatedAt());
+        response.setUpdatedAt(receiver.getUpdatedAt());
+
+        return response;
     }
 
     @Transactional(readOnly = true)

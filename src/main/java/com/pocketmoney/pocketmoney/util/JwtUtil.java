@@ -31,6 +31,33 @@ public class JwtUtil {
         return Jwts.builder()
                 .subject(username)
                 .claim("role", role.name())
+                .claim("type", "AUTH")
+                .issuedAt(now)
+                .expiration(expiryDate)
+                .signWith(getSigningKey())
+                .compact();
+    }
+
+    public String generateReceiverToken(String username) {
+        Date now = new Date();
+        Date expiryDate = new Date(now.getTime() + expiration);
+
+        return Jwts.builder()
+                .subject(username)
+                .claim("type", "RECEIVER")
+                .issuedAt(now)
+                .expiration(expiryDate)
+                .signWith(getSigningKey())
+                .compact();
+    }
+
+    public String generateUserToken(String phoneNumber) {
+        Date now = new Date();
+        Date expiryDate = new Date(now.getTime() + expiration);
+
+        return Jwts.builder()
+                .subject(phoneNumber)
+                .claim("type", "USER")
                 .issuedAt(now)
                 .expiration(expiryDate)
                 .signWith(getSigningKey())

@@ -2,10 +2,12 @@ package com.pocketmoney.pocketmoney.service;
 
 import com.pocketmoney.pocketmoney.dto.CreateUserRequest;
 import com.pocketmoney.pocketmoney.dto.UpdateUserRequest;
+import com.pocketmoney.pocketmoney.dto.UserLoginResponse;
 import com.pocketmoney.pocketmoney.dto.UserResponse;
 import com.pocketmoney.pocketmoney.entity.User;
 import com.pocketmoney.pocketmoney.entity.UserStatus;
 import com.pocketmoney.pocketmoney.repository.UserRepository;
+import com.pocketmoney.pocketmoney.util.JwtUtil;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -21,10 +23,12 @@ public class UserService {
 
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
+    private final JwtUtil jwtUtil;
 
-    public UserService(UserRepository userRepository, PasswordEncoder passwordEncoder) {
+    public UserService(UserRepository userRepository, PasswordEncoder passwordEncoder, JwtUtil jwtUtil) {
         this.userRepository = userRepository;
         this.passwordEncoder = passwordEncoder;
+        this.jwtUtil = jwtUtil;
     }
 
     public UserResponse createUser(CreateUserRequest request) {
@@ -66,6 +70,44 @@ public class UserService {
 
         User savedUser = userRepository.save(user);
         return mapToResponse(savedUser);
+    }
+
+    @Transactional(readOnly = true)
+    public UserLoginResponse login(String phoneNumber, String pin) {
+        User user = userRepository.findByPhoneNumber(phoneNumber)
+                .orElseThrow(() -> new RuntimeException("Invalid phone number or PIN"));
+
+        // Verify PIN
+        if (!passwordEncoder.matches(pin, user.getPin())) {
+            throw new RuntimeException("Invalid phone number or PIN");
+        }
+
+        // Check if user is active
+        if (user.getStatus() != UserStatus.ACTIVE) {
+            throw new RuntimeException("User account is not active. Status: " + user.getStatus());
+        }
+
+        // Generate JWT token
+        String token = jwtUtil.generateUserToken(user.getPhoneNumber());
+
+        // Map to login response
+        UserLoginResponse response = new UserLoginResponse();
+        response.setToken(token);
+        response.setTokenType("Bearer");
+        response.setId(user.getId());
+        response.setFullNames(user.getFullNames());
+        response.setPhoneNumber(user.getPhoneNumber());
+        response.setEmail(user.getEmail());
+        response.setIsAssignedNfcCard(user.getIsAssignedNfcCard());
+        response.setNfcCardId(user.getNfcCardId());
+        response.setAmountOnCard(user.getAmountOnCard());
+        response.setAmountRemaining(user.getAmountRemaining());
+        response.setStatus(user.getStatus());
+        response.setLastTransactionDate(user.getLastTransactionDate());
+        response.setCreatedAt(user.getCreatedAt());
+        response.setUpdatedAt(user.getUpdatedAt());
+
+        return response;
     }
 
     @Transactional(readOnly = true)

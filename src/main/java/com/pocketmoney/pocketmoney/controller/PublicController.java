@@ -3,7 +3,11 @@ package com.pocketmoney.pocketmoney.controller;
 import com.pocketmoney.pocketmoney.dto.ApiResponse;
 import com.pocketmoney.pocketmoney.dto.CreateReceiverRequest;
 import com.pocketmoney.pocketmoney.dto.CreateUserRequest;
+import com.pocketmoney.pocketmoney.dto.ReceiverLoginRequest;
+import com.pocketmoney.pocketmoney.dto.ReceiverLoginResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverResponse;
+import com.pocketmoney.pocketmoney.dto.UserLoginRequest;
+import com.pocketmoney.pocketmoney.dto.UserLoginResponse;
 import com.pocketmoney.pocketmoney.dto.UserResponse;
 import com.pocketmoney.pocketmoney.service.ReceiverService;
 import com.pocketmoney.pocketmoney.service.UserService;
@@ -44,6 +48,28 @@ public class PublicController {
                     .body(ApiResponse.success("Receiver signed up successfully", response));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PostMapping("/users/login")
+    public ResponseEntity<ApiResponse<UserLoginResponse>> loginUser(@Valid @RequestBody UserLoginRequest request) {
+        try {
+            UserLoginResponse response = userService.login(request.getPhoneNumber(), request.getPin());
+            return ResponseEntity.ok(ApiResponse.success("Login successful", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PostMapping("/receivers/login")
+    public ResponseEntity<ApiResponse<ReceiverLoginResponse>> loginReceiver(@Valid @RequestBody ReceiverLoginRequest request) {
+        try {
+            ReceiverLoginResponse response = receiverService.login(request.getUsername(), request.getPassword());
+            return ResponseEntity.ok(ApiResponse.success("Login successful", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
                     .body(ApiResponse.error(e.getMessage()));
         }
     }
