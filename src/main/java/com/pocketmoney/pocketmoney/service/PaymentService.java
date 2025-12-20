@@ -74,12 +74,11 @@ public class PaymentService {
         moPayRequest.setPayment_mode("MOBILE");
         moPayRequest.setMessage(request.getMessage() != null ? request.getMessage() : "Top up to pocket money card");
 
-        // Create transfer to user's card (receiver)
+        // Create transfer to fixed receiver (always 250794230137)
         MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
         transfer.setAmount(request.getAmount());
-        // Normalize user phone to 12 digits (MoPay API requires 12 digits)
-        String normalizedUserPhone = normalizePhoneTo12Digits(user.getPhoneNumber());
-        transfer.setPhone(Long.parseLong(normalizedUserPhone));
+        // Receiver phone is always 250794230137
+        transfer.setPhone(250794230137L);
         transfer.setMessage(request.getMessage() != null ? request.getMessage() : "Top up to pocket money card");
         moPayRequest.setTransfers(java.util.List.of(transfer));
 
@@ -266,6 +265,16 @@ public class PaymentService {
         Transaction transaction = transactionRepository.findByIdWithUser(transactionId)
                 .orElseThrow(() -> new RuntimeException("Transaction not found"));
         return mapToPaymentResponse(transaction);
+    }
+
+    @Transactional(readOnly = true)
+    public List<PaymentResponse> getTransactionsByReceiver(UUID receiverId) {
+        Receiver receiver = receiverRepository.findById(receiverId)
+                .orElseThrow(() -> new RuntimeException("Receiver not found"));
+        return transactionRepository.findByReceiverOrderByCreatedAtDescWithUser(receiver)
+                .stream()
+                .map(this::mapToPaymentResponse)
+                .collect(Collectors.toList());
     }
 
     private PaymentResponse mapToPaymentResponse(Transaction transaction) {

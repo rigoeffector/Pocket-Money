@@ -1,5 +1,6 @@
 package com.pocketmoney.pocketmoney.repository;
 
+import com.pocketmoney.pocketmoney.entity.Receiver;
 import com.pocketmoney.pocketmoney.entity.Transaction;
 import com.pocketmoney.pocketmoney.entity.User;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -28,5 +29,8 @@ public interface TransactionRepository extends JpaRepository<Transaction, UUID> 
 
     @Query("SELECT t FROM Transaction t JOIN FETCH t.user WHERE t.mopayTransactionId = :mopayTransactionId")
     Optional<Transaction> findByMopayTransactionIdWithUser(@Param("mopayTransactionId") String mopayTransactionId);
+
+    @Query("SELECT t FROM Transaction t JOIN FETCH t.user WHERE t.receiver = :receiver ORDER BY t.createdAt DESC")
+    List<Transaction> findByReceiverOrderByCreatedAtDescWithUser(@Param("receiver") Receiver receiver);
 }
 

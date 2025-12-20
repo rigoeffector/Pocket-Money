@@ -95,5 +95,16 @@ public class PaymentController {
         }
     }
 
+    @GetMapping("/transactions/receiver/{receiverId}")
+    public ResponseEntity<ApiResponse<List<PaymentResponse>>> getTransactionsByReceiver(@PathVariable UUID receiverId) {
+        try {
+            List<PaymentResponse> transactions = paymentService.getTransactionsByReceiver(receiverId);
+            return ResponseEntity.ok(ApiResponse.success("Receiver transactions retrieved successfully", transactions));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
 }
 
