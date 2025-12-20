@@ -144,6 +144,22 @@ public class ReceiverService {
         return mapToResponse(updatedReceiver);
     }
 
+    public ReceiverResponse suspendReceiver(UUID id) {
+        Receiver receiver = receiverRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Receiver not found with id: " + id));
+        receiver.setStatus(ReceiverStatus.SUSPENDED);
+        Receiver updatedReceiver = receiverRepository.save(receiver);
+        return mapToResponse(updatedReceiver);
+    }
+
+    public ReceiverResponse activateReceiver(UUID id) {
+        Receiver receiver = receiverRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Receiver not found with id: " + id));
+        receiver.setStatus(ReceiverStatus.ACTIVE);
+        Receiver updatedReceiver = receiverRepository.save(receiver);
+        return mapToResponse(updatedReceiver);
+    }
+
     public void deleteReceiver(UUID id) {
         if (!receiverRepository.existsById(id)) {
             throw new RuntimeException("Receiver not found with id: " + id);

@@ -7,6 +7,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
 import java.util.UUID;
 
 @RestController
@@ -60,6 +61,34 @@ public class PaymentController {
         try {
             PaymentResponse response = paymentService.checkTransactionStatus(mopayTransactionId);
             return ResponseEntity.ok(ApiResponse.success("Transaction status retrieved successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @GetMapping("/transactions")
+    public ResponseEntity<ApiResponse<List<PaymentResponse>>> getAllTransactions() {
+        List<PaymentResponse> transactions = paymentService.getAllTransactions();
+        return ResponseEntity.ok(ApiResponse.success("Transactions retrieved successfully", transactions));
+    }
+
+    @GetMapping("/transactions/{transactionId}")
+    public ResponseEntity<ApiResponse<PaymentResponse>> getTransactionById(@PathVariable UUID transactionId) {
+        try {
+            PaymentResponse response = paymentService.getTransactionById(transactionId);
+            return ResponseEntity.ok(ApiResponse.success("Transaction retrieved successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @GetMapping("/transactions/user/{userId}")
+    public ResponseEntity<ApiResponse<List<PaymentResponse>>> getTransactionsByUser(@PathVariable UUID userId) {
+        try {
+            List<PaymentResponse> transactions = paymentService.getTransactionsByUser(userId);
+            return ResponseEntity.ok(ApiResponse.success("User transactions retrieved successfully", transactions));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)
                     .body(ApiResponse.error(e.getMessage()));

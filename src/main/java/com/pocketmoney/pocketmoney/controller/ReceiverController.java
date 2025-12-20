@@ -90,6 +90,28 @@ public class ReceiverController {
         }
     }
 
+    @PutMapping("/{id}/suspend")
+    public ResponseEntity<ApiResponse<ReceiverResponse>> suspendReceiver(@PathVariable UUID id) {
+        try {
+            ReceiverResponse response = receiverService.suspendReceiver(id);
+            return ResponseEntity.ok(ApiResponse.success("Receiver suspended successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PutMapping("/{id}/activate")
+    public ResponseEntity<ApiResponse<ReceiverResponse>> activateReceiver(@PathVariable UUID id) {
+        try {
+            ReceiverResponse response = receiverService.activateReceiver(id);
+            return ResponseEntity.ok(ApiResponse.success("Receiver activated successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
     @DeleteMapping("/{id}")
     public ResponseEntity<ApiResponse<Void>> deleteReceiver(@PathVariable UUID id) {
         try {

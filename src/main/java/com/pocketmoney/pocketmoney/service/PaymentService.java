@@ -18,7 +18,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Service
 @Transactional
@@ -190,7 +192,7 @@ public class PaymentService {
     }
 
     public PaymentResponse checkTransactionStatus(String mopayTransactionId) {
-        Transaction transaction = transactionRepository.findByMopayTransactionId(mopayTransactionId)
+        Transaction transaction = transactionRepository.findByMopayTransactionIdWithUser(mopayTransactionId)
                 .orElseThrow(() -> new RuntimeException("Transaction not found"));
 
         // Check status with MoPay
@@ -241,10 +243,36 @@ public class PaymentService {
         return mapToPaymentResponse(transaction);
     }
 
+    @Transactional(readOnly = true)
+    public List<PaymentResponse> getAllTransactions() {
+        return transactionRepository.findAllWithUser()
+                .stream()
+                .map(this::mapToPaymentResponse)
+                .collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public List<PaymentResponse> getTransactionsByUser(UUID userId) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        return transactionRepository.findByUserOrderByCreatedAtDescWithUser(user)
+                .stream()
+                .map(this::mapToPaymentResponse)
+                .collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public PaymentResponse getTransactionById(UUID transactionId) {
+        Transaction transaction = transactionRepository.findByIdWithUser(transactionId)
+                .orElseThrow(() -> new RuntimeException("Transaction not found"));
+        return mapToPaymentResponse(transaction);
+    }
+
     private PaymentResponse mapToPaymentResponse(Transaction transaction) {
         PaymentResponse response = new PaymentResponse();
         response.setId(transaction.getId());
         response.setUserId(transaction.getUser().getId());
+        response.setUser(mapToUserResponse(transaction.getUser())); // Include full user information
         response.setTransactionType(transaction.getTransactionType());
         response.setAmount(transaction.getAmount());
         response.setMopayTransactionId(transaction.getMopayTransactionId());
@@ -252,6 +280,23 @@ public class PaymentService {
         response.setBalanceBefore(transaction.getBalanceBefore());
         response.setBalanceAfter(transaction.getBalanceAfter());
         response.setCreatedAt(transaction.getCreatedAt());
+        return response;
+    }
+
+    private UserResponse mapToUserResponse(User user) {
+        UserResponse response = new UserResponse();
+        response.setId(user.getId());
+        response.setFullNames(user.getFullNames());
+        response.setPhoneNumber(user.getPhoneNumber());
+        response.setEmail(user.getEmail());
+        response.setIsAssignedNfcCard(user.getIsAssignedNfcCard());
+        response.setNfcCardId(user.getNfcCardId());
+        response.setAmountOnCard(user.getAmountOnCard());
+        response.setAmountRemaining(user.getAmountRemaining());
+        response.setStatus(user.getStatus());
+        response.setLastTransactionDate(user.getLastTransactionDate());
+        response.setCreatedAt(user.getCreatedAt());
+        response.setUpdatedAt(user.getUpdatedAt());
         return response;
     }
 }

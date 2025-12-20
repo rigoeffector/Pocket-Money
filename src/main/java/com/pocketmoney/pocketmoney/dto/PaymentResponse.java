@@ -16,6 +16,7 @@ import java.util.UUID;
 public class PaymentResponse {
     private UUID id;
     private UUID userId;
+    private UserResponse user; // Full user information
     private TransactionType transactionType;
     private BigDecimal amount;
     private String mopayTransactionId;
