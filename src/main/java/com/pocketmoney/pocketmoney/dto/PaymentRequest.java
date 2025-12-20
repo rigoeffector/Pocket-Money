@@ -25,8 +25,8 @@ public class PaymentRequest {
     @Pattern(regexp = "^[0-9]{4}$", message = "PIN must be exactly 4 digits")
     private String pin;
 
-    @NotBlank(message = "Receiver phone number is required")
-    private String receiverPhone;
+    @NotNull(message = "Receiver ID is required")
+    private UUID receiverId;
 
     private String message;
 }

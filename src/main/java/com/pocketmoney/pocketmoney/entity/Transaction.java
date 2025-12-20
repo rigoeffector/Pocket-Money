@@ -31,6 +31,10 @@ public class Transaction {
     @JoinColumn(name = "payment_category_id")
     private PaymentCategory paymentCategory;
 
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "receiver_id")
+    private Receiver receiver;
+
     @Column(name = "transaction_type", nullable = false)
     @Enumerated(EnumType.STRING)
     private TransactionType transactionType;
@@ -38,17 +42,17 @@ public class Transaction {
     @Column(name = "amount", nullable = false, precision = 19, scale = 2)
     private BigDecimal amount;
 
-    @Column(name = "mopay_transaction_id")
+    @Column(name = "mopay_transaction_id", length = 500)
     private String mopayTransactionId;
 
     @Column(name = "status", nullable = false)
     @Enumerated(EnumType.STRING)
     private TransactionStatus status = TransactionStatus.PENDING;
 
-    @Column(name = "phone_number")
+    @Column(name = "phone_number", length = 50)
     private String phoneNumber;
 
-    @Column(name = "message")
+    @Column(name = "message", length = 1000)
     private String message;
 
     @Column(name = "balance_before", precision = 19, scale = 2)

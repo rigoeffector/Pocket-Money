@@ -2,11 +2,14 @@ package com.pocketmoney.pocketmoney.service;
 
 import com.pocketmoney.pocketmoney.dto.*;
 import com.pocketmoney.pocketmoney.entity.PaymentCategory;
+import com.pocketmoney.pocketmoney.entity.Receiver;
+import com.pocketmoney.pocketmoney.entity.ReceiverStatus;
 import com.pocketmoney.pocketmoney.entity.Transaction;
 import com.pocketmoney.pocketmoney.entity.TransactionStatus;
 import com.pocketmoney.pocketmoney.entity.TransactionType;
 import com.pocketmoney.pocketmoney.entity.User;
 import com.pocketmoney.pocketmoney.repository.PaymentCategoryRepository;
+import com.pocketmoney.pocketmoney.repository.ReceiverRepository;
 import com.pocketmoney.pocketmoney.repository.TransactionRepository;
 import com.pocketmoney.pocketmoney.repository.UserRepository;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -24,16 +27,35 @@ public class PaymentService {
     private final UserRepository userRepository;
     private final TransactionRepository transactionRepository;
     private final PaymentCategoryRepository paymentCategoryRepository;
+    private final ReceiverRepository receiverRepository;
     private final MoPayService moPayService;
     private final PasswordEncoder passwordEncoder;
 
     public PaymentService(UserRepository userRepository, TransactionRepository transactionRepository,
-                         PaymentCategoryRepository paymentCategoryRepository, MoPayService moPayService, PasswordEncoder passwordEncoder) {
+                         PaymentCategoryRepository paymentCategoryRepository, ReceiverRepository receiverRepository,
+                         MoPayService moPayService, PasswordEncoder passwordEncoder) {
         this.userRepository = userRepository;
         this.transactionRepository = transactionRepository;
         this.paymentCategoryRepository = paymentCategoryRepository;
+        this.receiverRepository = receiverRepository;
         this.moPayService = moPayService;
         this.passwordEncoder = passwordEncoder;
+    }
+
+    // Helper method to normalize phone number to 12 digits (250XXXXXXXXX format)
+    private String normalizePhoneTo12Digits(String phone) {
+        String cleaned = phone.replaceAll("[^0-9]", "");
+        if (cleaned.startsWith("250") && cleaned.length() == 12) {
+            return cleaned;
+        } else if (cleaned.startsWith("0") && cleaned.length() == 10) {
+            return "250" + cleaned.substring(1);
+        } else if (cleaned.length() == 9) {
+            return "250" + cleaned;
+        } else if (cleaned.startsWith("250")) {
+            return cleaned; // Already has country code, use as is
+        } else {
+            return "250" + cleaned; // Default: add country code
+        }
     }
 
     public PaymentResponse topUp(UUID userId, TopUpRequest request) {
@@ -44,14 +66,27 @@ public class PaymentService {
         MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
         moPayRequest.setAmount(request.getAmount());
         moPayRequest.setCurrency("RWF");
-        moPayRequest.setPhone(request.getPhone());
+        // Normalize phone to 12 digits and convert to Long (MoPay API requires 12 digits)
+        String normalizedPayerPhone = normalizePhoneTo12Digits(request.getPhone());
+        moPayRequest.setPhone(Long.parseLong(normalizedPayerPhone));
         moPayRequest.setPayment_mode("MOBILE");
         moPayRequest.setMessage(request.getMessage() != null ? request.getMessage() : "Top up to pocket money card");
 
         // Create transfer to user's card (receiver)
         MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
         transfer.setAmount(request.getAmount());
-        transfer.setPhone(user.getPhoneNumber()); // Receiver: user's phone number
+        // Convert phone string to Long and ensure 12 digits (MoPay API requires 12 digits)
+        String userPhone = user.getPhoneNumber().replaceAll("[^0-9]", ""); // Remove any non-digit characters
+        // Normalize phone number to 12 digits - if it starts with 250, use as is, otherwise add 250 prefix
+        if (!userPhone.startsWith("250")) {
+            // If phone doesn't start with 250, add it (remove leading 0 if present)
+            if (userPhone.startsWith("0")) {
+                userPhone = "250" + userPhone.substring(1);
+            } else {
+                userPhone = "250" + userPhone;
+            }
+        }
+        transfer.setPhone(Long.parseLong(userPhone));
         transfer.setMessage(request.getMessage() != null ? request.getMessage() : "Top up to pocket money card");
         moPayRequest.setTransfers(java.util.List.of(transfer));
 
@@ -66,25 +101,25 @@ public class PaymentService {
         transaction.setPhoneNumber(request.getPhone());
         transaction.setMessage(moPayRequest.getMessage());
         transaction.setBalanceBefore(user.getAmountRemaining());
-        transaction.setStatus(TransactionStatus.PENDING);
 
-        if (moPayResponse != null && moPayResponse.isSuccess() && moPayResponse.getTransaction_id() != null) {
-            transaction.setMopayTransactionId(moPayResponse.getTransaction_id());
-            
-            // Update user balance
-            BigDecimal newBalance = user.getAmountRemaining().add(request.getAmount());
-            user.setAmountRemaining(newBalance);
-            user.setAmountOnCard(user.getAmountOnCard().add(request.getAmount()));
-            user.setLastTransactionDate(LocalDateTime.now());
-            userRepository.save(user);
-
-            transaction.setBalanceAfter(newBalance);
-            transaction.setStatus(TransactionStatus.SUCCESS);
+        // Check MoPay response - API returns status 201 and transactionId on success
+        String transactionId = moPayResponse != null ? moPayResponse.getTransactionId() : null;
+        if (moPayResponse != null && moPayResponse.getStatus() != null && moPayResponse.getStatus() == 201 
+            && transactionId != null) {
+            // Successfully initiated - store transaction ID and set as PENDING
+            transaction.setMopayTransactionId(transactionId);
+            transaction.setStatus(TransactionStatus.PENDING);
         } else {
+            // Initiation failed - mark as FAILED with error message
             transaction.setStatus(TransactionStatus.FAILED);
-            transaction.setMessage(moPayResponse != null ? moPayResponse.getMessage() : "Payment initiation failed");
+            String errorMessage = moPayResponse != null && moPayResponse.getMessage() != null 
+                ? moPayResponse.getMessage() 
+                : "Payment initiation failed - status: " + (moPayResponse != null ? moPayResponse.getStatus() : "null") 
+                    + ", transactionId: " + transactionId;
+            transaction.setMessage(errorMessage);
         }
 
+        // DO NOT update balance here - balance will be updated when status is checked and becomes SUCCESS
         Transaction savedTransaction = transactionRepository.save(transaction);
         return mapToPaymentResponse(savedTransaction);
     }
@@ -101,6 +136,14 @@ public class PaymentService {
             throw new RuntimeException("Payment category is not active");
         }
 
+        // Verify receiver exists and is active
+        Receiver receiver = receiverRepository.findById(request.getReceiverId())
+                .orElseThrow(() -> new RuntimeException("Receiver not found"));
+
+        if (receiver.getStatus() != ReceiverStatus.ACTIVE) {
+            throw new RuntimeException("Receiver is not active. Status: " + receiver.getStatus());
+        }
+
         // Verify PIN
         if (!passwordEncoder.matches(request.getPin(), user.getPin())) {
             throw new RuntimeException("Invalid PIN");
@@ -111,50 +154,33 @@ public class PaymentService {
             throw new RuntimeException("Insufficient balance. Available: " + user.getAmountRemaining());
         }
 
-        // Create MoPay initiate request
-        MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
-        moPayRequest.setAmount(request.getAmount());
-        moPayRequest.setCurrency("RWF");
-        moPayRequest.setPhone(user.getPhoneNumber());
-        moPayRequest.setPayment_mode("MOBILE");
-        moPayRequest.setMessage(request.getMessage() != null ? request.getMessage() : "Payment from pocket money card");
+        // For PAYMENT: Direct internal transfer (no MoPay integration needed)
+        // Deduct from user balance
+        BigDecimal userNewBalance = user.getAmountRemaining().subtract(request.getAmount());
+        user.setAmountRemaining(userNewBalance);
+        user.setLastTransactionDate(LocalDateTime.now());
+        userRepository.save(user);
 
-        // Create transfer to receiver
-        MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
-        transfer.setAmount(request.getAmount());
-        transfer.setPhone(request.getReceiverPhone());
-        transfer.setMessage(request.getMessage() != null ? request.getMessage() : "Payment from pocket money");
-        moPayRequest.setTransfers(java.util.List.of(transfer));
+        // Credit receiver's wallet
+        BigDecimal receiverNewBalance = receiver.getWalletBalance().add(request.getAmount());
+        BigDecimal receiverNewTotal = receiver.getTotalReceived().add(request.getAmount());
+        receiver.setWalletBalance(receiverNewBalance);
+        receiver.setTotalReceived(receiverNewTotal);
+        receiver.setLastTransactionDate(LocalDateTime.now());
+        receiverRepository.save(receiver);
 
-        // Initiate payment with MoPay
-        MoPayResponse moPayResponse = moPayService.initiatePayment(moPayRequest);
-
-        // Create transaction record
+        // Create transaction record - PAYMENT is immediate (no MoPay, internal transfer)
         Transaction transaction = new Transaction();
         transaction.setUser(user);
         transaction.setPaymentCategory(paymentCategory);
+        transaction.setReceiver(receiver);
         transaction.setTransactionType(TransactionType.PAYMENT);
         transaction.setAmount(request.getAmount());
-        transaction.setPhoneNumber(request.getReceiverPhone());
-        transaction.setMessage(moPayRequest.getMessage());
-        transaction.setBalanceBefore(user.getAmountRemaining());
-        transaction.setStatus(TransactionStatus.PENDING);
-
-        if (moPayResponse != null && moPayResponse.isSuccess() && moPayResponse.getTransaction_id() != null) {
-            transaction.setMopayTransactionId(moPayResponse.getTransaction_id());
-            
-            // Deduct from user balance
-            BigDecimal newBalance = user.getAmountRemaining().subtract(request.getAmount());
-            user.setAmountRemaining(newBalance);
-            user.setLastTransactionDate(LocalDateTime.now());
-            userRepository.save(user);
-
-            transaction.setBalanceAfter(newBalance);
-            transaction.setStatus(TransactionStatus.SUCCESS);
-        } else {
-            transaction.setStatus(TransactionStatus.FAILED);
-            transaction.setMessage(moPayResponse != null ? moPayResponse.getMessage() : "Payment initiation failed");
-        }
+        transaction.setPhoneNumber(receiver.getReceiverPhone());
+        transaction.setMessage(request.getMessage() != null ? request.getMessage() : "Payment from pocket money card");
+        transaction.setBalanceBefore(user.getAmountRemaining().add(request.getAmount())); // Balance before deduction
+        transaction.setBalanceAfter(userNewBalance);
+        transaction.setStatus(TransactionStatus.SUCCESS); // Immediate success for internal transfers
 
         Transaction savedTransaction = transactionRepository.save(transaction);
         return mapToPaymentResponse(savedTransaction);
@@ -179,12 +205,44 @@ public class PaymentService {
         // Check status with MoPay
         MoPayResponse moPayResponse = moPayService.checkTransactionStatus(mopayTransactionId);
 
-        if (moPayResponse != null && moPayResponse.isSuccess()) {
+        if (moPayResponse != null) {
+            // Check-status endpoint might return status in different formats
+            // Try to determine if transaction is successful
+            String mopayStatus = null;
+            if (moPayResponse.getStatus() != null) {
+                // If status is a string field, use it directly
+                mopayStatus = moPayResponse.getStatus().toString();
+            } else if (moPayResponse.getTransaction_id() != null) {
+                // Sometimes status might be in transaction_id field
+                mopayStatus = moPayResponse.getTransaction_id();
+            }
+            
             // Update transaction status based on MoPay response
-            if ("SUCCESS".equalsIgnoreCase(moPayResponse.getStatus())) {
+            if ("SUCCESS".equalsIgnoreCase(mopayStatus) || "200".equals(mopayStatus) 
+                || (moPayResponse.getSuccess() != null && moPayResponse.getSuccess())) {
+                // Only update balance if transitioning from PENDING to SUCCESS
+                if (transaction.getStatus() == TransactionStatus.PENDING) {
+                    User user = transaction.getUser();
+                    
+                    if (transaction.getTransactionType() == TransactionType.TOP_UP) {
+                        // Add to user balance for top-ups
+                        BigDecimal newBalance = user.getAmountRemaining().add(transaction.getAmount());
+                        user.setAmountRemaining(newBalance);
+                        user.setAmountOnCard(user.getAmountOnCard().add(transaction.getAmount()));
+                        transaction.setBalanceAfter(newBalance);
+                    }
+                    
+                    user.setLastTransactionDate(LocalDateTime.now());
+                    userRepository.save(user);
+                }
+                
                 transaction.setStatus(TransactionStatus.SUCCESS);
-            } else if ("FAILED".equalsIgnoreCase(moPayResponse.getStatus())) {
+            } else if ("FAILED".equalsIgnoreCase(mopayStatus) || "400".equals(mopayStatus) 
+                || "500".equals(mopayStatus) || (moPayResponse.getSuccess() != null && !moPayResponse.getSuccess())) {
                 transaction.setStatus(TransactionStatus.FAILED);
+                if (moPayResponse.getMessage() != null) {
+                    transaction.setMessage(moPayResponse.getMessage());
+                }
             }
             transactionRepository.save(transaction);
         }

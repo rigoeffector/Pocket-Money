@@ -2,6 +2,8 @@ package com.pocketmoney.pocketmoney.service;
 
 import com.pocketmoney.pocketmoney.dto.MoPayInitiateRequest;
 import com.pocketmoney.pocketmoney.dto.MoPayResponse;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
@@ -9,6 +11,8 @@ import org.springframework.web.client.RestTemplate;
 
 @Service
 public class MoPayService {
+
+    private static final Logger logger = LoggerFactory.getLogger(MoPayService.class);
 
     @Value("${mopay.api.url:https://api.mopay.rw}")
     private String mopayApiUrl;
@@ -25,6 +29,9 @@ public class MoPayService {
     public MoPayResponse initiatePayment(MoPayInitiateRequest request) {
         String url = mopayApiUrl + "/initiate-payment";
         
+        logger.info("Initiating MoPay payment to: {}", url);
+        logger.debug("MoPay request: {}", request);
+        
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.setBearerAuth(mopayApiToken);
@@ -38,8 +45,22 @@ public class MoPayService {
                     entity,
                     MoPayResponse.class
             );
-            return response.getBody();
+            
+            MoPayResponse responseBody = response.getBody();
+            logger.info("MoPay response status: {}", response.getStatusCode());
+            logger.debug("MoPay response body: {}", responseBody);
+            
+            if (responseBody == null) {
+                logger.warn("MoPay returned null response body");
+                MoPayResponse errorResponse = new MoPayResponse();
+                errorResponse.setSuccess(false);
+                errorResponse.setMessage("MoPay returned null response");
+                return errorResponse;
+            }
+            
+            return responseBody;
         } catch (Exception e) {
+            logger.error("Error initiating MoPay payment: ", e);
             MoPayResponse errorResponse = new MoPayResponse();
             errorResponse.setSuccess(false);
             errorResponse.setMessage("Failed to initiate payment: " + e.getMessage());
