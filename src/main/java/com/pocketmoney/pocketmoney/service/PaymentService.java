@@ -155,18 +155,19 @@ public class PaymentService {
         }
 
         // Check balance
-        if (user.getAmountRemaining().compareTo(request.getAmount()) < 0) {
-            throw new RuntimeException("Insufficient balance. Available: " + user.getAmountRemaining());
+        BigDecimal balanceBefore = user.getAmountRemaining();
+        if (balanceBefore.compareTo(request.getAmount()) < 0) {
+            throw new RuntimeException("Insufficient balance. Available: " + balanceBefore);
         }
 
         // For PAYMENT: Direct internal transfer (no MoPay integration needed)
-        // Deduct from user balance
-        BigDecimal userNewBalance = user.getAmountRemaining().subtract(request.getAmount());
+        // Deduct from user's card balance (amountRemaining)
+        BigDecimal userNewBalance = balanceBefore.subtract(request.getAmount());
         user.setAmountRemaining(userNewBalance);
         user.setLastTransactionDate(LocalDateTime.now());
         userRepository.save(user);
 
-        // Credit receiver's wallet
+        // Credit receiver's wallet balance
         BigDecimal receiverNewBalance = receiver.getWalletBalance().add(request.getAmount());
         BigDecimal receiverNewTotal = receiver.getTotalReceived().add(request.getAmount());
         receiver.setWalletBalance(receiverNewBalance);
@@ -183,7 +184,7 @@ public class PaymentService {
         transaction.setAmount(request.getAmount());
         transaction.setPhoneNumber(receiver.getReceiverPhone());
         transaction.setMessage(request.getMessage() != null ? request.getMessage() : "Payment from pocket money card");
-        transaction.setBalanceBefore(user.getAmountRemaining().add(request.getAmount())); // Balance before deduction
+        transaction.setBalanceBefore(balanceBefore); // Balance before deduction
         transaction.setBalanceAfter(userNewBalance);
         transaction.setStatus(TransactionStatus.SUCCESS); // Immediate success for internal transfers
 

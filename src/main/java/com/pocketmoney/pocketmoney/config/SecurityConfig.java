@@ -40,7 +40,11 @@ public class SecurityConfig {
                 "http://localhost:5173",
                 "http://localhost:3000",
                 "http://localhost:3001",
-                "http://192.168.1.4:8383"
+                "http://192.168.1.4:8383",
+                "http://64.23.203.249:8383",
+                "http://64.23.203.249",
+                "http://164.92.89.74:8383",
+                "http://164.92.89.74"
         ));
         configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"));
         configuration.setAllowedHeaders(List.of("*"));
