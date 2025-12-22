@@ -35,7 +35,7 @@ public class User {
     @Column(name = "is_assigned_nfc_card", nullable = false)
     private Boolean isAssignedNfcCard = false;
 
-    @Column(name = "nfc_card_id")
+    @Column(name = "nfc_card_id", unique = true)
     private String nfcCardId;
 
     @Column(name = "amount_on_card", nullable = false, precision = 19, scale = 2)

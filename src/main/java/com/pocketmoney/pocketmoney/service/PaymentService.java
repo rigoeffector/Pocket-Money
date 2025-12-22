@@ -8,6 +8,7 @@ import com.pocketmoney.pocketmoney.entity.Transaction;
 import com.pocketmoney.pocketmoney.entity.TransactionStatus;
 import com.pocketmoney.pocketmoney.entity.TransactionType;
 import com.pocketmoney.pocketmoney.entity.User;
+import com.pocketmoney.pocketmoney.entity.UserStatus;
 import com.pocketmoney.pocketmoney.repository.PaymentCategoryRepository;
 import com.pocketmoney.pocketmoney.repository.ReceiverRepository;
 import com.pocketmoney.pocketmoney.repository.TransactionRepository;
@@ -60,9 +61,21 @@ public class PaymentService {
         }
     }
 
-    public PaymentResponse topUp(UUID userId, TopUpRequest request) {
-        User user = userRepository.findById(userId)
-                .orElseThrow(() -> new RuntimeException("User not found"));
+    public PaymentResponse topUp(String nfcCardId, TopUpRequest request) {
+        // Find user by NFC card ID
+        User user = userRepository.findByNfcCardId(nfcCardId)
+                .orElseThrow(() -> new RuntimeException("User not found with NFC card ID: " + nfcCardId));
+        
+        // Verify that the user has this NFC card assigned
+        if (user.getIsAssignedNfcCard() == null || !user.getIsAssignedNfcCard() 
+                || user.getNfcCardId() == null || !user.getNfcCardId().equals(nfcCardId)) {
+            throw new RuntimeException("NFC card is not assigned to this user");
+        }
+        
+        // Verify user is active
+        if (user.getStatus() != UserStatus.ACTIVE) {
+            throw new RuntimeException("User account is not active. Status: " + user.getStatus());
+        }
 
         // Create MoPay initiate request
         MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();

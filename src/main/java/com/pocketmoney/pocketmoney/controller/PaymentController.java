@@ -2,6 +2,7 @@ package com.pocketmoney.pocketmoney.controller;
 
 import com.pocketmoney.pocketmoney.dto.*;
 import com.pocketmoney.pocketmoney.service.PaymentService;
+import com.pocketmoney.pocketmoney.service.UserService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -15,16 +16,18 @@ import java.util.UUID;
 public class PaymentController {
 
     private final PaymentService paymentService;
+    private final UserService userService;
 
-    public PaymentController(PaymentService paymentService) {
+    public PaymentController(PaymentService paymentService, UserService userService) {
         this.paymentService = paymentService;
+        this.userService = userService;
     }
 
     @PostMapping("/top-up")
     public ResponseEntity<ApiResponse<PaymentResponse>> topUp(
             @Valid @RequestBody TopUpRequest request) {
         try {
-            PaymentResponse response = paymentService.topUp(request.getUserId(), request);
+            PaymentResponse response = paymentService.topUp(request.getNfcCardId(), request);
             return ResponseEntity.ok(ApiResponse.success("Top-up initiated successfully", response));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
@@ -100,6 +103,17 @@ public class PaymentController {
         try {
             List<PaymentResponse> transactions = paymentService.getTransactionsByReceiver(receiverId);
             return ResponseEntity.ok(ApiResponse.success("Receiver transactions retrieved successfully", transactions));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @GetMapping("/cards/{nfcCardId}")
+    public ResponseEntity<ApiResponse<CardDetailsResponse>> getCardDetails(@PathVariable String nfcCardId) {
+        try {
+            CardDetailsResponse response = userService.getCardDetailsByNfcCardId(nfcCardId);
+            return ResponseEntity.ok(ApiResponse.success("Card details retrieved successfully", response));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)
                     .body(ApiResponse.error(e.getMessage()));

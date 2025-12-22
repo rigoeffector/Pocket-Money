@@ -1,6 +1,7 @@
 package com.pocketmoney.pocketmoney.service;
 
 import com.pocketmoney.pocketmoney.dto.AssignNfcCardRequest;
+import com.pocketmoney.pocketmoney.dto.CardDetailsResponse;
 import com.pocketmoney.pocketmoney.dto.CreateUserRequest;
 import com.pocketmoney.pocketmoney.dto.NfcCardResponse;
 import com.pocketmoney.pocketmoney.dto.UpdateUserRequest;
@@ -49,7 +50,7 @@ public class UserService {
         // Check if NFC card ID already exists (if provided)
         if (request.getNfcCardId() != null && !request.getNfcCardId().isEmpty()) {
             if (userRepository.existsByNfcCardId(request.getNfcCardId())) {
-                throw new RuntimeException("NFC card ID already exists");
+                throw new RuntimeException("NFC card ID already assigned to another user. Each NFC card can only be assigned to one user.");
             }
         }
 
@@ -142,6 +143,26 @@ public class UserService {
         return mapToResponse(user);
     }
 
+    @Transactional(readOnly = true)
+    public CardDetailsResponse getCardDetailsByNfcCardId(String nfcCardId) {
+        User user = userRepository.findByNfcCardId(nfcCardId)
+                .orElseThrow(() -> new RuntimeException("Card not found with NFC card ID: " + nfcCardId));
+        
+        CardDetailsResponse response = new CardDetailsResponse();
+        response.setNfcCardId(user.getNfcCardId());
+        response.setUserId(user.getId());
+        response.setFullNames(user.getFullNames());
+        response.setPhoneNumber(user.getPhoneNumber());
+        response.setEmail(user.getEmail());
+        response.setIsAssignedNfcCard(user.getIsAssignedNfcCard());
+        response.setAmountOnCard(user.getAmountOnCard());
+        response.setAmountRemaining(user.getAmountRemaining());
+        response.setStatus(user.getStatus());
+        response.setLastTransactionDate(user.getLastTransactionDate());
+        response.setCardAssignedAt(user.getUpdatedAt()); // Using updatedAt as approximation for card assignment
+        return response;
+    }
+
     public UserResponse updateUser(UUID id, UpdateUserRequest request) {
         User user = userRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("User not found with id: " + id));
@@ -152,8 +173,15 @@ public class UserService {
         }
 
         if (request.getPhoneNumber() != null && !request.getPhoneNumber().equals(user.getPhoneNumber())) {
+            // Restrict phone number change if user has an NFC card assigned
+            if (user.getIsAssignedNfcCard() != null && user.getIsAssignedNfcCard() 
+                    && user.getNfcCardId() != null && !user.getNfcCardId().isEmpty()) {
+                throw new RuntimeException("Cannot change phone number. User has an NFC card assigned. Phone number must remain the same for the same card.");
+            }
+            
+            // Check if phone number already exists (one phone number per user)
             if (userRepository.existsByPhoneNumber(request.getPhoneNumber())) {
-                throw new RuntimeException("Phone number already exists");
+                throw new RuntimeException("Phone number already exists. Each phone number can only belong to one user.");
             }
             user.setPhoneNumber(request.getPhoneNumber());
         }
@@ -174,7 +202,7 @@ public class UserService {
         if (request.getNfcCardId() != null) {
             if (!request.getNfcCardId().isEmpty() && !request.getNfcCardId().equals(user.getNfcCardId())) {
                 if (userRepository.existsByNfcCardId(request.getNfcCardId())) {
-                    throw new RuntimeException("NFC card ID already exists");
+                    throw new RuntimeException("NFC card ID already assigned to another user. Each NFC card can only be assigned to one user.");
                 }
             }
             user.setNfcCardId(request.getNfcCardId());
@@ -268,7 +296,7 @@ public class UserService {
         if (userRepository.existsByNfcCardId(request.getNfcCardId())) {
             // Check if it's already assigned to this user
             if (user.getNfcCardId() == null || !user.getNfcCardId().equals(request.getNfcCardId())) {
-                throw new RuntimeException("NFC card ID already assigned to another user");
+                throw new RuntimeException("NFC card ID already assigned to another user. Each NFC card can only be assigned to one user.");
             }
         }
 
