@@ -38,26 +38,52 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             return;
         }
 
-        // Extract token directly (no Bearer prefix required)
-        String token = authHeader;
+        // Use the Authorization header value directly as the token (no prefix)
+        String token = authHeader.trim();
 
         try {
             if (jwtUtil.validateToken(token)) {
-                String username = jwtUtil.getUsernameFromToken(token);
-                String role = jwtUtil.getRoleFromToken(token).name();
+                String subject = jwtUtil.getUsernameFromToken(token);
+                String tokenType = jwtUtil.getTypeFromToken(token);
+                
+                String authority;
+                if ("AUTH".equals(tokenType)) {
+                    // AUTH tokens have a role claim
+                    try {
+                        String role = jwtUtil.getRoleFromToken(token).name();
+                        authority = "ROLE_" + role;
+                    } catch (Exception e) {
+                        logger.debug("Error getting role from AUTH token: {}", e.getMessage());
+                        filterChain.doFilter(request, response);
+                        return;
+                    }
+                } else if ("USER".equals(tokenType)) {
+                    authority = "ROLE_USER";
+                } else if ("RECEIVER".equals(tokenType)) {
+                    authority = "ROLE_RECEIVER";
+                } else {
+                    // Unknown token type
+                    logger.debug("Unknown token type: {}", tokenType);
+                    filterChain.doFilter(request, response);
+                    return;
+                }
+
+                logger.debug("Token validated - Type: {}, Authority: {}, Subject: {}", tokenType, authority, subject);
 
                 // Create authentication token
-                List<SimpleGrantedAuthority> authorities = List.of(new SimpleGrantedAuthority("ROLE_" + role));
+                List<SimpleGrantedAuthority> authorities = List.of(new SimpleGrantedAuthority(authority));
                 UsernamePasswordAuthenticationToken authentication = 
-                    new UsernamePasswordAuthenticationToken(username, null, authorities);
+                    new UsernamePasswordAuthenticationToken(subject, null, authorities);
                 authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
 
                 // Set authentication in security context
                 SecurityContextHolder.getContext().setAuthentication(authentication);
+            } else {
+                logger.debug("Token validation failed for request: {}", request.getRequestURI());
             }
         } catch (Exception e) {
             // Token is invalid, continue without authentication
-            logger.debug("Invalid JWT token: {}", e.getMessage());
+            logger.debug("Invalid JWT token for request {}: {}", request.getRequestURI(), e.getMessage());
         }
 
         filterChain.doFilter(request, response);

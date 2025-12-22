@@ -17,6 +17,7 @@ public class PaymentResponse {
     private UUID id;
     private UUID userId;
     private UserResponse user; // Full user information
+    private PaymentCategoryResponse paymentCategory; // Category information
     private TransactionType transactionType;
     private BigDecimal amount;
     private String mopayTransactionId;

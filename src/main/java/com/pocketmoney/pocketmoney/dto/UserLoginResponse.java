@@ -15,6 +15,7 @@ import java.util.UUID;
 public class UserLoginResponse {
     private String token;
     private String tokenType = "Bearer";
+    private String userType = "USER";
     private UUID id;
     private String fullNames;
     private String phoneNumber;

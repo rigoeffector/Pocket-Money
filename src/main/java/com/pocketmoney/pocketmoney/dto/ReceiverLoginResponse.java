@@ -15,6 +15,7 @@ import java.util.UUID;
 public class ReceiverLoginResponse {
     private String token;
     private String tokenType = "Bearer";
+    private String userType = "MERCHANT";
     private UUID id;
     private String companyName;
     private String managerName;

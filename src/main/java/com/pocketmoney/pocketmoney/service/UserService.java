@@ -1,6 +1,8 @@
 package com.pocketmoney.pocketmoney.service;
 
+import com.pocketmoney.pocketmoney.dto.AssignNfcCardRequest;
 import com.pocketmoney.pocketmoney.dto.CreateUserRequest;
+import com.pocketmoney.pocketmoney.dto.NfcCardResponse;
 import com.pocketmoney.pocketmoney.dto.UpdateUserRequest;
 import com.pocketmoney.pocketmoney.dto.UserLoginResponse;
 import com.pocketmoney.pocketmoney.dto.UserResponse;
@@ -94,6 +96,7 @@ public class UserService {
         UserLoginResponse response = new UserLoginResponse();
         response.setToken(token);
         response.setTokenType("Bearer");
+        response.setUserType("USER");
         response.setId(user.getId());
         response.setFullNames(user.getFullNames());
         response.setPhoneNumber(user.getPhoneNumber());
@@ -241,6 +244,50 @@ public class UserService {
         // Reset PIN without verification (admin action)
         user.setPin(passwordEncoder.encode(newPin));
         userRepository.save(user);
+    }
+
+    @Transactional(readOnly = true)
+    public NfcCardResponse getMyNfcCard(UUID userId) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new RuntimeException("User not found with id: " + userId));
+
+        NfcCardResponse response = new NfcCardResponse();
+        response.setUserId(user.getId());
+        response.setFullNames(user.getFullNames());
+        response.setPhoneNumber(user.getPhoneNumber());
+        response.setIsAssignedNfcCard(user.getIsAssignedNfcCard());
+        response.setNfcCardId(user.getNfcCardId());
+        return response;
+    }
+
+    public NfcCardResponse assignNfcCard(UUID userId, AssignNfcCardRequest request) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new RuntimeException("User not found with id: " + userId));
+
+        // Check if NFC card ID already exists (assigned to another user)
+        if (userRepository.existsByNfcCardId(request.getNfcCardId())) {
+            // Check if it's already assigned to this user
+            if (user.getNfcCardId() == null || !user.getNfcCardId().equals(request.getNfcCardId())) {
+                throw new RuntimeException("NFC card ID already assigned to another user");
+            }
+        }
+
+        // Assign NFC card
+        user.setNfcCardId(request.getNfcCardId());
+        user.setIsAssignedNfcCard(true);
+
+        // Create/Update PIN
+        user.setPin(passwordEncoder.encode(request.getPin()));
+
+        User savedUser = userRepository.save(user);
+
+        NfcCardResponse response = new NfcCardResponse();
+        response.setUserId(savedUser.getId());
+        response.setFullNames(savedUser.getFullNames());
+        response.setPhoneNumber(savedUser.getPhoneNumber());
+        response.setIsAssignedNfcCard(savedUser.getIsAssignedNfcCard());
+        response.setNfcCardId(savedUser.getNfcCardId());
+        return response;
     }
 
     private UserResponse mapToResponse(User user) {

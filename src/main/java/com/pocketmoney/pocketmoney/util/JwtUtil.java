@@ -82,6 +82,15 @@ public class JwtUtil {
         return Role.valueOf(claims.get("role", String.class));
     }
 
+    public String getTypeFromToken(String token) {
+        Claims claims = Jwts.parser()
+                .verifyWith(getSigningKey())
+                .build()
+                .parseSignedClaims(token)
+                .getPayload();
+        return claims.get("type", String.class);
+    }
+
     public boolean validateToken(String token) {
         try {
             Jwts.parser()

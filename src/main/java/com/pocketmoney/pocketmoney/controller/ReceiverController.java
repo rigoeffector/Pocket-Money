@@ -2,6 +2,7 @@ package com.pocketmoney.pocketmoney.controller;
 
 import com.pocketmoney.pocketmoney.dto.ApiResponse;
 import com.pocketmoney.pocketmoney.dto.CreateReceiverRequest;
+import com.pocketmoney.pocketmoney.dto.ReceiverAnalyticsResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverWalletResponse;
 import com.pocketmoney.pocketmoney.dto.ResetPasswordRequest;
@@ -9,10 +10,12 @@ import com.pocketmoney.pocketmoney.dto.UpdateReceiverRequest;
 import com.pocketmoney.pocketmoney.entity.ReceiverStatus;
 import com.pocketmoney.pocketmoney.service.ReceiverService;
 import jakarta.validation.Valid;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
 
@@ -144,6 +147,22 @@ public class ReceiverController {
             return ResponseEntity.ok(ApiResponse.success("Receiver password reset successfully", null));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @GetMapping("/{id}/analytics")
+    public ResponseEntity<ApiResponse<ReceiverAnalyticsResponse>> getReceiverAnalytics(
+            @PathVariable UUID id,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate,
+            @RequestParam(required = false) Integer year,
+            @RequestParam(required = false) UUID categoryId) {
+        try {
+            ReceiverAnalyticsResponse response = receiverService.getReceiverAnalytics(id, fromDate, toDate, year, categoryId);
+            return ResponseEntity.ok(ApiResponse.success("Receiver analytics retrieved successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
                     .body(ApiResponse.error(e.getMessage()));
         }
     }

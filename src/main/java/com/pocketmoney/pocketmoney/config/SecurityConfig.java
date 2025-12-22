@@ -60,6 +60,10 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/api/auth/**").permitAll()
                         .requestMatchers("/api/public/**").permitAll()
+                        .requestMatchers("/api/payments/top-up").hasAnyRole("USER", "ADMIN")
+                        .requestMatchers("/api/payments/transactions/receiver/**").hasAnyRole("RECEIVER", "ADMIN")
+                        .requestMatchers("/api/receivers/*/wallet").hasAnyRole("RECEIVER", "ADMIN")
+                        .requestMatchers("/api/users/*/nfc-card/**").hasAnyRole("USER", "ADMIN")
                         .anyRequest().authenticated()
                 )
                 .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);

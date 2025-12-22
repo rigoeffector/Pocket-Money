@@ -133,5 +133,29 @@ public class UserController {
                     .body(ApiResponse.error(e.getMessage()));
         }
     }
+
+    @GetMapping("/{id}/nfc-card")
+    public ResponseEntity<ApiResponse<NfcCardResponse>> getMyNfcCard(@PathVariable UUID id) {
+        try {
+            NfcCardResponse response = userService.getMyNfcCard(id);
+            return ResponseEntity.ok(ApiResponse.success("NFC card retrieved successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PostMapping("/{id}/nfc-card/assign")
+    public ResponseEntity<ApiResponse<NfcCardResponse>> assignNfcCard(
+            @PathVariable UUID id,
+            @Valid @RequestBody AssignNfcCardRequest request) {
+        try {
+            NfcCardResponse response = userService.assignNfcCard(id, request);
+            return ResponseEntity.ok(ApiResponse.success("NFC card assigned successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
 }
 

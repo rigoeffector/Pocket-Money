@@ -282,6 +282,10 @@ public class PaymentService {
         response.setId(transaction.getId());
         response.setUserId(transaction.getUser().getId());
         response.setUser(mapToUserResponse(transaction.getUser())); // Include full user information
+        // Include payment category if it exists (for PAYMENT transactions)
+        if (transaction.getPaymentCategory() != null) {
+            response.setPaymentCategory(mapToPaymentCategoryResponse(transaction.getPaymentCategory()));
+        }
         response.setTransactionType(transaction.getTransactionType());
         response.setAmount(transaction.getAmount());
         response.setMopayTransactionId(transaction.getMopayTransactionId());
@@ -289,6 +293,17 @@ public class PaymentService {
         response.setBalanceBefore(transaction.getBalanceBefore());
         response.setBalanceAfter(transaction.getBalanceAfter());
         response.setCreatedAt(transaction.getCreatedAt());
+        return response;
+    }
+
+    private PaymentCategoryResponse mapToPaymentCategoryResponse(PaymentCategory paymentCategory) {
+        PaymentCategoryResponse response = new PaymentCategoryResponse();
+        response.setId(paymentCategory.getId());
+        response.setName(paymentCategory.getName());
+        response.setDescription(paymentCategory.getDescription());
+        response.setIsActive(paymentCategory.getIsActive());
+        response.setCreatedAt(paymentCategory.getCreatedAt());
+        response.setUpdatedAt(paymentCategory.getUpdatedAt());
         return response;
     }
 

@@ -1,19 +1,28 @@
 package com.pocketmoney.pocketmoney.service;
 
 import com.pocketmoney.pocketmoney.dto.CreateReceiverRequest;
+import com.pocketmoney.pocketmoney.dto.ReceiverAnalyticsResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverLoginResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverWalletResponse;
 import com.pocketmoney.pocketmoney.dto.UpdateReceiverRequest;
+import com.pocketmoney.pocketmoney.entity.PaymentCategory;
 import com.pocketmoney.pocketmoney.entity.Receiver;
 import com.pocketmoney.pocketmoney.entity.ReceiverStatus;
 import com.pocketmoney.pocketmoney.repository.ReceiverRepository;
+import com.pocketmoney.pocketmoney.repository.TransactionRepository;
 import com.pocketmoney.pocketmoney.util.JwtUtil;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.LocalDateTime;
+import java.time.Year;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -22,11 +31,14 @@ import java.util.stream.Collectors;
 public class ReceiverService {
 
     private final ReceiverRepository receiverRepository;
+    private final TransactionRepository transactionRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtUtil jwtUtil;
 
-    public ReceiverService(ReceiverRepository receiverRepository, PasswordEncoder passwordEncoder, JwtUtil jwtUtil) {
+    public ReceiverService(ReceiverRepository receiverRepository, TransactionRepository transactionRepository, 
+                          PasswordEncoder passwordEncoder, JwtUtil jwtUtil) {
         this.receiverRepository = receiverRepository;
+        this.transactionRepository = transactionRepository;
         this.passwordEncoder = passwordEncoder;
         this.jwtUtil = jwtUtil;
     }
@@ -202,6 +214,7 @@ public class ReceiverService {
         ReceiverLoginResponse response = new ReceiverLoginResponse();
         response.setToken(token);
         response.setTokenType("Bearer");
+        response.setUserType("MERCHANT");
         response.setId(receiver.getId());
         response.setCompanyName(receiver.getCompanyName());
         response.setManagerName(receiver.getManagerName());
@@ -233,6 +246,84 @@ public class ReceiverService {
         response.setWalletBalance(receiver.getWalletBalance());
         response.setTotalReceived(receiver.getTotalReceived());
         response.setLastTransactionDate(receiver.getLastTransactionDate());
+        return response;
+    }
+
+    @Transactional(readOnly = true)
+    public ReceiverAnalyticsResponse getReceiverAnalytics(UUID receiverId, LocalDateTime fromDate, LocalDateTime toDate, 
+                                                          Integer year, UUID categoryId) {
+        Receiver receiver = receiverRepository.findById(receiverId)
+                .orElseThrow(() -> new RuntimeException("Receiver not found with id: " + receiverId));
+
+        // Handle year filter - if year is provided, set fromDate and toDate for that year
+        if (year != null) {
+            fromDate = LocalDateTime.of(year, 1, 1, 0, 0);
+            toDate = LocalDateTime.of(year, 12, 31, 23, 59, 59);
+        }
+
+        // If no date range is provided, use all time
+        if (fromDate == null && toDate == null) {
+            fromDate = null; // Will be handled as IS NULL in queries
+            toDate = null;
+        } else {
+            // Set time to start/end of day if only date is provided
+            if (fromDate != null && fromDate.getHour() == 0 && fromDate.getMinute() == 0 && fromDate.getSecond() == 0) {
+                fromDate = fromDate.withHour(0).withMinute(0).withSecond(0);
+            }
+            if (toDate != null) {
+                toDate = toDate.withHour(23).withMinute(59).withSecond(59);
+            }
+        }
+
+        ReceiverAnalyticsResponse response = new ReceiverAnalyticsResponse();
+        response.setReceiverId(receiver.getId());
+        response.setCompanyName(receiver.getCompanyName());
+        response.setFromDate(fromDate);
+        response.setToDate(toDate);
+
+        // Calculate metrics
+        BigDecimal totalPaid = transactionRepository.sumSuccessfulAmountByReceiverAndFilters(receiverId, fromDate, toDate, categoryId);
+        response.setTotalPaid(totalPaid != null ? totalPaid : BigDecimal.ZERO);
+
+        Long totalTransactions = transactionRepository.countAllTransactionsByReceiverAndFilters(receiverId, fromDate, toDate, categoryId);
+        response.setTotalTransactions(totalTransactions != null ? totalTransactions : 0L);
+
+        Long approvedTransactions = transactionRepository.countSuccessfulTransactionsByReceiverAndFilters(receiverId, fromDate, toDate, categoryId);
+        response.setApprovedTransactions(approvedTransactions != null ? approvedTransactions : 0L);
+
+        Long totalUsers = transactionRepository.countDistinctUsersByReceiverAndDateRange(receiverId, fromDate, toDate);
+        response.setTotalUsers(totalUsers != null ? totalUsers : 0L);
+
+        // Calculate average transaction amount
+        if (approvedTransactions != null && approvedTransactions > 0 && totalPaid != null) {
+            BigDecimal average = totalPaid.divide(BigDecimal.valueOf(approvedTransactions), 2, RoundingMode.HALF_UP);
+            response.setAverageTransactionAmount(average);
+        } else {
+            response.setAverageTransactionAmount(BigDecimal.ZERO);
+        }
+
+        // Get category breakdown (only if categoryId is not specified)
+        if (categoryId == null) {
+            List<Object[]> categoryBreakdown = transactionRepository.getCategoryBreakdownByReceiver(receiverId, fromDate, toDate);
+            Map<UUID, ReceiverAnalyticsResponse.CategoryAnalytics> categoryMap = new HashMap<>();
+            
+            for (Object[] row : categoryBreakdown) {
+                PaymentCategory category = (PaymentCategory) row[0];
+                Long count = ((Number) row[1]).longValue();
+                BigDecimal amount = (BigDecimal) row[2];
+                
+                ReceiverAnalyticsResponse.CategoryAnalytics categoryAnalytics = new ReceiverAnalyticsResponse.CategoryAnalytics();
+                categoryAnalytics.setCategoryId(category.getId());
+                categoryAnalytics.setCategoryName(category.getName());
+                categoryAnalytics.setTransactionCount(count);
+                categoryAnalytics.setTotalAmount(amount);
+                
+                categoryMap.put(category.getId(), categoryAnalytics);
+            }
+            
+            response.setCategoryBreakdown(categoryMap);
+        }
+
         return response;
     }
 
