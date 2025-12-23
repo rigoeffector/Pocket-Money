@@ -35,21 +35,39 @@ public class UserService {
     }
 
     public UserResponse createUser(CreateUserRequest request) {
-        // Check if phone number already exists
-        if (userRepository.existsByPhoneNumber(request.getPhoneNumber())) {
+        // Normalize phone number: remove + and other non-digit characters, keep only digits
+        String normalizedPhone = request.getPhoneNumber().replaceAll("[^0-9]", "");
+        
+        // Check if phone number already exists (using normalized phone)
+        if (userRepository.existsByPhoneNumber(normalizedPhone)) {
             throw new RuntimeException("Phone number already exists");
         }
 
-        // Check if email already exists (if provided)
-        if (request.getEmail() != null && !request.getEmail().isEmpty()) {
-            if (userRepository.existsByEmail(request.getEmail())) {
+        // Normalize email: convert empty/blank strings to null
+        String email = (request.getEmail() != null && !request.getEmail().trim().isEmpty()) 
+                ? request.getEmail().trim() 
+                : null;
+
+        // Validate email format if provided
+        if (email != null) {
+            String emailRegex = "^[A-Za-z0-9+_.-]+@([A-Za-z0-9.-]+\\.[A-Za-z]{2,})$";
+            if (!email.matches(emailRegex)) {
+                throw new RuntimeException("Invalid email format");
+            }
+            // Check if email already exists
+            if (userRepository.existsByEmail(email)) {
                 throw new RuntimeException("Email already exists");
             }
         }
 
+        // Normalize NFC card ID: convert empty/blank strings to null
+        String nfcCardId = (request.getNfcCardId() != null && !request.getNfcCardId().trim().isEmpty()) 
+                ? request.getNfcCardId().trim() 
+                : null;
+
         // Check if NFC card ID already exists (if provided)
-        if (request.getNfcCardId() != null && !request.getNfcCardId().isEmpty()) {
-            if (userRepository.existsByNfcCardId(request.getNfcCardId())) {
+        if (nfcCardId != null) {
+            if (userRepository.existsByNfcCardId(nfcCardId)) {
                 throw new RuntimeException("NFC card ID already assigned to another user. Each NFC card can only be assigned to one user.");
             }
         }
@@ -57,16 +75,16 @@ public class UserService {
         // Create new user
         User user = new User();
         user.setFullNames(request.getFullNames());
-        user.setPhoneNumber(request.getPhoneNumber());
-        user.setEmail(request.getEmail());
+        user.setPhoneNumber(normalizedPhone);
+        user.setEmail(email);
         user.setPin(passwordEncoder.encode(request.getPin())); // Hash the PIN
         user.setAmountOnCard(request.getInitialAmount() != null ? request.getInitialAmount() : BigDecimal.ZERO);
         user.setAmountRemaining(request.getInitialAmount() != null ? request.getInitialAmount() : BigDecimal.ZERO);
         
         // Set NFC card if provided
-        if (request.getNfcCardId() != null && !request.getNfcCardId().isEmpty()) {
+        if (nfcCardId != null) {
             user.setIsAssignedNfcCard(true);
-            user.setNfcCardId(request.getNfcCardId());
+            user.setNfcCardId(nfcCardId);
         } else {
             user.setIsAssignedNfcCard(false);
         }
@@ -77,7 +95,10 @@ public class UserService {
 
     @Transactional(readOnly = true)
     public UserLoginResponse login(String phoneNumber, String pin) {
-        User user = userRepository.findByPhoneNumber(phoneNumber)
+        // Normalize phone number: remove + and other non-digit characters, keep only digits
+        String normalizedPhone = phoneNumber.replaceAll("[^0-9]", "");
+        
+        User user = userRepository.findByPhoneNumber(normalizedPhone)
                 .orElseThrow(() -> new RuntimeException("Invalid phone number or PIN"));
 
         // Verify PIN
@@ -172,18 +193,23 @@ public class UserService {
             user.setFullNames(request.getFullNames());
         }
 
-        if (request.getPhoneNumber() != null && !request.getPhoneNumber().equals(user.getPhoneNumber())) {
-            // Restrict phone number change if user has an NFC card assigned
-            if (user.getIsAssignedNfcCard() != null && user.getIsAssignedNfcCard() 
-                    && user.getNfcCardId() != null && !user.getNfcCardId().isEmpty()) {
-                throw new RuntimeException("Cannot change phone number. User has an NFC card assigned. Phone number must remain the same for the same card.");
-            }
+        if (request.getPhoneNumber() != null) {
+            // Normalize phone number: remove + and other non-digit characters, keep only digits
+            String normalizedPhone = request.getPhoneNumber().replaceAll("[^0-9]", "");
             
-            // Check if phone number already exists (one phone number per user)
-            if (userRepository.existsByPhoneNumber(request.getPhoneNumber())) {
-                throw new RuntimeException("Phone number already exists. Each phone number can only belong to one user.");
+            if (!normalizedPhone.equals(user.getPhoneNumber())) {
+                // Restrict phone number change if user has an NFC card assigned
+                if (user.getIsAssignedNfcCard() != null && user.getIsAssignedNfcCard() 
+                        && user.getNfcCardId() != null && !user.getNfcCardId().isEmpty()) {
+                    throw new RuntimeException("Cannot change phone number. User has an NFC card assigned. Phone number must remain the same for the same card.");
+                }
+                
+                // Check if phone number already exists (one phone number per user)
+                if (userRepository.existsByPhoneNumber(normalizedPhone)) {
+                    throw new RuntimeException("Phone number already exists. Each phone number can only belong to one user.");
+                }
+                user.setPhoneNumber(normalizedPhone);
             }
-            user.setPhoneNumber(request.getPhoneNumber());
         }
 
         if (request.getEmail() != null) {

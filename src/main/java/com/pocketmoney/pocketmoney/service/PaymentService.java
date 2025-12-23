@@ -129,6 +129,33 @@ public class PaymentService {
         return mapToPaymentResponse(savedTransaction);
     }
 
+    public PaymentResponse topUpByPhone(TopUpByPhoneRequest request) {
+        // Find user by NFC card ID (this will fetch user information including phone number)
+        User user = userRepository.findByNfcCardId(request.getNfcCardId())
+                .orElseThrow(() -> new RuntimeException("User not found with NFC card ID: " + request.getNfcCardId()));
+        
+        // Verify that the user has this NFC card assigned
+        if (user.getIsAssignedNfcCard() == null || !user.getIsAssignedNfcCard() 
+                || user.getNfcCardId() == null || !user.getNfcCardId().equals(request.getNfcCardId())) {
+            throw new RuntimeException("NFC card is not assigned to this user");
+        }
+        
+        // Verify user is active
+        if (user.getStatus() != UserStatus.ACTIVE) {
+            throw new RuntimeException("User account is not active. Status: " + user.getStatus());
+        }
+
+        // Create a TopUpRequest to reuse existing topUp logic
+        TopUpRequest topUpRequest = new TopUpRequest();
+        topUpRequest.setNfcCardId(request.getNfcCardId());
+        topUpRequest.setAmount(request.getAmount());
+        topUpRequest.setPhone(request.getPayerPhone());
+        topUpRequest.setMessage(request.getMessage() != null ? request.getMessage() : "Top up to pocket money card");
+
+        // Use the existing topUp method with the NFC card ID
+        return topUp(request.getNfcCardId(), topUpRequest);
+    }
+
     public PaymentResponse makePayment(UUID userId, PaymentRequest request) {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new RuntimeException("User not found"));

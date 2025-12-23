@@ -2,7 +2,6 @@ package com.pocketmoney.pocketmoney.dto;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
-import jakarta.validation.constraints.Email;
 import lombok.Data;
 
 import java.math.BigDecimal;
@@ -13,10 +12,10 @@ public class CreateUserRequest {
     private String fullNames;
 
     @NotBlank(message = "Phone number is required")
-    @Pattern(regexp = "^[0-9]{10,15}$", message = "Phone number must be between 10 and 15 digits")
+    @Pattern(regexp = "^\\+?[0-9]{10,15}$", message = "Phone number must be between 10 and 15 digits (may include + prefix)")
     private String phoneNumber;
 
-    @Email(message = "Email should be valid")
+    // Email is optional - validation is done in service layer
     private String email;
 
     @NotBlank(message = "PIN is required")

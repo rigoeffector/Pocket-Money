@@ -35,6 +35,18 @@ public class PaymentController {
         }
     }
 
+    @PostMapping("/top-up-by-phone")
+    public ResponseEntity<ApiResponse<PaymentResponse>> topUpByPhone(
+            @Valid @RequestBody TopUpByPhoneRequest request) {
+        try {
+            PaymentResponse response = paymentService.topUpByPhone(request);
+            return ResponseEntity.ok(ApiResponse.success("Top-up initiated successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
     @PostMapping("/pay")
     public ResponseEntity<ApiResponse<PaymentResponse>> makePayment(
             @Valid @RequestBody PaymentRequest request) {

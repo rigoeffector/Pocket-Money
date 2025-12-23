@@ -15,6 +15,7 @@ public interface ReceiverRepository extends JpaRepository<Receiver, UUID> {
     Optional<Receiver> findByReceiverPhone(String receiverPhone);
     boolean existsByUsername(String username);
     boolean existsByReceiverPhone(String receiverPhone);
+    boolean existsByEmail(String email);
     List<Receiver> findByStatus(ReceiverStatus status);
     List<Receiver> findByStatusIn(List<ReceiverStatus> statuses);
 }

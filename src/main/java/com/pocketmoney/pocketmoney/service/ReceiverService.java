@@ -6,7 +6,6 @@ import com.pocketmoney.pocketmoney.dto.ReceiverLoginResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverWalletResponse;
 import com.pocketmoney.pocketmoney.dto.UpdateReceiverRequest;
-import com.pocketmoney.pocketmoney.entity.PaymentCategory;
 import com.pocketmoney.pocketmoney.entity.Receiver;
 import com.pocketmoney.pocketmoney.entity.ReceiverStatus;
 import com.pocketmoney.pocketmoney.repository.ReceiverRepository;
@@ -19,7 +18,6 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDateTime;
-import java.time.Year;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -54,6 +52,23 @@ public class ReceiverService {
             throw new RuntimeException("Receiver phone number already exists: " + request.getReceiverPhone());
         }
 
+        // Normalize email: convert empty/blank strings to null
+        String email = (request.getEmail() != null && !request.getEmail().trim().isEmpty()) 
+                ? request.getEmail().trim() 
+                : null;
+
+        // Validate email format if provided
+        if (email != null) {
+            String emailRegex = "^[A-Za-z0-9+_.-]+@([A-Za-z0-9.-]+\\.[A-Za-z]{2,})$";
+            if (!email.matches(emailRegex)) {
+                throw new RuntimeException("Invalid email format");
+            }
+            // Check if email already exists
+            if (receiverRepository.existsByEmail(email)) {
+                throw new RuntimeException("Email already exists: " + email);
+            }
+        }
+
         Receiver receiver = new Receiver();
         receiver.setCompanyName(request.getCompanyName());
         receiver.setManagerName(request.getManagerName());
@@ -62,7 +77,7 @@ public class ReceiverService {
         receiver.setReceiverPhone(request.getReceiverPhone());
         receiver.setAccountNumber(request.getAccountNumber());
         receiver.setStatus(request.getStatus() != null ? request.getStatus() : ReceiverStatus.NOT_ACTIVE);
-        receiver.setEmail(request.getEmail());
+        receiver.setEmail(email);
         receiver.setAddress(request.getAddress());
         receiver.setDescription(request.getDescription());
 
@@ -308,17 +323,18 @@ public class ReceiverService {
             Map<UUID, ReceiverAnalyticsResponse.CategoryAnalytics> categoryMap = new HashMap<>();
             
             for (Object[] row : categoryBreakdown) {
-                PaymentCategory category = (PaymentCategory) row[0];
-                Long count = ((Number) row[1]).longValue();
-                BigDecimal amount = (BigDecimal) row[2];
+                UUID categoryIdValue = (UUID) row[0];
+                String categoryName = (String) row[1];
+                Long count = ((Number) row[2]).longValue();
+                BigDecimal amount = (BigDecimal) row[3];
                 
                 ReceiverAnalyticsResponse.CategoryAnalytics categoryAnalytics = new ReceiverAnalyticsResponse.CategoryAnalytics();
-                categoryAnalytics.setCategoryId(category.getId());
-                categoryAnalytics.setCategoryName(category.getName());
+                categoryAnalytics.setCategoryId(categoryIdValue);
+                categoryAnalytics.setCategoryName(categoryName);
                 categoryAnalytics.setTransactionCount(count);
                 categoryAnalytics.setTotalAmount(amount);
                 
-                categoryMap.put(category.getId(), categoryAnalytics);
+                categoryMap.put(categoryIdValue, categoryAnalytics);
             }
             
             response.setCategoryBreakdown(categoryMap);

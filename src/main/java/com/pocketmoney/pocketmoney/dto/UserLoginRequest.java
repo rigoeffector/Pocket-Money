@@ -7,7 +7,7 @@ import lombok.Data;
 @Data
 public class UserLoginRequest {
     @NotBlank(message = "Phone number is required")
-    @Pattern(regexp = "^[0-9]{10,15}$", message = "Phone number must be between 10 and 15 digits")
+    @Pattern(regexp = "^\\+?[0-9]{10,15}$", message = "Phone number must be between 10 and 15 digits (may include + prefix)")
     private String phoneNumber;
 
     @NotBlank(message = "PIN is required")

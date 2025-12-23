@@ -1,10 +1,7 @@
 package com.pocketmoney.pocketmoney.repository;
 
-import com.pocketmoney.pocketmoney.entity.PaymentCategory;
 import com.pocketmoney.pocketmoney.entity.Receiver;
 import com.pocketmoney.pocketmoney.entity.Transaction;
-import com.pocketmoney.pocketmoney.entity.TransactionStatus;
-import com.pocketmoney.pocketmoney.entity.TransactionType;
 import com.pocketmoney.pocketmoney.entity.User;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
@@ -41,8 +38,10 @@ public interface TransactionRepository extends JpaRepository<Transaction, UUID> 
     @Query("SELECT COUNT(DISTINCT t.user) FROM Transaction t WHERE t.receiver.id = :receiverId AND t.transactionType = 'PAYMENT'")
     Long countDistinctUsersByReceiver(@Param("receiverId") UUID receiverId);
 
-    @Query("SELECT COUNT(DISTINCT t.user) FROM Transaction t WHERE t.receiver.id = :receiverId AND t.transactionType = 'PAYMENT' " +
-           "AND (:fromDate IS NULL OR t.createdAt >= :fromDate) AND (:toDate IS NULL OR t.createdAt <= :toDate)")
+    @Query(value = "SELECT COUNT(DISTINCT t.user_id) FROM transactions t WHERE t.receiver_id = :receiverId " +
+           "AND t.transaction_type = 'PAYMENT' " +
+           "AND (:fromDate IS NULL OR t.created_at >= CAST(:fromDate AS timestamp)) " +
+           "AND (:toDate IS NULL OR t.created_at <= CAST(:toDate AS timestamp))", nativeQuery = true)
     Long countDistinctUsersByReceiverAndDateRange(@Param("receiverId") UUID receiverId, 
                                                    @Param("fromDate") LocalDateTime fromDate, 
                                                    @Param("toDate") LocalDateTime toDate);
@@ -50,9 +49,11 @@ public interface TransactionRepository extends JpaRepository<Transaction, UUID> 
     @Query("SELECT SUM(t.amount) FROM Transaction t WHERE t.receiver.id = :receiverId AND t.transactionType = 'PAYMENT' AND t.status = 'SUCCESS'")
     java.math.BigDecimal sumSuccessfulAmountByReceiver(@Param("receiverId") UUID receiverId);
 
-    @Query("SELECT SUM(t.amount) FROM Transaction t WHERE t.receiver.id = :receiverId AND t.transactionType = 'PAYMENT' AND t.status = 'SUCCESS' " +
-           "AND (:fromDate IS NULL OR t.createdAt >= :fromDate) AND (:toDate IS NULL OR t.createdAt <= :toDate) " +
-           "AND (:categoryId IS NULL OR t.paymentCategory.id = :categoryId)")
+    @Query(value = "SELECT COALESCE(SUM(t.amount), 0) FROM transactions t WHERE t.receiver_id = :receiverId " +
+           "AND t.transaction_type = 'PAYMENT' AND t.status = 'SUCCESS' " +
+           "AND (:fromDate IS NULL OR t.created_at >= CAST(:fromDate AS timestamp)) " +
+           "AND (:toDate IS NULL OR t.created_at <= CAST(:toDate AS timestamp)) " +
+           "AND (:categoryId IS NULL OR t.payment_category_id = CAST(:categoryId AS uuid))", nativeQuery = true)
     java.math.BigDecimal sumSuccessfulAmountByReceiverAndFilters(@Param("receiverId") UUID receiverId,
                                                                  @Param("fromDate") LocalDateTime fromDate,
                                                                  @Param("toDate") LocalDateTime toDate,
@@ -61,9 +62,11 @@ public interface TransactionRepository extends JpaRepository<Transaction, UUID> 
     @Query("SELECT COUNT(t) FROM Transaction t WHERE t.receiver.id = :receiverId AND t.transactionType = 'PAYMENT'")
     Long countAllTransactionsByReceiver(@Param("receiverId") UUID receiverId);
 
-    @Query("SELECT COUNT(t) FROM Transaction t WHERE t.receiver.id = :receiverId AND t.transactionType = 'PAYMENT' " +
-           "AND (:fromDate IS NULL OR t.createdAt >= :fromDate) AND (:toDate IS NULL OR t.createdAt <= :toDate) " +
-           "AND (:categoryId IS NULL OR t.paymentCategory.id = :categoryId)")
+    @Query(value = "SELECT COUNT(*) FROM transactions t WHERE t.receiver_id = :receiverId " +
+           "AND t.transaction_type = 'PAYMENT' " +
+           "AND (:fromDate IS NULL OR t.created_at >= CAST(:fromDate AS timestamp)) " +
+           "AND (:toDate IS NULL OR t.created_at <= CAST(:toDate AS timestamp)) " +
+           "AND (:categoryId IS NULL OR t.payment_category_id = CAST(:categoryId AS uuid))", nativeQuery = true)
     Long countAllTransactionsByReceiverAndFilters(@Param("receiverId") UUID receiverId,
                                                    @Param("fromDate") LocalDateTime fromDate,
                                                    @Param("toDate") LocalDateTime toDate,
@@ -72,19 +75,23 @@ public interface TransactionRepository extends JpaRepository<Transaction, UUID> 
     @Query("SELECT COUNT(t) FROM Transaction t WHERE t.receiver.id = :receiverId AND t.transactionType = 'PAYMENT' AND t.status = 'SUCCESS'")
     Long countSuccessfulTransactionsByReceiver(@Param("receiverId") UUID receiverId);
 
-    @Query("SELECT COUNT(t) FROM Transaction t WHERE t.receiver.id = :receiverId AND t.transactionType = 'PAYMENT' AND t.status = 'SUCCESS' " +
-           "AND (:fromDate IS NULL OR t.createdAt >= :fromDate) AND (:toDate IS NULL OR t.createdAt <= :toDate) " +
-           "AND (:categoryId IS NULL OR t.paymentCategory.id = :categoryId)")
+    @Query(value = "SELECT COUNT(*) FROM transactions t WHERE t.receiver_id = :receiverId " +
+           "AND t.transaction_type = 'PAYMENT' AND t.status = 'SUCCESS' " +
+           "AND (:fromDate IS NULL OR t.created_at >= CAST(:fromDate AS timestamp)) " +
+           "AND (:toDate IS NULL OR t.created_at <= CAST(:toDate AS timestamp)) " +
+           "AND (:categoryId IS NULL OR t.payment_category_id = CAST(:categoryId AS uuid))", nativeQuery = true)
     Long countSuccessfulTransactionsByReceiverAndFilters(@Param("receiverId") UUID receiverId,
                                                           @Param("fromDate") LocalDateTime fromDate,
                                                           @Param("toDate") LocalDateTime toDate,
                                                           @Param("categoryId") UUID categoryId);
 
-    @Query("SELECT t.paymentCategory, COUNT(t), SUM(t.amount) FROM Transaction t " +
-           "WHERE t.receiver.id = :receiverId AND t.transactionType = 'PAYMENT' AND t.status = 'SUCCESS' " +
-           "AND (:fromDate IS NULL OR t.createdAt >= :fromDate) AND (:toDate IS NULL OR t.createdAt <= :toDate) " +
-           "AND t.paymentCategory IS NOT NULL " +
-           "GROUP BY t.paymentCategory")
+    @Query(value = "SELECT pc.id, pc.name, COUNT(t.id), COALESCE(SUM(t.amount), 0) FROM transactions t " +
+           "LEFT JOIN payment_categories pc ON t.payment_category_id = pc.id " +
+           "WHERE t.receiver_id = :receiverId AND t.transaction_type = 'PAYMENT' AND t.status = 'SUCCESS' " +
+           "AND (:fromDate IS NULL OR t.created_at >= CAST(:fromDate AS timestamp)) " +
+           "AND (:toDate IS NULL OR t.created_at <= CAST(:toDate AS timestamp)) " +
+           "AND t.payment_category_id IS NOT NULL " +
+           "GROUP BY pc.id, pc.name", nativeQuery = true)
     List<Object[]> getCategoryBreakdownByReceiver(@Param("receiverId") UUID receiverId,
                                                    @Param("fromDate") LocalDateTime fromDate,
                                                    @Param("toDate") LocalDateTime toDate);

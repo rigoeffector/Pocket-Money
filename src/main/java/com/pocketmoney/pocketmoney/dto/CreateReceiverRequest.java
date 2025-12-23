@@ -1,7 +1,6 @@
 package com.pocketmoney.pocketmoney.dto;
 
 import com.pocketmoney.pocketmoney.entity.ReceiverStatus;
-import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
@@ -32,7 +31,7 @@ public class CreateReceiverRequest {
     @NotNull(message = "Status is required")
     private ReceiverStatus status;
 
-    @Email(message = "Email should be valid")
+    // Email is optional - validation is done in service layer
     private String email;
 
     private String address;

@@ -44,7 +44,8 @@ public class SecurityConfig {
                 "http://64.23.203.249:8383",
                 "http://64.23.203.249",
                 "http://164.92.89.74:8383",
-                "http://164.92.89.74"
+                "http://164.92.89.74",
+                "http://64.23.137.36/"
         ));
         configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"));
         configuration.setAllowedHeaders(List.of("*"));
@@ -66,6 +67,8 @@ public class SecurityConfig {
                         .requestMatchers("/api/auth/**").permitAll()
                         .requestMatchers("/api/public/**").permitAll()
                         .requestMatchers("/api/payments/top-up").hasAnyRole("USER", "ADMIN")
+                        .requestMatchers("/api/payments/top-up-by-phone").hasAnyRole("USER", "RECEIVER", "ADMIN")
+                        .requestMatchers("/api/payments/cards/*").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .requestMatchers("/api/payments/transactions/receiver/**").hasAnyRole("RECEIVER", "ADMIN")
                         .requestMatchers("/api/receivers/*/wallet").hasAnyRole("RECEIVER", "ADMIN")
                         .requestMatchers("/api/users/*/nfc-card/**").hasAnyRole("USER", "ADMIN")
