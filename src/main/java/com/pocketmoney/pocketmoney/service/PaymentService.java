@@ -13,6 +13,8 @@ import com.pocketmoney.pocketmoney.repository.PaymentCategoryRepository;
 import com.pocketmoney.pocketmoney.repository.ReceiverRepository;
 import com.pocketmoney.pocketmoney.repository.TransactionRepository;
 import com.pocketmoney.pocketmoney.repository.UserRepository;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.Query;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -33,16 +35,18 @@ public class PaymentService {
     private final ReceiverRepository receiverRepository;
     private final MoPayService moPayService;
     private final PasswordEncoder passwordEncoder;
+    private final EntityManager entityManager;
 
     public PaymentService(UserRepository userRepository, TransactionRepository transactionRepository,
                          PaymentCategoryRepository paymentCategoryRepository, ReceiverRepository receiverRepository,
-                         MoPayService moPayService, PasswordEncoder passwordEncoder) {
+                         MoPayService moPayService, PasswordEncoder passwordEncoder, EntityManager entityManager) {
         this.userRepository = userRepository;
         this.transactionRepository = transactionRepository;
         this.paymentCategoryRepository = paymentCategoryRepository;
         this.receiverRepository = receiverRepository;
         this.moPayService = moPayService;
         this.passwordEncoder = passwordEncoder;
+        this.entityManager = entityManager;
     }
 
     // Helper method to normalize phone number to 12 digits (250XXXXXXXXX format)
@@ -486,14 +490,23 @@ public class PaymentService {
             toDate = toDate.withHour(23).withMinute(59).withSecond(59);
         }
 
-        // Calculate total admin income
-        BigDecimal totalIncome = transactionRepository.sumAdminIncomeByFilters(fromDate, toDate, receiverId);
+        // Use EntityManager to build dynamic queries and avoid PostgreSQL null parameter type issues
+        BigDecimal totalIncome;
+        Long totalTransactions;
+        
+        if (fromDate == null && toDate == null && receiverId == null) {
+            // No filters - use simple repository methods
+            totalIncome = transactionRepository.sumAdminIncomeAll();
+            totalTransactions = transactionRepository.countAdminIncomeAll();
+        } else {
+            // Build dynamic query using EntityManager
+            totalIncome = calculateAdminIncomeWithFilters(fromDate, toDate, receiverId);
+            totalTransactions = countAdminIncomeWithFilters(fromDate, toDate, receiverId);
+        }
+        
         if (totalIncome == null) {
             totalIncome = BigDecimal.ZERO;
         }
-
-        // Count transactions
-        Long totalTransactions = transactionRepository.countAdminIncomeTransactions(fromDate, toDate, receiverId);
         if (totalTransactions == null) {
             totalTransactions = 0L;
         }
@@ -501,22 +514,158 @@ public class PaymentService {
         // Get breakdown by receiver if receiverId is not specified
         List<AdminIncomeResponse.IncomeBreakdown> breakdown = null;
         if (receiverId == null) {
-            List<Object[]> breakdownData = transactionRepository.getAdminIncomeBreakdownByReceiver(fromDate, toDate);
-            breakdown = breakdownData.stream()
-                    .map(row -> {
-                        AdminIncomeResponse.IncomeBreakdown item = new AdminIncomeResponse.IncomeBreakdown();
-                        item.setReceiverId((UUID) row[0]);
-                        item.setReceiverCompanyName((String) row[1]);
-                        item.setIncome((BigDecimal) row[2]);
-                        item.setTransactionCount(((Number) row[3]).longValue());
-                        return item;
-                    })
-                    .collect(Collectors.toList());
+            breakdown = getAdminIncomeBreakdown(fromDate, toDate);
         }
 
         // Get detailed transaction list
-        List<Object[]> transactionData = transactionRepository.getAdminIncomeTransactions(fromDate, toDate, receiverId);
-        List<AdminIncomeResponse.AdminIncomeTransaction> transactions = transactionData.stream()
+        List<AdminIncomeResponse.AdminIncomeTransaction> transactions = getAdminIncomeTransactionList(fromDate, toDate, receiverId);
+
+        AdminIncomeResponse response = new AdminIncomeResponse();
+        response.setTotalIncome(totalIncome);
+        response.setTotalTransactions(totalTransactions);
+        response.setFromDate(fromDate);
+        response.setToDate(toDate);
+        response.setBreakdown(breakdown);
+        response.setTransactions(transactions);
+
+        return response;
+    }
+
+    private BigDecimal calculateAdminIncomeWithFilters(LocalDateTime fromDate, LocalDateTime toDate, UUID receiverId) {
+        StringBuilder sql = new StringBuilder(
+            "SELECT COALESCE(SUM(t.admin_income_amount), 0) FROM transactions t " +
+            "WHERE t.transaction_type = 'PAYMENT' AND t.status = 'SUCCESS' " +
+            "AND t.admin_income_amount IS NOT NULL"
+        );
+        
+        Query query = buildFilteredQuery(sql.toString(), fromDate, toDate, receiverId, entityManager);
+        
+        Object result = query.getSingleResult();
+        return result != null ? (BigDecimal) result : BigDecimal.ZERO;
+    }
+
+    private Long countAdminIncomeWithFilters(LocalDateTime fromDate, LocalDateTime toDate, UUID receiverId) {
+        StringBuilder sql = new StringBuilder(
+            "SELECT COUNT(*) FROM transactions t " +
+            "WHERE t.transaction_type = 'PAYMENT' AND t.status = 'SUCCESS' " +
+            "AND t.admin_income_amount IS NOT NULL"
+        );
+        
+        Query query = buildFilteredQuery(sql.toString(), fromDate, toDate, receiverId, entityManager);
+        
+        Object result = query.getSingleResult();
+        return result != null ? ((Number) result).longValue() : 0L;
+    }
+
+    private Query buildFilteredQuery(String baseSql, LocalDateTime fromDate, LocalDateTime toDate, UUID receiverId, EntityManager em) {
+        StringBuilder sql = new StringBuilder(baseSql);
+        
+        if (fromDate != null) {
+            sql.append(" AND t.created_at >= :fromDate");
+        }
+        if (toDate != null) {
+            sql.append(" AND t.created_at <= :toDate");
+        }
+        if (receiverId != null) {
+            sql.append(" AND t.receiver_id = :receiverId");
+        }
+        
+        Query query = em.createNativeQuery(sql.toString());
+        
+        if (fromDate != null) {
+            query.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            query.setParameter("toDate", toDate);
+        }
+        if (receiverId != null) {
+            query.setParameter("receiverId", receiverId);
+        }
+        
+        return query;
+    }
+
+    private List<AdminIncomeResponse.IncomeBreakdown> getAdminIncomeBreakdown(LocalDateTime fromDate, LocalDateTime toDate) {
+        StringBuilder sql = new StringBuilder(
+            "SELECT r.id, r.company_name, COALESCE(SUM(t.admin_income_amount), 0), COUNT(t.id) " +
+            "FROM transactions t " +
+            "JOIN receivers r ON t.receiver_id = r.id " +
+            "WHERE t.transaction_type = 'PAYMENT' AND t.status = 'SUCCESS' " +
+            "AND t.admin_income_amount IS NOT NULL"
+        );
+        
+        if (fromDate != null) {
+            sql.append(" AND t.created_at >= :fromDate");
+        }
+        if (toDate != null) {
+            sql.append(" AND t.created_at <= :toDate");
+        }
+        
+        sql.append(" GROUP BY r.id, r.company_name ORDER BY SUM(t.admin_income_amount) DESC");
+        
+        Query query = entityManager.createNativeQuery(sql.toString());
+        if (fromDate != null) {
+            query.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            query.setParameter("toDate", toDate);
+        }
+        
+        @SuppressWarnings("unchecked")
+        List<Object[]> results = query.getResultList();
+        
+        return results.stream()
+                .map(row -> {
+                    AdminIncomeResponse.IncomeBreakdown item = new AdminIncomeResponse.IncomeBreakdown();
+                    item.setReceiverId((UUID) row[0]);
+                    item.setReceiverCompanyName((String) row[1]);
+                    item.setIncome((BigDecimal) row[2]);
+                    item.setTransactionCount(((Number) row[3]).longValue());
+                    return item;
+                })
+                .collect(Collectors.toList());
+    }
+
+    private List<AdminIncomeResponse.AdminIncomeTransaction> getAdminIncomeTransactionList(LocalDateTime fromDate, LocalDateTime toDate, UUID receiverId) {
+        StringBuilder sql = new StringBuilder(
+            "SELECT t.id, t.created_at, u.id, u.full_names, u.phone_number, " +
+            "r.id, r.company_name, pc.id, pc.name, t.amount, " +
+            "t.discount_amount, t.user_bonus_amount, t.admin_income_amount, t.status " +
+            "FROM transactions t " +
+            "JOIN users u ON t.user_id = u.id " +
+            "JOIN receivers r ON t.receiver_id = r.id " +
+            "LEFT JOIN payment_categories pc ON t.payment_category_id = pc.id " +
+            "WHERE t.transaction_type = 'PAYMENT' AND t.status = 'SUCCESS' " +
+            "AND t.admin_income_amount IS NOT NULL"
+        );
+        
+        if (fromDate != null) {
+            sql.append(" AND t.created_at >= :fromDate");
+        }
+        if (toDate != null) {
+            sql.append(" AND t.created_at <= :toDate");
+        }
+        if (receiverId != null) {
+            sql.append(" AND t.receiver_id = :receiverId");
+        }
+        
+        sql.append(" ORDER BY t.created_at DESC");
+        
+        Query query = entityManager.createNativeQuery(sql.toString());
+        if (fromDate != null) {
+            query.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            query.setParameter("toDate", toDate);
+        }
+        if (receiverId != null) {
+            query.setParameter("receiverId", receiverId);
+        }
+        
+        @SuppressWarnings("unchecked")
+        List<Object[]> results = query.getResultList();
+        
+        return results.stream()
                 .map(row -> {
                     AdminIncomeResponse.AdminIncomeTransaction transaction = new AdminIncomeResponse.AdminIncomeTransaction();
                     transaction.setTransactionId((UUID) row[0]);
@@ -543,16 +692,6 @@ public class PaymentService {
                     return transaction;
                 })
                 .collect(Collectors.toList());
-
-        AdminIncomeResponse response = new AdminIncomeResponse();
-        response.setTotalIncome(totalIncome);
-        response.setTotalTransactions(totalTransactions);
-        response.setFromDate(fromDate);
-        response.setToDate(toDate);
-        response.setBreakdown(breakdown);
-        response.setTransactions(transactions);
-
-        return response;
     }
 }
 
