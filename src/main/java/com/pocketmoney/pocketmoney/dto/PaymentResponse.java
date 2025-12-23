@@ -24,6 +24,10 @@ public class PaymentResponse {
     private TransactionStatus status;
     private BigDecimal balanceBefore;
     private BigDecimal balanceAfter;
+    private BigDecimal discountAmount;
+    private BigDecimal userBonusAmount;
+    private BigDecimal receiverBalanceBefore;
+    private BigDecimal receiverBalanceAfter;
     private LocalDateTime createdAt;
 }
 

@@ -17,6 +17,10 @@ public class ReceiverWalletResponse {
     private String receiverPhone;
     private BigDecimal walletBalance;
     private BigDecimal totalReceived;
+    private BigDecimal assignedBalance;
+    private BigDecimal remainingBalance;
+    private BigDecimal discountPercentage;
+    private BigDecimal userBonusPercentage;
     private LocalDateTime lastTransactionDate;
 }
 

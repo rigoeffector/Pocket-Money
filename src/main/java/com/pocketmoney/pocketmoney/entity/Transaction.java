@@ -61,6 +61,18 @@ public class Transaction {
     @Column(name = "balance_after", precision = 19, scale = 2)
     private BigDecimal balanceAfter;
 
+    @Column(name = "discount_amount", precision = 19, scale = 2)
+    private BigDecimal discountAmount;
+
+    @Column(name = "user_bonus_amount", precision = 19, scale = 2)
+    private BigDecimal userBonusAmount;
+
+    @Column(name = "receiver_balance_before", precision = 19, scale = 2)
+    private BigDecimal receiverBalanceBefore;
+
+    @Column(name = "receiver_balance_after", precision = 19, scale = 2)
+    private BigDecimal receiverBalanceAfter;
+
     @Column(nullable = false, updatable = false)
     @CreationTimestamp
     private LocalDateTime createdAt;

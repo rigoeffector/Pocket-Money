@@ -30,5 +30,11 @@ public class UpdateReceiverRequest {
     private String address;
 
     private String description;
+
+    private java.math.BigDecimal assignedBalance;
+
+    private java.math.BigDecimal discountPercentage;
+
+    private java.math.BigDecimal userBonusPercentage;
 }
 

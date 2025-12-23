@@ -121,6 +121,17 @@ public class PaymentController {
         }
     }
 
+    @GetMapping("/bonus-history/{userId}")
+    public ResponseEntity<ApiResponse<List<UserBonusHistoryResponse>>> getUserBonusHistory(@PathVariable UUID userId) {
+        try {
+            List<UserBonusHistoryResponse> history = paymentService.getUserBonusHistory(userId);
+            return ResponseEntity.ok(ApiResponse.success("User bonus history retrieved successfully", history));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
     @GetMapping("/cards/{nfcCardId}")
     public ResponseEntity<ApiResponse<CardDetailsResponse>> getCardDetails(@PathVariable String nfcCardId) {
         try {

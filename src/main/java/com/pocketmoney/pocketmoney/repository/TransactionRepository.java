@@ -95,5 +95,11 @@ public interface TransactionRepository extends JpaRepository<Transaction, UUID> 
     List<Object[]> getCategoryBreakdownByReceiver(@Param("receiverId") UUID receiverId,
                                                    @Param("fromDate") LocalDateTime fromDate,
                                                    @Param("toDate") LocalDateTime toDate);
+
+    // Calculate total bonus received by user
+    @Query(value = "SELECT COALESCE(SUM(t.user_bonus_amount), 0) FROM transactions t " +
+           "WHERE t.user_id = :userId AND t.transaction_type = 'PAYMENT' AND t.status = 'SUCCESS' " +
+           "AND t.user_bonus_amount IS NOT NULL", nativeQuery = true)
+    java.math.BigDecimal sumUserBonusByUserId(@Param("userId") UUID userId);
 }
 

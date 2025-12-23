@@ -25,6 +25,11 @@ public class ReceiverResponse {
     private String description;
     private BigDecimal walletBalance;
     private BigDecimal totalReceived;
+    private BigDecimal assignedBalance;
+    private BigDecimal remainingBalance;
+    private BigDecimal discountPercentage;
+    private BigDecimal userBonusPercentage;
+    private Integer pendingBalanceAssignments; // Count of pending balance assignment requests
     private LocalDateTime lastTransactionDate;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;

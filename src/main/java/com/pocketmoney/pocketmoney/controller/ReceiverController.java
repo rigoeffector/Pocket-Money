@@ -1,6 +1,8 @@
 package com.pocketmoney.pocketmoney.controller;
 
 import com.pocketmoney.pocketmoney.dto.ApiResponse;
+import com.pocketmoney.pocketmoney.dto.ApproveBalanceAssignmentRequest;
+import com.pocketmoney.pocketmoney.dto.BalanceAssignmentHistoryResponse;
 import com.pocketmoney.pocketmoney.dto.CreateReceiverRequest;
 import com.pocketmoney.pocketmoney.dto.ReceiverAnalyticsResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverResponse;
@@ -37,17 +39,6 @@ public class ReceiverController {
                     .body(ApiResponse.success("Receiver created successfully", response));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                    .body(ApiResponse.error(e.getMessage()));
-        }
-    }
-
-    @GetMapping("/{id}")
-    public ResponseEntity<ApiResponse<ReceiverResponse>> getReceiverById(@PathVariable UUID id) {
-        try {
-            ReceiverResponse response = receiverService.getReceiverById(id);
-            return ResponseEntity.ok(ApiResponse.success("Receiver retrieved successfully", response));
-        } catch (RuntimeException e) {
-            return ResponseEntity.status(HttpStatus.NOT_FOUND)
                     .body(ApiResponse.error(e.getMessage()));
         }
     }
@@ -161,6 +152,43 @@ public class ReceiverController {
         try {
             ReceiverAnalyticsResponse response = receiverService.getReceiverAnalytics(id, fromDate, toDate, year, categoryId);
             return ResponseEntity.ok(ApiResponse.success("Receiver analytics retrieved successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @GetMapping("/{id}/balance-history")
+    public ResponseEntity<ApiResponse<List<BalanceAssignmentHistoryResponse>>> getBalanceAssignmentHistory(@PathVariable UUID id) {
+        try {
+            List<BalanceAssignmentHistoryResponse> history = receiverService.getBalanceAssignmentHistory(id);
+            return ResponseEntity.ok(ApiResponse.success("Balance assignment history retrieved successfully", history));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PutMapping("/{receiverId}/balance-history/{historyId}/approve")
+    public ResponseEntity<ApiResponse<BalanceAssignmentHistoryResponse>> approveBalanceAssignment(
+            @PathVariable UUID receiverId,
+            @PathVariable UUID historyId,
+            @Valid @RequestBody ApproveBalanceAssignmentRequest request) {
+        try {
+            BalanceAssignmentHistoryResponse response = receiverService.approveBalanceAssignment(receiverId, historyId, request.isApprove());
+            String message = request.isApprove() ? "Balance assignment approved successfully" : "Balance assignment rejected successfully";
+            return ResponseEntity.ok(ApiResponse.success(message, response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @GetMapping("/{id}")
+    public ResponseEntity<ApiResponse<ReceiverResponse>> getReceiverById(@PathVariable UUID id) {
+        try {
+            ReceiverResponse response = receiverService.getReceiverById(id);
+            return ResponseEntity.ok(ApiResponse.success("Receiver retrieved successfully", response));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)
                     .body(ApiResponse.error(e.getMessage()));

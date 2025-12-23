@@ -187,18 +187,52 @@ public class PaymentService {
             throw new RuntimeException("Insufficient balance. Available: " + balanceBefore);
         }
 
+        BigDecimal paymentAmount = request.getAmount();
+        
+        // Calculate discount and bonus amounts
+        BigDecimal discountPercentage = receiver.getDiscountPercentage() != null ? receiver.getDiscountPercentage() : BigDecimal.ZERO;
+        BigDecimal userBonusPercentage = receiver.getUserBonusPercentage() != null ? receiver.getUserBonusPercentage() : BigDecimal.ZERO;
+        
+        // Calculate discount amount (based on payment amount)
+        BigDecimal discountAmount = paymentAmount.multiply(discountPercentage).divide(new BigDecimal("100"), 2, java.math.RoundingMode.HALF_UP);
+        
+        // Calculate user bonus amount (based on payment amount)
+        BigDecimal userBonusAmount = paymentAmount.multiply(userBonusPercentage).divide(new BigDecimal("100"), 2, java.math.RoundingMode.HALF_UP);
+        
+        // Effective discount to receiver = discountAmount - userBonusAmount
+        BigDecimal effectiveDiscount = discountAmount.subtract(userBonusAmount);
+        
         // For PAYMENT: Direct internal transfer (no MoPay integration needed)
         // Deduct from user's card balance (amountRemaining)
-        BigDecimal userNewBalance = balanceBefore.subtract(request.getAmount());
+        BigDecimal userNewBalance = balanceBefore.subtract(paymentAmount);
         user.setAmountRemaining(userNewBalance);
+        
+        // Add user bonus back to user's wallet if applicable
+        if (userBonusAmount.compareTo(BigDecimal.ZERO) > 0) {
+            userNewBalance = userNewBalance.add(userBonusAmount);
+            user.setAmountRemaining(userNewBalance);
+        }
         user.setLastTransactionDate(LocalDateTime.now());
         userRepository.save(user);
 
-        // Credit receiver's wallet balance
-        BigDecimal receiverNewBalance = receiver.getWalletBalance().add(request.getAmount());
-        BigDecimal receiverNewTotal = receiver.getTotalReceived().add(request.getAmount());
+        // Credit receiver's wallet balance (full payment amount)
+        BigDecimal receiverNewBalance = receiver.getWalletBalance().add(paymentAmount);
+        BigDecimal receiverNewTotal = receiver.getTotalReceived().add(paymentAmount);
         receiver.setWalletBalance(receiverNewBalance);
         receiver.setTotalReceived(receiverNewTotal);
+        
+        // Update receiver's remaining balance
+        // Receiver balance reduces by: paymentAmount - effectiveDiscount
+        BigDecimal receiverBalanceBefore = receiver.getRemainingBalance() != null ? receiver.getRemainingBalance() : BigDecimal.ZERO;
+        BigDecimal receiverBalanceReduction = paymentAmount.subtract(effectiveDiscount);
+        BigDecimal receiverBalanceAfter = receiverBalanceBefore.subtract(receiverBalanceReduction);
+        
+        // Ensure receiver balance doesn't go below zero
+        if (receiverBalanceAfter.compareTo(BigDecimal.ZERO) < 0) {
+            receiverBalanceAfter = BigDecimal.ZERO;
+        }
+        
+        receiver.setRemainingBalance(receiverBalanceAfter);
         receiver.setLastTransactionDate(LocalDateTime.now());
         receiverRepository.save(receiver);
 
@@ -208,11 +242,15 @@ public class PaymentService {
         transaction.setPaymentCategory(paymentCategory);
         transaction.setReceiver(receiver);
         transaction.setTransactionType(TransactionType.PAYMENT);
-        transaction.setAmount(request.getAmount());
+        transaction.setAmount(paymentAmount);
         transaction.setPhoneNumber(receiver.getReceiverPhone());
         transaction.setMessage(request.getMessage() != null ? request.getMessage() : "Payment from pocket money card");
-        transaction.setBalanceBefore(balanceBefore); // Balance before deduction
-        transaction.setBalanceAfter(userNewBalance);
+        transaction.setBalanceBefore(balanceBefore); // User balance before deduction
+        transaction.setBalanceAfter(userNewBalance); // User balance after deduction and bonus
+        transaction.setDiscountAmount(discountAmount);
+        transaction.setUserBonusAmount(userBonusAmount);
+        transaction.setReceiverBalanceBefore(receiverBalanceBefore);
+        transaction.setReceiverBalanceAfter(receiverBalanceAfter);
         transaction.setStatus(TransactionStatus.SUCCESS); // Immediate success for internal transfers
 
         Transaction savedTransaction = transactionRepository.save(transaction);
@@ -224,10 +262,32 @@ public class PaymentService {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new RuntimeException("User not found"));
 
+        // Calculate total bonus received from all successful payment transactions
+        BigDecimal totalBonusReceived = transactionRepository.sumUserBonusByUserId(userId);
+        if (totalBonusReceived == null) {
+            totalBonusReceived = BigDecimal.ZERO;
+        }
+        
+        // Note: amountRemaining already includes bonuses that were added back during payment processing
+        // amountRemainingWithBonus shows the effective balance (which already has bonuses included)
+        // We display totalBonusReceived separately for tracking purposes
+        BigDecimal amountRemainingWithBonus = user.getAmountRemaining();
+
         BalanceResponse response = new BalanceResponse();
         response.setUserId(user.getId());
+        response.setFullNames(user.getFullNames());
+        response.setPhoneNumber(user.getPhoneNumber());
+        response.setEmail(user.getEmail());
+        response.setIsAssignedNfcCard(user.getIsAssignedNfcCard());
+        response.setNfcCardId(user.getNfcCardId());
         response.setAmountOnCard(user.getAmountOnCard());
         response.setAmountRemaining(user.getAmountRemaining());
+        response.setTotalBonusReceived(totalBonusReceived);
+        response.setAmountRemainingWithBonus(amountRemainingWithBonus);
+        response.setStatus(user.getStatus());
+        response.setLastTransactionDate(user.getLastTransactionDate());
+        response.setCreatedAt(user.getCreatedAt());
+        response.setUpdatedAt(user.getUpdatedAt());
         return response;
     }
 
@@ -318,6 +378,44 @@ public class PaymentService {
                 .collect(Collectors.toList());
     }
 
+    @Transactional(readOnly = true)
+    public List<UserBonusHistoryResponse> getUserBonusHistory(UUID userId) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        
+        // Get all successful payment transactions with bonuses
+        return transactionRepository.findByUserOrderByCreatedAtDescWithUser(user)
+                .stream()
+                .filter(t -> t.getTransactionType() == TransactionType.PAYMENT 
+                        && t.getStatus() == TransactionStatus.SUCCESS
+                        && t.getUserBonusAmount() != null 
+                        && t.getUserBonusAmount().compareTo(BigDecimal.ZERO) > 0)
+                .map(this::mapToUserBonusHistoryResponse)
+                .collect(Collectors.toList());
+    }
+
+    private UserBonusHistoryResponse mapToUserBonusHistoryResponse(Transaction transaction) {
+        UserBonusHistoryResponse response = new UserBonusHistoryResponse();
+        response.setTransactionId(transaction.getId());
+        response.setUserId(transaction.getUser().getId());
+        response.setUserFullNames(transaction.getUser().getFullNames());
+        
+        if (transaction.getReceiver() != null) {
+            response.setReceiverId(transaction.getReceiver().getId());
+            response.setReceiverCompanyName(transaction.getReceiver().getCompanyName());
+        }
+        
+        if (transaction.getPaymentCategory() != null) {
+            response.setPaymentCategoryId(transaction.getPaymentCategory().getId());
+            response.setPaymentCategoryName(transaction.getPaymentCategory().getName());
+        }
+        
+        response.setPaymentAmount(transaction.getAmount());
+        response.setBonusAmount(transaction.getUserBonusAmount());
+        response.setTransactionDate(transaction.getCreatedAt());
+        return response;
+    }
+
     private PaymentResponse mapToPaymentResponse(Transaction transaction) {
         PaymentResponse response = new PaymentResponse();
         response.setId(transaction.getId());
@@ -333,6 +431,10 @@ public class PaymentService {
         response.setStatus(transaction.getStatus());
         response.setBalanceBefore(transaction.getBalanceBefore());
         response.setBalanceAfter(transaction.getBalanceAfter());
+        response.setDiscountAmount(transaction.getDiscountAmount());
+        response.setUserBonusAmount(transaction.getUserBonusAmount());
+        response.setReceiverBalanceBefore(transaction.getReceiverBalanceBefore());
+        response.setReceiverBalanceAfter(transaction.getReceiverBalanceAfter());
         response.setCreatedAt(transaction.getCreatedAt());
         return response;
     }

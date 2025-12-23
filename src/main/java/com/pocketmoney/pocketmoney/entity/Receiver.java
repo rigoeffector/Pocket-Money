@@ -60,6 +60,18 @@ public class Receiver {
     @Column(name = "total_received", nullable = false, precision = 19, scale = 2)
     private BigDecimal totalReceived = BigDecimal.ZERO;
 
+    @Column(name = "assigned_balance", nullable = false, precision = 19, scale = 2)
+    private BigDecimal assignedBalance = BigDecimal.ZERO;
+
+    @Column(name = "remaining_balance", nullable = false, precision = 19, scale = 2)
+    private BigDecimal remainingBalance = BigDecimal.ZERO;
+
+    @Column(name = "discount_percentage", precision = 5, scale = 2)
+    private BigDecimal discountPercentage = BigDecimal.ZERO;
+
+    @Column(name = "user_bonus_percentage", precision = 5, scale = 2)
+    private BigDecimal userBonusPercentage = BigDecimal.ZERO;
+
     @Column(name = "last_transaction_date")
     private LocalDateTime lastTransactionDate;
 
