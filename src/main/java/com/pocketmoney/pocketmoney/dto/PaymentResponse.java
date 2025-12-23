@@ -26,6 +26,7 @@ public class PaymentResponse {
     private BigDecimal balanceAfter;
     private BigDecimal discountAmount;
     private BigDecimal userBonusAmount;
+    private BigDecimal adminIncomeAmount;
     private BigDecimal receiverBalanceBefore;
     private BigDecimal receiverBalanceAfter;
     private LocalDateTime createdAt;

@@ -193,14 +193,26 @@ public class PaymentService {
         BigDecimal discountPercentage = receiver.getDiscountPercentage() != null ? receiver.getDiscountPercentage() : BigDecimal.ZERO;
         BigDecimal userBonusPercentage = receiver.getUserBonusPercentage() != null ? receiver.getUserBonusPercentage() : BigDecimal.ZERO;
         
-        // Calculate discount amount (based on payment amount)
+        // Calculate discount/charge amount (based on payment amount) - This is the TOTAL charge (e.g., 10%)
         BigDecimal discountAmount = paymentAmount.multiply(discountPercentage).divide(new BigDecimal("100"), 2, java.math.RoundingMode.HALF_UP);
         
-        // Calculate user bonus amount (based on payment amount)
+        // Calculate user bonus amount (e.g., 2% of payment amount)
         BigDecimal userBonusAmount = paymentAmount.multiply(userBonusPercentage).divide(new BigDecimal("100"), 2, java.math.RoundingMode.HALF_UP);
         
-        // Effective discount to receiver = discountAmount - userBonusAmount
-        BigDecimal effectiveDiscount = discountAmount.subtract(userBonusAmount);
+        // Calculate admin income amount (e.g., 8% = 10% - 2%)
+        BigDecimal adminIncomeAmount = discountAmount.subtract(userBonusAmount);
+        
+        // Receiver's remaining balance is deducted by: paymentAmount + discountAmount
+        // Example: User pays 500, with 10% charge = 500 + 50 = 550 deducted from receiver balance
+        // Check if receiver has sufficient remaining balance BEFORE processing payment
+        BigDecimal receiverBalanceBefore = receiver.getRemainingBalance() != null ? receiver.getRemainingBalance() : BigDecimal.ZERO;
+        BigDecimal receiverBalanceReduction = paymentAmount.add(discountAmount); // Payment amount + charge percentage
+        BigDecimal receiverBalanceAfter = receiverBalanceBefore.subtract(receiverBalanceReduction);
+        
+        // Check if remaining balance would be below 1 after this transaction
+        if (receiverBalanceAfter.compareTo(new BigDecimal("1")) < 0) {
+            throw new RuntimeException("Insufficient Remaining Balance. Please Contact BeFosot Administrator");
+        }
         
         // For PAYMENT: Direct internal transfer (no MoPay integration needed)
         // Deduct from user's card balance (amountRemaining)
@@ -222,16 +234,11 @@ public class PaymentService {
         receiver.setTotalReceived(receiverNewTotal);
         
         // Update receiver's remaining balance
-        // Receiver balance reduces by: paymentAmount - effectiveDiscount
-        BigDecimal receiverBalanceBefore = receiver.getRemainingBalance() != null ? receiver.getRemainingBalance() : BigDecimal.ZERO;
-        BigDecimal receiverBalanceReduction = paymentAmount.subtract(effectiveDiscount);
-        BigDecimal receiverBalanceAfter = receiverBalanceBefore.subtract(receiverBalanceReduction);
-        
-        // Ensure receiver balance doesn't go below zero
-        if (receiverBalanceAfter.compareTo(BigDecimal.ZERO) < 0) {
-            receiverBalanceAfter = BigDecimal.ZERO;
-        }
-        
+        // Receiver remaining balance is reduced by: paymentAmount + discountAmount (e.g., 500 + 50 = 550)
+        // The discount amount (10%) is the service charge, which is split:
+        //   - Part goes to user as bonus (e.g., 2%)
+        //   - Remaining part goes to admin as income (e.g., 8%)
+        // (Already calculated and validated above - receiverBalanceAfter is safe to use)
         receiver.setRemainingBalance(receiverBalanceAfter);
         receiver.setLastTransactionDate(LocalDateTime.now());
         receiverRepository.save(receiver);
@@ -249,6 +256,7 @@ public class PaymentService {
         transaction.setBalanceAfter(userNewBalance); // User balance after deduction and bonus
         transaction.setDiscountAmount(discountAmount);
         transaction.setUserBonusAmount(userBonusAmount);
+        transaction.setAdminIncomeAmount(adminIncomeAmount);
         transaction.setReceiverBalanceBefore(receiverBalanceBefore);
         transaction.setReceiverBalanceAfter(receiverBalanceAfter);
         transaction.setStatus(TransactionStatus.SUCCESS); // Immediate success for internal transfers
@@ -433,6 +441,7 @@ public class PaymentService {
         response.setBalanceAfter(transaction.getBalanceAfter());
         response.setDiscountAmount(transaction.getDiscountAmount());
         response.setUserBonusAmount(transaction.getUserBonusAmount());
+        response.setAdminIncomeAmount(transaction.getAdminIncomeAmount());
         response.setReceiverBalanceBefore(transaction.getReceiverBalanceBefore());
         response.setReceiverBalanceAfter(transaction.getReceiverBalanceAfter());
         response.setCreatedAt(transaction.getCreatedAt());

@@ -67,6 +67,9 @@ public class Transaction {
     @Column(name = "user_bonus_amount", precision = 19, scale = 2)
     private BigDecimal userBonusAmount;
 
+    @Column(name = "admin_income_amount", precision = 19, scale = 2)
+    private BigDecimal adminIncomeAmount;
+
     @Column(name = "receiver_balance_before", precision = 19, scale = 2)
     private BigDecimal receiverBalanceBefore;
 
