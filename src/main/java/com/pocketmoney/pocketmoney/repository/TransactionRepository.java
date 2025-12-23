@@ -101,5 +101,58 @@ public interface TransactionRepository extends JpaRepository<Transaction, UUID> 
            "WHERE t.user_id = :userId AND t.transaction_type = 'PAYMENT' AND t.status = 'SUCCESS' " +
            "AND t.user_bonus_amount IS NOT NULL", nativeQuery = true)
     java.math.BigDecimal sumUserBonusByUserId(@Param("userId") UUID userId);
+
+    // Calculate total admin income with optional filters
+    @Query(value = "SELECT COALESCE(SUM(t.admin_income_amount), 0) FROM transactions t " +
+           "WHERE t.transaction_type = 'PAYMENT' AND t.status = 'SUCCESS' " +
+           "AND t.admin_income_amount IS NOT NULL " +
+           "AND (:fromDate IS NULL OR t.created_at >= CAST(:fromDate AS timestamp)) " +
+           "AND (:toDate IS NULL OR t.created_at <= CAST(:toDate AS timestamp)) " +
+           "AND (:receiverId IS NULL OR t.receiver_id = CAST(:receiverId AS uuid))", nativeQuery = true)
+    java.math.BigDecimal sumAdminIncomeByFilters(@Param("fromDate") LocalDateTime fromDate,
+                                                  @Param("toDate") LocalDateTime toDate,
+                                                  @Param("receiverId") UUID receiverId);
+
+    // Count transactions with admin income
+    @Query(value = "SELECT COUNT(*) FROM transactions t " +
+           "WHERE t.transaction_type = 'PAYMENT' AND t.status = 'SUCCESS' " +
+           "AND t.admin_income_amount IS NOT NULL " +
+           "AND (:fromDate IS NULL OR t.created_at >= CAST(:fromDate AS timestamp)) " +
+           "AND (:toDate IS NULL OR t.created_at <= CAST(:toDate AS timestamp)) " +
+           "AND (:receiverId IS NULL OR t.receiver_id = CAST(:receiverId AS uuid))", nativeQuery = true)
+    Long countAdminIncomeTransactions(@Param("fromDate") LocalDateTime fromDate,
+                                      @Param("toDate") LocalDateTime toDate,
+                                      @Param("receiverId") UUID receiverId);
+
+    // Get admin income breakdown by receiver
+    @Query(value = "SELECT r.id, r.company_name, COALESCE(SUM(t.admin_income_amount), 0), COUNT(t.id) " +
+           "FROM transactions t " +
+           "JOIN receivers r ON t.receiver_id = r.id " +
+           "WHERE t.transaction_type = 'PAYMENT' AND t.status = 'SUCCESS' " +
+           "AND t.admin_income_amount IS NOT NULL " +
+           "AND (:fromDate IS NULL OR t.created_at >= CAST(:fromDate AS timestamp)) " +
+           "AND (:toDate IS NULL OR t.created_at <= CAST(:toDate AS timestamp)) " +
+           "GROUP BY r.id, r.company_name " +
+           "ORDER BY SUM(t.admin_income_amount) DESC", nativeQuery = true)
+    List<Object[]> getAdminIncomeBreakdownByReceiver(@Param("fromDate") LocalDateTime fromDate,
+                                                      @Param("toDate") LocalDateTime toDate);
+
+    // Get detailed admin income transactions
+    @Query(value = "SELECT t.id, t.created_at, u.id, u.full_names, u.phone_number, " +
+           "r.id, r.company_name, pc.id, pc.name, t.amount, " +
+           "t.discount_amount, t.user_bonus_amount, t.admin_income_amount, t.status " +
+           "FROM transactions t " +
+           "JOIN users u ON t.user_id = u.id " +
+           "JOIN receivers r ON t.receiver_id = r.id " +
+           "LEFT JOIN payment_categories pc ON t.payment_category_id = pc.id " +
+           "WHERE t.transaction_type = 'PAYMENT' AND t.status = 'SUCCESS' " +
+           "AND t.admin_income_amount IS NOT NULL " +
+           "AND (:fromDate IS NULL OR t.created_at >= CAST(:fromDate AS timestamp)) " +
+           "AND (:toDate IS NULL OR t.created_at <= CAST(:toDate AS timestamp)) " +
+           "AND (:receiverId IS NULL OR t.receiver_id = CAST(:receiverId AS uuid)) " +
+           "ORDER BY t.created_at DESC", nativeQuery = true)
+    List<Object[]> getAdminIncomeTransactions(@Param("fromDate") LocalDateTime fromDate,
+                                              @Param("toDate") LocalDateTime toDate,
+                                              @Param("receiverId") UUID receiverId);
 }
 

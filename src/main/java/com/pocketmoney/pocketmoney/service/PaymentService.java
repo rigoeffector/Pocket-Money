@@ -475,5 +475,84 @@ public class PaymentService {
         response.setUpdatedAt(user.getUpdatedAt());
         return response;
     }
+
+    @Transactional(readOnly = true)
+    public AdminIncomeResponse getAdminIncome(LocalDateTime fromDate, LocalDateTime toDate, UUID receiverId) {
+        // Set time to start/end of day if only date is provided
+        if (fromDate != null && fromDate.getHour() == 0 && fromDate.getMinute() == 0 && fromDate.getSecond() == 0) {
+            fromDate = fromDate.withHour(0).withMinute(0).withSecond(0);
+        }
+        if (toDate != null) {
+            toDate = toDate.withHour(23).withMinute(59).withSecond(59);
+        }
+
+        // Calculate total admin income
+        BigDecimal totalIncome = transactionRepository.sumAdminIncomeByFilters(fromDate, toDate, receiverId);
+        if (totalIncome == null) {
+            totalIncome = BigDecimal.ZERO;
+        }
+
+        // Count transactions
+        Long totalTransactions = transactionRepository.countAdminIncomeTransactions(fromDate, toDate, receiverId);
+        if (totalTransactions == null) {
+            totalTransactions = 0L;
+        }
+
+        // Get breakdown by receiver if receiverId is not specified
+        List<AdminIncomeResponse.IncomeBreakdown> breakdown = null;
+        if (receiverId == null) {
+            List<Object[]> breakdownData = transactionRepository.getAdminIncomeBreakdownByReceiver(fromDate, toDate);
+            breakdown = breakdownData.stream()
+                    .map(row -> {
+                        AdminIncomeResponse.IncomeBreakdown item = new AdminIncomeResponse.IncomeBreakdown();
+                        item.setReceiverId((UUID) row[0]);
+                        item.setReceiverCompanyName((String) row[1]);
+                        item.setIncome((BigDecimal) row[2]);
+                        item.setTransactionCount(((Number) row[3]).longValue());
+                        return item;
+                    })
+                    .collect(Collectors.toList());
+        }
+
+        // Get detailed transaction list
+        List<Object[]> transactionData = transactionRepository.getAdminIncomeTransactions(fromDate, toDate, receiverId);
+        List<AdminIncomeResponse.AdminIncomeTransaction> transactions = transactionData.stream()
+                .map(row -> {
+                    AdminIncomeResponse.AdminIncomeTransaction transaction = new AdminIncomeResponse.AdminIncomeTransaction();
+                    transaction.setTransactionId((UUID) row[0]);
+                    
+                    // Handle timestamp conversion
+                    if (row[1] instanceof java.sql.Timestamp) {
+                        transaction.setTransactionDate(((java.sql.Timestamp) row[1]).toLocalDateTime());
+                    } else if (row[1] instanceof LocalDateTime) {
+                        transaction.setTransactionDate((LocalDateTime) row[1]);
+                    }
+                    
+                    transaction.setUserId((UUID) row[2]);
+                    transaction.setUserFullNames((String) row[3]);
+                    transaction.setUserPhoneNumber((String) row[4]);
+                    transaction.setReceiverId((UUID) row[5]);
+                    transaction.setReceiverCompanyName((String) row[6]);
+                    transaction.setPaymentCategoryId((UUID) row[7]);
+                    transaction.setPaymentCategoryName((String) row[8]);
+                    transaction.setPaymentAmount((BigDecimal) row[9]);
+                    transaction.setDiscountAmount((BigDecimal) row[10]);
+                    transaction.setUserBonusAmount((BigDecimal) row[11]);
+                    transaction.setAdminIncomeAmount((BigDecimal) row[12]);
+                    transaction.setStatus(row[13] != null ? row[13].toString() : null);
+                    return transaction;
+                })
+                .collect(Collectors.toList());
+
+        AdminIncomeResponse response = new AdminIncomeResponse();
+        response.setTotalIncome(totalIncome);
+        response.setTotalTransactions(totalTransactions);
+        response.setFromDate(fromDate);
+        response.setToDate(toDate);
+        response.setBreakdown(breakdown);
+        response.setTransactions(transactions);
+
+        return response;
+    }
 }
 

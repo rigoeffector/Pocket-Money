@@ -4,10 +4,12 @@ import com.pocketmoney.pocketmoney.dto.*;
 import com.pocketmoney.pocketmoney.service.PaymentService;
 import com.pocketmoney.pocketmoney.service.UserService;
 import jakarta.validation.Valid;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
 
@@ -139,6 +141,20 @@ public class PaymentController {
             return ResponseEntity.ok(ApiResponse.success("Card details retrieved successfully", response));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @GetMapping("/admin-income")
+    public ResponseEntity<ApiResponse<AdminIncomeResponse>> getAdminIncome(
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate,
+            @RequestParam(required = false) UUID receiverId) {
+        try {
+            AdminIncomeResponse response = paymentService.getAdminIncome(fromDate, toDate, receiverId);
+            return ResponseEntity.ok(ApiResponse.success("Admin income retrieved successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.error(e.getMessage()));
         }
     }
