@@ -51,6 +51,9 @@ public class BalanceAssignmentHistory {
     @Column(name = "approved_at")
     private LocalDateTime approvedAt;
 
+    @Column(name = "mopay_transaction_id", length = 500)
+    private String mopayTransactionId; // MoPay transaction ID for balance assignment payment
+
     @Column(nullable = false, updatable = false)
     @CreationTimestamp
     private LocalDateTime createdAt;

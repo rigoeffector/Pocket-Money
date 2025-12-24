@@ -2,6 +2,7 @@ package com.pocketmoney.pocketmoney.controller;
 
 import com.pocketmoney.pocketmoney.dto.ApiResponse;
 import com.pocketmoney.pocketmoney.dto.ApproveBalanceAssignmentRequest;
+import com.pocketmoney.pocketmoney.dto.AssignBalanceRequest;
 import com.pocketmoney.pocketmoney.dto.BalanceAssignmentHistoryResponse;
 import com.pocketmoney.pocketmoney.dto.CreateReceiverRequest;
 import com.pocketmoney.pocketmoney.dto.ReceiverAnalyticsResponse;
@@ -191,6 +192,19 @@ public class ReceiverController {
             return ResponseEntity.ok(ApiResponse.success("Receiver retrieved successfully", response));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PostMapping("/{id}/assign-balance")
+    public ResponseEntity<ApiResponse<BalanceAssignmentHistoryResponse>> assignBalance(
+            @PathVariable UUID id,
+            @Valid @RequestBody AssignBalanceRequest request) {
+        try {
+            BalanceAssignmentHistoryResponse response = receiverService.assignBalance(id, request);
+            return ResponseEntity.ok(ApiResponse.success("Balance assignment initiated successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.error(e.getMessage()));
         }
     }

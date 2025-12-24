@@ -159,5 +159,16 @@ public class PaymentController {
         }
     }
 
+    @GetMapping("/admin/dashboard-statistics")
+    public ResponseEntity<ApiResponse<AdminDashboardStatisticsResponse>> getAdminDashboardStatistics() {
+        try {
+            AdminDashboardStatisticsResponse response = paymentService.getAdminDashboardStatistics();
+            return ResponseEntity.ok(ApiResponse.success("Dashboard statistics retrieved successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
 }
 

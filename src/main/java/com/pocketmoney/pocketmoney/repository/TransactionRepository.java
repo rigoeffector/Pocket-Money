@@ -114,5 +114,9 @@ public interface TransactionRepository extends JpaRepository<Transaction, UUID> 
            "AND t.admin_income_amount IS NOT NULL", nativeQuery = true)
     Long countAdminIncomeAll();
 
+    // Count all successful payment transactions
+    @Query("SELECT COUNT(t) FROM Transaction t WHERE t.transactionType = 'PAYMENT' AND t.status = 'SUCCESS'")
+    Long countAllSuccessfulPaymentTransactions();
+
 }
 

@@ -36,5 +36,8 @@ public class UpdateReceiverRequest {
     private java.math.BigDecimal discountPercentage;
 
     private java.math.BigDecimal userBonusPercentage;
+
+    @Pattern(regexp = "^[0-9]{10,15}$", message = "Admin phone number must be between 10 and 15 digits")
+    private String adminPhone; // Admin phone number for MoPay payment (DEBIT)
 }
 

@@ -24,6 +24,7 @@ public class BalanceAssignmentHistoryResponse {
     private BalanceAssignmentStatus status;
     private String approvedBy;
     private LocalDateTime approvedAt;
+    private String mopayTransactionId; // MoPay transaction ID
     private LocalDateTime createdAt;
 }
 

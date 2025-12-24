@@ -1,7 +1,10 @@
 package com.pocketmoney.pocketmoney.service;
 
+import com.pocketmoney.pocketmoney.dto.AssignBalanceRequest;
 import com.pocketmoney.pocketmoney.dto.BalanceAssignmentHistoryResponse;
 import com.pocketmoney.pocketmoney.dto.CreateReceiverRequest;
+import com.pocketmoney.pocketmoney.dto.MoPayInitiateRequest;
+import com.pocketmoney.pocketmoney.dto.MoPayResponse;
 import com.pocketmoney.pocketmoney.entity.BalanceAssignmentStatus;
 import com.pocketmoney.pocketmoney.dto.ReceiverAnalyticsResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverLoginResponse;
@@ -37,15 +40,17 @@ public class ReceiverService {
     private final BalanceAssignmentHistoryRepository balanceAssignmentHistoryRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtUtil jwtUtil;
+    private final MoPayService moPayService;
 
     public ReceiverService(ReceiverRepository receiverRepository, TransactionRepository transactionRepository,
                           BalanceAssignmentHistoryRepository balanceAssignmentHistoryRepository,
-                          PasswordEncoder passwordEncoder, JwtUtil jwtUtil) {
+                          PasswordEncoder passwordEncoder, JwtUtil jwtUtil, MoPayService moPayService) {
         this.receiverRepository = receiverRepository;
         this.transactionRepository = transactionRepository;
         this.balanceAssignmentHistoryRepository = balanceAssignmentHistoryRepository;
         this.passwordEncoder = passwordEncoder;
         this.jwtUtil = jwtUtil;
+        this.moPayService = moPayService;
     }
 
     public ReceiverResponse createReceiver(CreateReceiverRequest request) {
@@ -191,15 +196,77 @@ public class ReceiverService {
             
             // Track balance assignment in history (only if balance actually changes)
             if (currentAssigned.compareTo(newAssignedBalance) != 0) {
-                BalanceAssignmentHistory history = new BalanceAssignmentHistory();
-                history.setReceiver(receiver);
-                history.setAssignedBalance(newAssignedBalance);
-                history.setPreviousAssignedBalance(currentAssigned);
-                history.setBalanceDifference(newAssignedBalance.subtract(currentAssigned));
-                history.setAssignedBy("ADMIN"); // TODO: Get from authentication context
-                history.setNotes("Balance assignment updated");
-                history.setStatus(BalanceAssignmentStatus.PENDING); // Default status is PENDING
-                balanceAssignmentHistoryRepository.save(history);
+                BigDecimal balanceDifference = newAssignedBalance.subtract(currentAssigned);
+                
+                // If balance is being increased, initiate MoPay payment
+                if (balanceDifference.compareTo(BigDecimal.ZERO) > 0) {
+                    // Validate admin phone is provided
+                    if (request.getAdminPhone() == null || request.getAdminPhone().trim().isEmpty()) {
+                        throw new RuntimeException("Admin phone number is required for balance assignment");
+                    }
+                    
+                    // Initiate MoPay payment from admin to receiver
+                    MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
+                    moPayRequest.setAmount(balanceDifference);
+                    moPayRequest.setCurrency("RWF");
+                    
+                    // Normalize admin phone to 12 digits
+                    String normalizedAdminPhone = normalizePhoneTo12Digits(request.getAdminPhone());
+                    moPayRequest.setPhone(Long.parseLong(normalizedAdminPhone));
+                    moPayRequest.setPayment_mode("MOBILE");
+                    moPayRequest.setMessage("Balance assignment to " + receiver.getCompanyName());
+                    
+                    // Create transfer to receiver
+                    MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
+                    transfer.setAmount(balanceDifference);
+                    // Normalize receiver phone to 12 digits
+                    String normalizedReceiverPhone = normalizePhoneTo12Digits(receiver.getReceiverPhone());
+                    transfer.setPhone(Long.parseLong(normalizedReceiverPhone));
+                    transfer.setMessage("Balance assignment from admin");
+                    moPayRequest.setTransfers(java.util.List.of(transfer));
+                    
+                    // Initiate payment with MoPay
+                    MoPayResponse moPayResponse = moPayService.initiatePayment(moPayRequest);
+                    
+                    // Create balance assignment history
+                    BalanceAssignmentHistory history = new BalanceAssignmentHistory();
+                    history.setReceiver(receiver);
+                    history.setAssignedBalance(newAssignedBalance);
+                    history.setPreviousAssignedBalance(currentAssigned);
+                    history.setBalanceDifference(balanceDifference);
+                    history.setAssignedBy("ADMIN"); // TODO: Get from authentication context
+                    history.setNotes("Balance assignment via MoPay payment");
+                    history.setStatus(BalanceAssignmentStatus.PENDING);
+                    
+                    // Check MoPay response
+                    String transactionId = moPayResponse != null ? moPayResponse.getTransactionId() : null;
+                    if (moPayResponse != null && moPayResponse.getStatus() != null && moPayResponse.getStatus() == 201 
+                        && transactionId != null) {
+                        // Successfully initiated - store transaction ID
+                        history.setMopayTransactionId(transactionId);
+                    } else {
+                        // Initiation failed
+                        history.setStatus(BalanceAssignmentStatus.REJECTED);
+                        String errorMessage = moPayResponse != null && moPayResponse.getMessage() != null 
+                            ? moPayResponse.getMessage() 
+                            : "MoPay payment initiation failed";
+                        history.setNotes("Balance assignment failed: " + errorMessage);
+                    }
+                    
+                    balanceAssignmentHistoryRepository.save(history);
+                } else {
+                    // Balance is being decreased - just create history entry (no payment needed)
+                    BalanceAssignmentHistory history = new BalanceAssignmentHistory();
+                    history.setReceiver(receiver);
+                    history.setAssignedBalance(newAssignedBalance);
+                    history.setPreviousAssignedBalance(currentAssigned);
+                    history.setBalanceDifference(balanceDifference);
+                    history.setAssignedBy("ADMIN");
+                    history.setNotes("Balance assignment updated (reduction)");
+                    history.setStatus(BalanceAssignmentStatus.PENDING);
+                    balanceAssignmentHistoryRepository.save(history);
+                }
+                
                 // Don't update receiver balance until approved - wait for receiver approval
             }
             // If balance hasn't changed, no need to create history entry
@@ -226,6 +293,130 @@ public class ReceiverService {
 
         Receiver updatedReceiver = receiverRepository.save(receiver);
         return mapToResponse(updatedReceiver);
+    }
+
+    public BalanceAssignmentHistoryResponse assignBalance(UUID receiverId, AssignBalanceRequest request) {
+        Receiver receiver = receiverRepository.findById(receiverId)
+                .orElseThrow(() -> new RuntimeException("Receiver not found with id: " + receiverId));
+
+        BigDecimal newAssignedBalance = request.getAssignedBalance();
+        BigDecimal currentAssigned = receiver.getAssignedBalance();
+        BigDecimal balanceDifference = newAssignedBalance.subtract(currentAssigned);
+
+        // Validate receiver phone matches
+        String normalizedReceiverPhone = normalizePhoneTo12Digits(receiver.getReceiverPhone());
+        String normalizedRequestReceiverPhone = normalizePhoneTo12Digits(request.getReceiverPhone());
+        if (!normalizedReceiverPhone.equals(normalizedRequestReceiverPhone)) {
+            throw new RuntimeException("Receiver phone number does not match. Expected: " + receiver.getReceiverPhone() + ", Provided: " + request.getReceiverPhone());
+        }
+
+        // Allow multiple assignment attempts - each call creates a new history entry
+        // This allows retries if payment fails
+
+        // If reducing balance (difference is negative or zero), create history entry but no payment
+        if (balanceDifference.compareTo(BigDecimal.ZERO) <= 0) {
+            // Balance is being reduced - just create history entry (no payment needed)
+            BalanceAssignmentHistory history = new BalanceAssignmentHistory();
+            history.setReceiver(receiver);
+            history.setAssignedBalance(newAssignedBalance);
+            history.setPreviousAssignedBalance(currentAssigned);
+            history.setBalanceDifference(balanceDifference);
+            history.setAssignedBy("ADMIN");
+            history.setNotes(request.getNotes() != null ? request.getNotes() : "Balance reduction");
+            history.setStatus(BalanceAssignmentStatus.PENDING); // Still requires approval for reductions
+            
+            // Update discount and bonus percentages if provided
+            if (request.getDiscountPercentage() != null) {
+                if (request.getDiscountPercentage().compareTo(BigDecimal.ZERO) < 0 ||
+                    request.getDiscountPercentage().compareTo(new BigDecimal("100")) > 0) {
+                    throw new RuntimeException("Discount percentage must be between 0 and 100");
+                }
+                receiver.setDiscountPercentage(request.getDiscountPercentage());
+            }
+
+            if (request.getUserBonusPercentage() != null) {
+                if (request.getUserBonusPercentage().compareTo(BigDecimal.ZERO) < 0 ||
+                    request.getUserBonusPercentage().compareTo(new BigDecimal("100")) > 0) {
+                    throw new RuntimeException("User bonus percentage must be between 0 and 100");
+                }
+                receiver.setUserBonusPercentage(request.getUserBonusPercentage());
+            }
+            
+            receiverRepository.save(receiver);
+            BalanceAssignmentHistory savedHistory = balanceAssignmentHistoryRepository.save(history);
+            return mapToBalanceAssignmentHistoryResponse(savedHistory);
+        }
+
+        // Balance is being increased - initiate MoPay payment
+        // Update discount and bonus percentages if provided
+        if (request.getDiscountPercentage() != null) {
+            if (request.getDiscountPercentage().compareTo(BigDecimal.ZERO) < 0 ||
+                request.getDiscountPercentage().compareTo(new BigDecimal("100")) > 0) {
+                throw new RuntimeException("Discount percentage must be between 0 and 100");
+            }
+            receiver.setDiscountPercentage(request.getDiscountPercentage());
+        }
+
+        if (request.getUserBonusPercentage() != null) {
+            if (request.getUserBonusPercentage().compareTo(BigDecimal.ZERO) < 0 ||
+                request.getUserBonusPercentage().compareTo(new BigDecimal("100")) > 0) {
+                throw new RuntimeException("User bonus percentage must be between 0 and 100");
+            }
+            receiver.setUserBonusPercentage(request.getUserBonusPercentage());
+        }
+
+        // Initiate MoPay payment from admin to receiver
+        MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
+        moPayRequest.setAmount(balanceDifference);
+        moPayRequest.setCurrency("RWF");
+        
+        // Normalize admin phone to 12 digits
+        String normalizedAdminPhone = normalizePhoneTo12Digits(request.getAdminPhone());
+        moPayRequest.setPhone(Long.parseLong(normalizedAdminPhone));
+        moPayRequest.setPayment_mode("MOBILE");
+        moPayRequest.setMessage("Balance assignment to " + receiver.getCompanyName());
+        
+        // Create transfer to receiver
+        MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
+        transfer.setAmount(balanceDifference);
+        transfer.setPhone(Long.parseLong(normalizedReceiverPhone));
+        transfer.setMessage("Balance assignment from admin");
+        moPayRequest.setTransfers(java.util.List.of(transfer));
+        
+        // Initiate payment with MoPay
+        MoPayResponse moPayResponse = moPayService.initiatePayment(moPayRequest);
+        
+        // Create balance assignment history
+        BalanceAssignmentHistory history = new BalanceAssignmentHistory();
+        history.setReceiver(receiver);
+        history.setAssignedBalance(newAssignedBalance);
+        history.setPreviousAssignedBalance(currentAssigned);
+        history.setBalanceDifference(balanceDifference);
+        history.setAssignedBy("ADMIN"); // TODO: Get from authentication context
+        history.setNotes(request.getNotes() != null ? request.getNotes() : "Balance assignment via MoPay payment");
+        history.setStatus(BalanceAssignmentStatus.PENDING);
+        
+        // Check MoPay response
+        String transactionId = moPayResponse != null ? moPayResponse.getTransactionId() : null;
+        if (moPayResponse != null && moPayResponse.getStatus() != null && moPayResponse.getStatus() == 201 
+            && transactionId != null) {
+            // Successfully initiated - store transaction ID
+            history.setMopayTransactionId(transactionId);
+        } else {
+            // Initiation failed
+            history.setStatus(BalanceAssignmentStatus.REJECTED);
+            String errorMessage = moPayResponse != null && moPayResponse.getMessage() != null 
+                ? moPayResponse.getMessage() 
+                : "MoPay payment initiation failed";
+            history.setNotes("Balance assignment failed: " + errorMessage);
+        }
+        
+        // Save receiver updates (discount/bonus percentages)
+        receiverRepository.save(receiver);
+        
+        // Save balance assignment history
+        BalanceAssignmentHistory savedHistory = balanceAssignmentHistoryRepository.save(history);
+        return mapToBalanceAssignmentHistoryResponse(savedHistory);
     }
 
     public ReceiverResponse suspendReceiver(UUID id) {
@@ -449,6 +640,7 @@ public class ReceiverService {
         response.setStatus(history.getStatus());
         response.setApprovedBy(history.getApprovedBy());
         response.setApprovedAt(history.getApprovedAt());
+        response.setMopayTransactionId(history.getMopayTransactionId());
         response.setCreatedAt(history.getCreatedAt());
         return response;
     }
@@ -480,9 +672,17 @@ public class ReceiverService {
             BigDecimal newAssignedBalance = history.getAssignedBalance();
             BigDecimal currentRemaining = receiver.getRemainingBalance();
             
-            // Calculate the difference and update remaining balance
-            BigDecimal difference = newAssignedBalance.subtract(currentAssigned);
-            BigDecimal newRemainingBalance = currentRemaining.add(difference);
+            // Calculate the base difference (new assigned - current assigned)
+            BigDecimal baseDifference = newAssignedBalance.subtract(currentAssigned);
+            
+            // Add discount percentage as bonus to remaining balance
+            // Example: If assigning 10,000 with 10% discount, remainingBalance gets 10,000 + 1,000 = 11,000
+            BigDecimal discountPercentage = receiver.getDiscountPercentage() != null ? receiver.getDiscountPercentage() : BigDecimal.ZERO;
+            BigDecimal discountBonus = baseDifference.multiply(discountPercentage).divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
+            BigDecimal totalBonus = baseDifference.add(discountBonus);
+            
+            // Update remaining balance: current + base difference + discount bonus
+            BigDecimal newRemainingBalance = currentRemaining.add(totalBonus);
             
             // Ensure remaining balance doesn't go below zero
             if (newRemainingBalance.compareTo(BigDecimal.ZERO) < 0) {
@@ -500,6 +700,37 @@ public class ReceiverService {
         
         BalanceAssignmentHistory updatedHistory = balanceAssignmentHistoryRepository.save(history);
         return mapToBalanceAssignmentHistoryResponse(updatedHistory);
+    }
+
+    /**
+     * Normalize phone number to 12 digits format (remove + and other non-digit characters)
+     * MoPay API requires 12-digit phone numbers
+     */
+    private String normalizePhoneTo12Digits(String phone) {
+        if (phone == null || phone.trim().isEmpty()) {
+            throw new RuntimeException("Phone number cannot be empty");
+        }
+        // Remove all non-digit characters
+        String digitsOnly = phone.replaceAll("[^0-9]", "");
+        
+        // If phone starts with country code 250, ensure it's 12 digits
+        if (digitsOnly.startsWith("250") && digitsOnly.length() == 12) {
+            return digitsOnly;
+        } else if (digitsOnly.startsWith("250") && digitsOnly.length() == 9) {
+            // Already has country code but missing leading 0, add it
+            return "250" + digitsOnly.substring(3);
+        } else if (digitsOnly.length() == 9) {
+            // 9 digits without country code, add 250
+            return "250" + digitsOnly;
+        } else if (digitsOnly.length() == 10 && digitsOnly.startsWith("0")) {
+            // 10 digits starting with 0, replace 0 with 250
+            return "250" + digitsOnly.substring(1);
+        } else if (digitsOnly.length() == 12) {
+            // Already 12 digits
+            return digitsOnly;
+        } else {
+            throw new RuntimeException("Invalid phone number format. Expected 9-12 digits, got: " + digitsOnly.length());
+        }
     }
 }
 

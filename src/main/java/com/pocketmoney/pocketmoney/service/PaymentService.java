@@ -206,11 +206,11 @@ public class PaymentService {
         // Calculate admin income amount (e.g., 8% = 10% - 2%)
         BigDecimal adminIncomeAmount = discountAmount.subtract(userBonusAmount);
         
-        // Receiver's remaining balance is deducted by: paymentAmount + discountAmount
-        // Example: User pays 500, with 10% charge = 500 + 50 = 550 deducted from receiver balance
+        // Receiver's remaining balance is deducted by ONLY the payment amount (discount was already added as bonus when balance was assigned)
+        // Example: User pays 500, deduct only 500 from receiver balance (no discount deduction)
         // Check if receiver has sufficient remaining balance BEFORE processing payment
         BigDecimal receiverBalanceBefore = receiver.getRemainingBalance() != null ? receiver.getRemainingBalance() : BigDecimal.ZERO;
-        BigDecimal receiverBalanceReduction = paymentAmount.add(discountAmount); // Payment amount + charge percentage
+        BigDecimal receiverBalanceReduction = paymentAmount; // Only deduct payment amount, not payment + discount
         BigDecimal receiverBalanceAfter = receiverBalanceBefore.subtract(receiverBalanceReduction);
         
         // Check if remaining balance would be below 1 after this transaction
@@ -238,10 +238,8 @@ public class PaymentService {
         receiver.setTotalReceived(receiverNewTotal);
         
         // Update receiver's remaining balance
-        // Receiver remaining balance is reduced by: paymentAmount + discountAmount (e.g., 500 + 50 = 550)
-        // The discount amount (10%) is the service charge, which is split:
-        //   - Part goes to user as bonus (e.g., 2%)
-        //   - Remaining part goes to admin as income (e.g., 8%)
+        // Receiver remaining balance is reduced by ONLY the payment amount
+        // The discount percentage was already added as a bonus when balance was assigned
         // (Already calculated and validated above - receiverBalanceAfter is safe to use)
         receiver.setRemainingBalance(receiverBalanceAfter);
         receiver.setLastTransactionDate(LocalDateTime.now());
@@ -692,6 +690,70 @@ public class PaymentService {
                     return transaction;
                 })
                 .collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public AdminDashboardStatisticsResponse getAdminDashboardStatistics() {
+        AdminDashboardStatisticsResponse response = new AdminDashboardStatisticsResponse();
+
+        // Total Users
+        long totalUsers = userRepository.count();
+        response.setTotalUsers(totalUsers);
+
+        // Total Merchants (Receivers) - count all receivers
+        long totalMerchants = receiverRepository.count();
+        response.setTotalMerchants(totalMerchants);
+
+        // Total Transactions - count all successful payment transactions
+        Long totalTransactions = transactionRepository.countAllSuccessfulPaymentTransactions();
+        response.setTotalTransactions(totalTransactions != null ? totalTransactions : 0L);
+
+        // Total Revenue - sum of all admin income
+        BigDecimal totalRevenue = transactionRepository.sumAdminIncomeAll();
+        response.setTotalRevenue(totalRevenue != null ? totalRevenue : BigDecimal.ZERO);
+
+        // Recent Activities - get 5 most recent transactions
+        List<AdminDashboardStatisticsResponse.RecentActivity> recentActivities = 
+            transactionRepository.findAllWithUser().stream()
+                .limit(5)
+                .map(this::mapToRecentActivity)
+                .collect(Collectors.toList());
+        response.setRecentActivities(recentActivities);
+
+        return response;
+    }
+
+    private AdminDashboardStatisticsResponse.RecentActivity mapToRecentActivity(Transaction transaction) {
+        AdminDashboardStatisticsResponse.RecentActivity activity = 
+            new AdminDashboardStatisticsResponse.RecentActivity();
+        
+        activity.setId(transaction.getId());
+        activity.setType(transaction.getTransactionType().name());
+        activity.setAmount(transaction.getAmount());
+        activity.setCreatedAt(transaction.getCreatedAt());
+        activity.setStatus(transaction.getStatus().name());
+
+        // Set description based on transaction type
+        if (transaction.getTransactionType() == TransactionType.PAYMENT) {
+            activity.setDescription("Payment to " + 
+                (transaction.getReceiver() != null ? transaction.getReceiver().getCompanyName() : "Unknown"));
+            activity.setUserName(transaction.getUser().getFullNames());
+            if (transaction.getReceiver() != null) {
+                activity.setReceiverName(transaction.getReceiver().getCompanyName());
+            }
+            if (transaction.getPaymentCategory() != null) {
+                activity.setPaymentCategoryName(transaction.getPaymentCategory().getName());
+            }
+        } else if (transaction.getTransactionType() == TransactionType.TOP_UP) {
+            activity.setDescription("Top-up for " + transaction.getUser().getFullNames());
+            activity.setUserName(transaction.getUser().getFullNames());
+        } else {
+            activity.setDescription(transaction.getMessage() != null ? transaction.getMessage() : 
+                transaction.getTransactionType().name());
+            activity.setUserName(transaction.getUser().getFullNames());
+        }
+
+        return activity;
     }
 }
 
