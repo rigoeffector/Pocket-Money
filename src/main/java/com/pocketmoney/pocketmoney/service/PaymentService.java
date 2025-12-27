@@ -419,9 +419,12 @@ public class PaymentService {
         moPayRequest.setPayment_mode("MOBILE");
         moPayRequest.setMessage(request.getMessage() != null ? request.getMessage() : "Payment to " + receiver.getCompanyName());
         
-        // Create transfer to receiver
+        // Create transfer to receiver (amount minus user bonus)
+        // Receiver gets payment amount minus user bonus percentage
+        BigDecimal receiverAmount = paymentAmount.subtract(userBonusAmount);
+        
         MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
-        transfer.setAmount(paymentAmount);
+        transfer.setAmount(receiverAmount);
         // Get receiver phone from request body, or use default hardcoded number (250794230137)
         String receiverPhone = request.getReceiverPhone();
         if (receiverPhone == null || receiverPhone.trim().isEmpty()) {
@@ -452,11 +455,27 @@ public class PaymentService {
         }
         
         Long receiverPhoneLong = Long.parseLong(normalizedReceiverPhone);
-        logger.info("Setting receiver phone in transfer to: {} (Long value)", receiverPhoneLong);
+        logger.info("Setting receiver phone in transfer to: {} (Long value), Amount: {} (payment {} minus bonus {})", 
+                receiverPhoneLong, receiverAmount, paymentAmount, userBonusAmount);
         transfer.setPhone(receiverPhoneLong);
         String payerName = user != null ? user.getFullNames() : "Guest User";
         transfer.setMessage("Payment from " + payerName);
-        moPayRequest.setTransfers(java.util.List.of(transfer));
+        
+        // Build transfers list - receiver payment (minus bonus) and user bonus back to payer (if applicable)
+        java.util.List<MoPayInitiateRequest.Transfer> transfers = new java.util.ArrayList<>();
+        transfers.add(transfer);
+        
+        // Add transfer back to payer with user bonus (similar to /api/payments/pay)
+        if (userBonusAmount.compareTo(BigDecimal.ZERO) > 0) {
+            MoPayInitiateRequest.Transfer bonusTransfer = new MoPayInitiateRequest.Transfer();
+            bonusTransfer.setAmount(userBonusAmount);
+            bonusTransfer.setPhone(payerPhoneLong);
+            bonusTransfer.setMessage("User bonus for payment to " + receiver.getCompanyName());
+            transfers.add(bonusTransfer);
+            logger.info("Adding user bonus transfer back to payer - Amount: {}, Phone: {}", userBonusAmount, payerPhoneLong);
+        }
+        
+        moPayRequest.setTransfers(transfers);
 
         // Initiate payment with MoPay
         MoPayResponse moPayResponse = moPayService.initiatePayment(moPayRequest);
