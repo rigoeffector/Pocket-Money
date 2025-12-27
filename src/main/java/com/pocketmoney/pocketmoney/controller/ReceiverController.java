@@ -21,6 +21,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
@@ -220,7 +221,12 @@ public class ReceiverController {
             @Valid @RequestBody AssignBalanceRequest request) {
         try {
             BalanceAssignmentHistoryResponse response = receiverService.assignBalance(id, request);
-            return ResponseEntity.ok(ApiResponse.success("Balance assignment initiated successfully", response));
+            String message = "Balance assignment initiated successfully";
+            if (response.getPaymentAmount() != null && response.getPaymentAmount().compareTo(BigDecimal.ZERO) > 0) {
+                message = String.format("Balance assignment initiated successfully. Payment amount: %s RWF (Current balance: %s, Target balance: %s)", 
+                    response.getPaymentAmount(), response.getPreviousAssignedBalance(), response.getAssignedBalance());
+            }
+            return ResponseEntity.ok(ApiResponse.success(message, response));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.error(e.getMessage()));

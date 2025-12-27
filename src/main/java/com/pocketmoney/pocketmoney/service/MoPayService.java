@@ -54,15 +54,22 @@ public class MoPayService {
             );
             
             MoPayResponse responseBody = response.getBody();
-            logger.info("MoPay response status: {}", response.getStatusCode());
+            int httpStatusCode = response.getStatusCode().value();
+            logger.info("MoPay HTTP response status: {}", httpStatusCode);
             logger.debug("MoPay response body: {}", responseBody);
             
             if (responseBody == null) {
                 logger.warn("MoPay returned null response body");
                 MoPayResponse errorResponse = new MoPayResponse();
+                errorResponse.setStatus(httpStatusCode);
                 errorResponse.setSuccess(false);
                 errorResponse.setMessage("MoPay returned null response");
                 return errorResponse;
+            }
+            
+            // Set HTTP status code in response if not already set from JSON body
+            if (responseBody.getStatus() == null) {
+                responseBody.setStatus(httpStatusCode);
             }
             
             return responseBody;

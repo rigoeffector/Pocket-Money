@@ -24,6 +24,8 @@ import com.pocketmoney.pocketmoney.repository.TransactionRepository;
 import com.pocketmoney.pocketmoney.util.JwtUtil;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.Query;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -40,6 +42,8 @@ import java.util.stream.Collectors;
 @Service
 @Transactional
 public class ReceiverService {
+
+    private static final Logger logger = LoggerFactory.getLogger(ReceiverService.class);
 
     private final ReceiverRepository receiverRepository;
     private final TransactionRepository transactionRepository;
@@ -215,8 +219,9 @@ public class ReceiverService {
                     }
                     
                     // Initiate MoPay payment from admin to receiver
+                    // Pay the full requested amount, not just the difference
                     MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
-                    moPayRequest.setAmount(balanceDifference);
+                    moPayRequest.setAmount(newAssignedBalance);
                     moPayRequest.setCurrency("RWF");
                     
                     // Normalize admin phone to 12 digits
@@ -225,9 +230,9 @@ public class ReceiverService {
                     moPayRequest.setPayment_mode("MOBILE");
                     moPayRequest.setMessage("Balance assignment to " + receiver.getCompanyName());
                     
-                    // Create transfer to receiver
+                    // Create transfer to receiver - pay full requested amount
                     MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
-                    transfer.setAmount(balanceDifference);
+                    transfer.setAmount(newAssignedBalance);
                     // Normalize receiver phone to 12 digits
                     String normalizedReceiverPhone = normalizePhoneTo12Digits(receiver.getReceiverPhone());
                     transfer.setPhone(Long.parseLong(normalizedReceiverPhone));
@@ -312,6 +317,9 @@ public class ReceiverService {
         BigDecimal currentAssigned = receiver.getAssignedBalance();
         BigDecimal balanceDifference = newAssignedBalance.subtract(currentAssigned);
 
+        logger.info("Assigning balance to receiver {}: Current={}, New={}, Difference={}", 
+                receiverId, currentAssigned, newAssignedBalance, balanceDifference);
+
         // Validate receiver phone matches
         String normalizedReceiverPhone = normalizePhoneTo12Digits(receiver.getReceiverPhone());
         String normalizedRequestReceiverPhone = normalizePhoneTo12Digits(request.getReceiverPhone());
@@ -324,6 +332,7 @@ public class ReceiverService {
 
         // If reducing balance (difference is negative or zero), create history entry but no payment
         if (balanceDifference.compareTo(BigDecimal.ZERO) <= 0) {
+            logger.info("Balance difference is {} (<= 0), skipping payment initiation. Only creating history entry.", balanceDifference);
             // Balance is being reduced - just create history entry (no payment needed)
             BalanceAssignmentHistory history = new BalanceAssignmentHistory();
             history.setReceiver(receiver);
@@ -375,8 +384,12 @@ public class ReceiverService {
         }
 
         // Initiate MoPay payment from admin to receiver
+        // Pay the full requested amount, not just the difference
+        logger.info("Preparing MoPay payment - Full amount: {}, Current balance: {}, Difference: {}", 
+                newAssignedBalance, currentAssigned, balanceDifference);
+        
         MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
-        moPayRequest.setAmount(balanceDifference);
+        moPayRequest.setAmount(newAssignedBalance);  // FULL AMOUNT, not balanceDifference
         moPayRequest.setCurrency("RWF");
         
         // Normalize admin phone to 12 digits
@@ -385,12 +398,15 @@ public class ReceiverService {
         moPayRequest.setPayment_mode("MOBILE");
         moPayRequest.setMessage("Balance assignment to " + receiver.getCompanyName());
         
-        // Create transfer to receiver
+        // Create transfer to receiver - pay full requested amount
         MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
-        transfer.setAmount(balanceDifference);
+        transfer.setAmount(newAssignedBalance);  // FULL AMOUNT, not balanceDifference
         transfer.setPhone(Long.parseLong(normalizedReceiverPhone));
         transfer.setMessage("Balance assignment from admin");
         moPayRequest.setTransfers(java.util.List.of(transfer));
+        
+        logger.info("Sending MoPay payment request - Amount: {}, Transfer Amount: {}", 
+                moPayRequest.getAmount(), transfer.getAmount());
         
         // Initiate payment with MoPay
         MoPayResponse moPayResponse = moPayService.initiatePayment(moPayRequest);
@@ -407,16 +423,31 @@ public class ReceiverService {
         
         // Check MoPay response
         String transactionId = moPayResponse != null ? moPayResponse.getTransactionId() : null;
-        if (moPayResponse != null && moPayResponse.getStatus() != null && moPayResponse.getStatus() == 201 
-            && transactionId != null) {
+        // Check if payment was successfully initiated
+        // Success criteria: HTTP status 201 (CREATED) OR transactionId is present
+        boolean paymentInitiated = false;
+        if (moPayResponse != null) {
+            Integer httpStatus = moPayResponse.getStatus();
+            // Check for HTTP 201 (CREATED) or presence of transactionId
+            if ((httpStatus != null && httpStatus == 201) || transactionId != null) {
+                paymentInitiated = true;
+            }
+        }
+        
+        if (paymentInitiated && transactionId != null) {
             // Successfully initiated - store transaction ID
             history.setMopayTransactionId(transactionId);
+            logger.info("MoPay payment initiated successfully. Transaction ID: {}, Payment amount: {}, Balance difference: {}", 
+                    transactionId, newAssignedBalance, balanceDifference);
         } else {
             // Initiation failed
             history.setStatus(BalanceAssignmentStatus.REJECTED);
             String errorMessage = moPayResponse != null && moPayResponse.getMessage() != null 
                 ? moPayResponse.getMessage() 
                 : "MoPay payment initiation failed";
+            Integer httpStatus = moPayResponse != null ? moPayResponse.getStatus() : null;
+            logger.error("MoPay payment initiation failed. HTTP Status: {}, Transaction ID: {}, Error: {}", 
+                    httpStatus, transactionId, errorMessage);
             history.setNotes("Balance assignment failed: " + errorMessage);
         }
         
@@ -876,6 +907,11 @@ public class ReceiverService {
         response.setAssignedBalance(history.getAssignedBalance());
         response.setPreviousAssignedBalance(history.getPreviousAssignedBalance());
         response.setBalanceDifference(history.getBalanceDifference());
+        // Payment amount is the full assigned balance when increasing, 0 when reducing
+        BigDecimal paymentAmount = history.getBalanceDifference().compareTo(BigDecimal.ZERO) > 0 
+            ? history.getAssignedBalance()  // Pay full requested amount, not just difference
+            : BigDecimal.ZERO;
+        response.setPaymentAmount(paymentAmount);
         response.setAssignedBy(history.getAssignedBy());
         response.setNotes(history.getNotes());
         response.setStatus(history.getStatus());
