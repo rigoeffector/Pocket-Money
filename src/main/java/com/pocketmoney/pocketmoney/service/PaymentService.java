@@ -43,12 +43,13 @@ public class PaymentService {
     private final PasswordEncoder passwordEncoder;
     private final EntityManager entityManager;
     private final MessagingService messagingService;
+    private final WhatsAppService whatsAppService;
 
     public PaymentService(UserRepository userRepository, TransactionRepository transactionRepository,
                          PaymentCategoryRepository paymentCategoryRepository, ReceiverRepository receiverRepository,
                          BalanceAssignmentHistoryRepository balanceAssignmentHistoryRepository,
                          MoPayService moPayService, PasswordEncoder passwordEncoder, EntityManager entityManager,
-                         MessagingService messagingService) {
+                         MessagingService messagingService, WhatsAppService whatsAppService) {
         this.userRepository = userRepository;
         this.transactionRepository = transactionRepository;
         this.paymentCategoryRepository = paymentCategoryRepository;
@@ -58,6 +59,7 @@ public class PaymentService {
         this.passwordEncoder = passwordEncoder;
         this.entityManager = entityManager;
         this.messagingService = messagingService;
+        this.whatsAppService = whatsAppService;
     }
 
     // Helper method to normalize phone number to 12 digits (250XXXXXXXXX format)
@@ -263,7 +265,7 @@ public class PaymentService {
         
         // Check if remaining balance would be below 1 after this transaction
         if (receiverBalanceAfter.compareTo(new BigDecimal("1")) < 0) {
-            throw new RuntimeException("Insufficient Remaining Balance. Please Contact BeFosot Administrator");
+            throw new RuntimeException("Contact BeFosot to top up for your company. Your card has sufficient balance, but the company's selling balance is low.");
         }
         
         // For PAYMENT: Direct internal transfer (no MoPay integration needed)
@@ -322,24 +324,44 @@ public class PaymentService {
 
         Transaction savedTransaction = transactionRepository.save(transaction);
         
-        // Send SMS notifications to user and receiver
+        // Send SMS and WhatsApp notifications to user and receiver
         try {
-            // Send SMS to user
+            // Send SMS and WhatsApp to user (NFC Card payment)
             String userPhoneNormalized = normalizePhoneTo12Digits(user.getPhoneNumber());
-            String userMessage = String.format("Payment of %s RWF to %s successful. New balance: %s RWF", 
+            String userSmsMessage = String.format("Payment of %s RWF to %s successful. New balance: %s RWF", 
                 paymentAmount.toPlainString(), receiver.getCompanyName(), userNewBalance.toPlainString());
-            messagingService.sendSms(userMessage, userPhoneNormalized);
-            logger.info("SMS sent to user {} about payment", userPhoneNormalized);
             
-            // Send SMS to receiver
+            // Build WhatsApp message with cashback information - show payer/user name (not shop name)
+            String userPayerName = (user.getFullNames() != null && !user.getFullNames().trim().isEmpty()) 
+                ? user.getFullNames() 
+                : user.getPhoneNumber();
+            String userWhatsAppMessage;
+            if (userBonusAmount != null && userBonusAmount.compareTo(BigDecimal.ZERO) > 0) {
+                userWhatsAppMessage = String.format("[%s]: Paid %s RWF via Card.\n\nCashback: %s RWF credited.\n\nEvery purchase gives you cashback. Keep shopping and earn more!",
+                    userPayerName, paymentAmount.toPlainString(), userBonusAmount.toPlainString());
+            } else {
+                userWhatsAppMessage = String.format("[%s]: Paid %s RWF via Card.",
+                    userPayerName, paymentAmount.toPlainString());
+            }
+            
+            messagingService.sendSms(userSmsMessage, userPhoneNormalized);
+            whatsAppService.sendWhatsApp(userWhatsAppMessage, userPhoneNormalized);
+            logger.info("SMS sent to user {}: {}", userPhoneNormalized, userSmsMessage);
+            logger.info("WhatsApp sent to user {}: {}", userPhoneNormalized, userWhatsAppMessage);
+            
+            // Send SMS and WhatsApp to receiver
             String receiverPhoneNormalized = normalizePhoneTo12Digits(receiver.getReceiverPhone());
-            String receiverMessage = String.format("Received %s RWF from %s", 
-                paymentAmount.toPlainString(), user.getFullNames());
-            messagingService.sendSms(receiverMessage, receiverPhoneNormalized);
-            logger.info("SMS sent to receiver {} about payment", receiverPhoneNormalized);
+            // For NFC Card payment: Include payer name in WhatsApp message (reuse userPayerName from above)
+            String receiverSmsMessage = String.format("Received %s RWF from %s", 
+                paymentAmount.toPlainString(), userPayerName);
+            String receiverWhatsAppMessage = String.format("Received %s RWF from %s (NFC Card)", 
+                paymentAmount.toPlainString(), userPayerName);
+            messagingService.sendSms(receiverSmsMessage, receiverPhoneNormalized);
+            whatsAppService.sendWhatsApp(receiverWhatsAppMessage, receiverPhoneNormalized);
+            logger.info("SMS and WhatsApp sent to receiver {} about payment", receiverPhoneNormalized);
         } catch (Exception e) {
-            logger.error("Failed to send payment SMS notifications: ", e);
-            // Don't fail the payment if SMS fails
+            logger.error("Failed to send payment SMS/WhatsApp notifications: ", e);
+            // Don't fail the payment if SMS/WhatsApp fails
         }
         
         return mapToPaymentResponse(savedTransaction);
@@ -407,15 +429,16 @@ public class PaymentService {
         // Calculate admin income amount (e.g., 8% = 10% - 2%)
         BigDecimal adminIncomeAmount = discountAmount.subtract(userBonusAmount);
         
-        // Check if balance owner has sufficient remaining balance
+        // Note: For MOMO payments, we don't check receiver balance here because:
+        // 1. Payment comes from user's external MOMO wallet, not from system balance
+        // 2. Receiver balance will be updated after MOMO payment is confirmed (in checkTransactionStatus)
+        // 3. Balance check is only needed for internal payments (makePayment method)
         BigDecimal receiverBalanceBefore = balanceOwner.getRemainingBalance() != null ? balanceOwner.getRemainingBalance() : BigDecimal.ZERO;
         BigDecimal receiverBalanceReduction = paymentAmount; // Only deduct payment amount
         BigDecimal receiverBalanceAfter = receiverBalanceBefore.subtract(receiverBalanceReduction);
         
-        // Check if remaining balance would be below 1 after this transaction
-        if (receiverBalanceAfter.compareTo(new BigDecimal("1")) < 0) {
-            throw new RuntimeException("Insufficient Remaining Balance. Please Contact BeFosot Administrator");
-        }
+        // Store the calculated balance after for later use when payment is confirmed
+        // (will be applied in checkTransactionStatus when status becomes SUCCESS)
 
         // Create MoPay initiate request
         MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
@@ -446,6 +469,9 @@ public class PaymentService {
         // Create transfer to receiver (amount minus user bonus)
         // Receiver gets payment amount minus user bonus percentage
         BigDecimal receiverAmount = paymentAmount.subtract(userBonusAmount);
+        
+        logger.info("=== MOMO PAYMENT TRANSFER CALCULATION ===");
+        logger.info("Payment amount: {}, User bonus amount: {}, Receiver amount: {}", paymentAmount, userBonusAmount, receiverAmount);
         
         MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
         transfer.setAmount(receiverAmount);
@@ -489,15 +515,33 @@ public class PaymentService {
         java.util.List<MoPayInitiateRequest.Transfer> transfers = new java.util.ArrayList<>();
         transfers.add(transfer);
         
+        logger.info("Added receiver transfer - Amount: {}, Phone: {}", receiverAmount, receiverPhoneLong);
+        
         // Add transfer back to payer with user bonus (similar to /api/payments/pay)
+        logger.info("Checking if user bonus should be added - User bonus amount: {}, Is greater than zero: {}", 
+                userBonusAmount, userBonusAmount.compareTo(BigDecimal.ZERO) > 0);
+        
         if (userBonusAmount.compareTo(BigDecimal.ZERO) > 0) {
             MoPayInitiateRequest.Transfer bonusTransfer = new MoPayInitiateRequest.Transfer();
             bonusTransfer.setAmount(userBonusAmount);
             bonusTransfer.setPhone(payerPhoneLong);
             bonusTransfer.setMessage("User bonus for payment to " + receiver.getCompanyName());
             transfers.add(bonusTransfer);
-            logger.info("Adding user bonus transfer back to payer - Amount: {}, Phone: {}", userBonusAmount, payerPhoneLong);
+            logger.info("✅ Added user bonus transfer back to payer - Amount: {}, Phone: {}", userBonusAmount, payerPhoneLong);
+        } else {
+            logger.warn("⚠️ User bonus amount is zero or negative, NOT adding bonus transfer. Amount: {}", userBonusAmount);
         }
+        
+        logger.info("=== TRANSFERS SUMMARY ===");
+        logger.info("Total transfers: {}", transfers.size());
+        BigDecimal totalTransferAmount = BigDecimal.ZERO;
+        for (int i = 0; i < transfers.size(); i++) {
+            MoPayInitiateRequest.Transfer t = transfers.get(i);
+            logger.info("Transfer {}: Amount={}, Phone={}, Message={}", i + 1, t.getAmount(), t.getPhone(), t.getMessage());
+            totalTransferAmount = totalTransferAmount.add(t.getAmount());
+        }
+        logger.info("Total transfer amount: {}, Payment amount: {}", totalTransferAmount, paymentAmount);
+        logger.info("Main MoPay request amount: {}", moPayRequest.getAmount());
         
         moPayRequest.setTransfers(transfers);
 
@@ -532,6 +576,9 @@ public class PaymentService {
             // Successfully initiated - store transaction ID and set as PENDING
             transaction.setMopayTransactionId(transactionId);
             transaction.setStatus(TransactionStatus.PENDING);
+            
+            // Note: SMS and WhatsApp notifications will be sent only when payment is confirmed (SUCCESS)
+            // See checkTransactionStatus method for notification logic
         } else {
             // Initiation failed - mark as FAILED with error message
             transaction.setStatus(TransactionStatus.FAILED);
@@ -665,29 +712,53 @@ public class PaymentService {
                             }
                             // If user is null (guest payment), user bonus is not credited
                             
-                            // Send SMS notifications for MOMO payments when status changes to SUCCESS
+                            // Send SMS and WhatsApp notifications for MOMO payments when status changes to SUCCESS
                             try {
-                                // Send SMS to receiver
+                                // Send SMS and WhatsApp to receiver
                                 if (receiver.getReceiverPhone() != null) {
                                     String receiverPhoneNormalized = normalizePhoneTo12Digits(receiver.getReceiverPhone());
-                                    String payerName = transactionUser != null ? transactionUser.getFullNames() : "Guest";
-                                    String receiverMessage = String.format("Received %s RWF from %s", 
-                                        paymentAmount.toPlainString(), payerName);
-                                    messagingService.sendSms(receiverMessage, receiverPhoneNormalized);
-                                    logger.info("SMS sent to receiver {} about MOMO payment", receiverPhoneNormalized);
+                                    // For MOMO payment: Use payer phone number in WhatsApp message
+                                    String payerPhone = transaction.getPhoneNumber() != null && !transaction.getPhoneNumber().trim().isEmpty()
+                                        ? transaction.getPhoneNumber()
+                                        : (transactionUser != null && transactionUser.getPhoneNumber() != null 
+                                            ? transactionUser.getPhoneNumber() 
+                                            : "Guest");
+                                    String receiverSmsMessage = String.format("Received %s RWF from %s", 
+                                        paymentAmount.toPlainString(), payerPhone);
+                                    String receiverWhatsAppMessage = String.format("Received %s RWF from %s (MOMO)", 
+                                        paymentAmount.toPlainString(), payerPhone);
+                                    messagingService.sendSms(receiverSmsMessage, receiverPhoneNormalized);
+                                    whatsAppService.sendWhatsApp(receiverWhatsAppMessage, receiverPhoneNormalized);
+                                    logger.info("SMS and WhatsApp sent to receiver {} about MOMO payment", receiverPhoneNormalized);
                                 }
                                 
-                                // Send SMS to user (if user exists, not guest payment)
+                                // Send SMS and WhatsApp to user (if user exists, not guest payment)
                                 if (transactionUser != null && transactionUser.getPhoneNumber() != null) {
                                     String userPhoneNormalized = normalizePhoneTo12Digits(transactionUser.getPhoneNumber());
-                                    String userMessage = String.format("Payment of %s RWF to %s successful", 
+                                    String userSmsMessage = String.format("Payment of %s RWF to %s successful", 
                                         paymentAmount.toPlainString(), receiver.getCompanyName());
-                                    messagingService.sendSms(userMessage, userPhoneNormalized);
-                                    logger.info("SMS sent to user {} about MOMO payment", userPhoneNormalized);
+                                    
+                                    // Build WhatsApp message with cashback information for MOMO payment - show payer phone
+                                    String momoPayerPhone = transaction.getPhoneNumber() != null && !transaction.getPhoneNumber().trim().isEmpty()
+                                        ? transaction.getPhoneNumber()
+                                        : transactionUser.getPhoneNumber();
+                                    String userWhatsAppMessage;
+                                    if (userBonusAmount != null && userBonusAmount.compareTo(BigDecimal.ZERO) > 0) {
+                                        userWhatsAppMessage = String.format("[%s]: Paid %s RWF via MM.\n\nCashback: %s RWF credited.\n\nEvery purchase gives you cashback. Keep shopping and earn more!",
+                                            momoPayerPhone, paymentAmount.toPlainString(), userBonusAmount.toPlainString());
+                                    } else {
+                                        userWhatsAppMessage = String.format("[%s]: Paid %s RWF via MM.",
+                                            momoPayerPhone, paymentAmount.toPlainString());
+                                    }
+                                    
+                                    messagingService.sendSms(userSmsMessage, userPhoneNormalized);
+                                    whatsAppService.sendWhatsApp(userWhatsAppMessage, userPhoneNormalized);
+                                    logger.info("SMS sent to user {}: {}", userPhoneNormalized, userSmsMessage);
+                                    logger.info("WhatsApp sent to user {}: {}", userPhoneNormalized, userWhatsAppMessage);
                                 }
                             } catch (Exception e) {
-                                logger.error("Failed to send SMS notifications for MOMO payment: ", e);
-                                // Don't fail the transaction if SMS fails
+                                logger.error("Failed to send SMS/WhatsApp notifications for MOMO payment: ", e);
+                                // Don't fail the transaction if SMS/WhatsApp fails
                             }
                         }
                     }

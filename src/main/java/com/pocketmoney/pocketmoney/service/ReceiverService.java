@@ -53,11 +53,12 @@ public class ReceiverService {
     private final MoPayService moPayService;
     private final EntityManager entityManager;
     private final MessagingService messagingService;
+    private final WhatsAppService whatsAppService;
 
     public ReceiverService(ReceiverRepository receiverRepository, TransactionRepository transactionRepository,
                           BalanceAssignmentHistoryRepository balanceAssignmentHistoryRepository,
                           PasswordEncoder passwordEncoder, JwtUtil jwtUtil, MoPayService moPayService,
-                          EntityManager entityManager, MessagingService messagingService) {
+                          EntityManager entityManager, MessagingService messagingService, WhatsAppService whatsAppService) {
         this.receiverRepository = receiverRepository;
         this.transactionRepository = transactionRepository;
         this.balanceAssignmentHistoryRepository = balanceAssignmentHistoryRepository;
@@ -66,6 +67,7 @@ public class ReceiverService {
         this.moPayService = moPayService;
         this.entityManager = entityManager;
         this.messagingService = messagingService;
+        this.whatsAppService = whatsAppService;
     }
 
     public ReceiverResponse createReceiver(CreateReceiverRequest request) {
@@ -461,17 +463,18 @@ public class ReceiverService {
         logger.info("Balance difference in history: {}", savedHistory.getBalanceDifference());
         logger.info("Payment amount should be: {}", savedHistory.getAssignedBalance());
         
-        // Send SMS notification to receiver about balance assignment
+        // Send SMS and WhatsApp notification to receiver about balance assignment
         if (paymentInitiated && transactionId != null) {
             try {
                 String receiverPhoneNormalized = normalizePhoneTo12Digits(receiver.getReceiverPhone());
                 String message = String.format("Balance of %s RWF assigned. Please approve or reject in your account.", 
                     newAssignedBalance.toPlainString());
                 messagingService.sendSms(message, receiverPhoneNormalized);
-                logger.info("SMS sent to receiver {} about balance assignment", receiverPhoneNormalized);
+                whatsAppService.sendWhatsApp(message, receiverPhoneNormalized);
+                logger.info("SMS and WhatsApp sent to receiver {} about balance assignment", receiverPhoneNormalized);
             } catch (Exception e) {
-                logger.error("Failed to send SMS to receiver: ", e);
-                // Don't fail the balance assignment if SMS fails
+                logger.error("Failed to send SMS/WhatsApp to receiver: ", e);
+                // Don't fail the balance assignment if SMS/WhatsApp fails
             }
         }
         
@@ -1037,7 +1040,7 @@ public class ReceiverService {
                     newWalletBalance,
                     newRemainingBalance, currentRemaining, newAssignedBalance);
             
-            // Send SMS notification to admin when receiver approves
+            // Send SMS and WhatsApp notification to admin when receiver approves
             String adminPhone = history.getAdminPhone();
             if (adminPhone != null && !adminPhone.trim().isEmpty()) {
                 try {
@@ -1045,10 +1048,11 @@ public class ReceiverService {
                     String message = String.format("Balance of %s RWF approved and received by %s", 
                         newAssignedBalance.toPlainString(), receiver.getCompanyName());
                     messagingService.sendSms(message, adminPhoneNormalized);
-                    logger.info("SMS sent to admin {} about balance approval", adminPhoneNormalized);
+                    whatsAppService.sendWhatsApp(message, adminPhoneNormalized);
+                    logger.info("SMS and WhatsApp sent to admin {} about balance approval", adminPhoneNormalized);
                 } catch (Exception e) {
-                    logger.error("Failed to send SMS to admin: ", e);
-                    // Don't fail the approval if SMS fails
+                    logger.error("Failed to send SMS/WhatsApp to admin: ", e);
+                    // Don't fail the approval if SMS/WhatsApp fails
                 }
             }
         } else {
