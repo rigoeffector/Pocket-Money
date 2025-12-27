@@ -317,8 +317,13 @@ public class ReceiverService {
         BigDecimal currentAssigned = receiver.getAssignedBalance();
         BigDecimal balanceDifference = newAssignedBalance.subtract(currentAssigned);
 
-        logger.info("Assigning balance to receiver {}: Current={}, New={}, Difference={}", 
-                receiverId, currentAssigned, newAssignedBalance, balanceDifference);
+        logger.info("=== ASSIGN BALANCE START ===");
+        logger.info("Receiver ID: {}", receiverId);
+        logger.info("Current assigned balance: {}", currentAssigned);
+        logger.info("New assigned balance: {}", newAssignedBalance);
+        logger.info("Balance difference: {}", balanceDifference);
+        logger.info("Admin phone: {}", request.getAdminPhone());
+        logger.info("Receiver phone: {}", request.getReceiverPhone());
 
         // Validate receiver phone matches
         String normalizedReceiverPhone = normalizePhoneTo12Digits(receiver.getReceiverPhone());
@@ -330,42 +335,10 @@ public class ReceiverService {
         // Allow multiple assignment attempts - each call creates a new history entry
         // This allows retries if payment fails
 
-        // If reducing balance (difference is negative or zero), create history entry but no payment
-        if (balanceDifference.compareTo(BigDecimal.ZERO) <= 0) {
-            logger.info("Balance difference is {} (<= 0), skipping payment initiation. Only creating history entry.", balanceDifference);
-            // Balance is being reduced - just create history entry (no payment needed)
-            BalanceAssignmentHistory history = new BalanceAssignmentHistory();
-            history.setReceiver(receiver);
-            history.setAssignedBalance(newAssignedBalance);
-            history.setPreviousAssignedBalance(currentAssigned);
-            history.setBalanceDifference(balanceDifference);
-            history.setAssignedBy("ADMIN");
-            history.setNotes(request.getNotes() != null ? request.getNotes() : "Balance reduction");
-            history.setStatus(BalanceAssignmentStatus.PENDING); // Still requires approval for reductions
-            
-            // Update discount and bonus percentages if provided
-            if (request.getDiscountPercentage() != null) {
-                if (request.getDiscountPercentage().compareTo(BigDecimal.ZERO) < 0 ||
-                    request.getDiscountPercentage().compareTo(new BigDecimal("100")) > 0) {
-                    throw new RuntimeException("Discount percentage must be between 0 and 100");
-                }
-                receiver.setDiscountPercentage(request.getDiscountPercentage());
-            }
-
-            if (request.getUserBonusPercentage() != null) {
-                if (request.getUserBonusPercentage().compareTo(BigDecimal.ZERO) < 0 ||
-                    request.getUserBonusPercentage().compareTo(new BigDecimal("100")) > 0) {
-                    throw new RuntimeException("User bonus percentage must be between 0 and 100");
-                }
-                receiver.setUserBonusPercentage(request.getUserBonusPercentage());
-            }
-            
-            receiverRepository.save(receiver);
-            BalanceAssignmentHistory savedHistory = balanceAssignmentHistoryRepository.save(history);
-            return mapToBalanceAssignmentHistoryResponse(savedHistory);
-        }
-
-        // Balance is being increased - initiate MoPay payment
+        // Always initiate MoPay payment with the full assigned amount (regardless of increase or decrease)
+        logger.info("=== INITIATING PAYMENT ===");
+        logger.info("Will initiate payment for amount: {}", newAssignedBalance);
+        
         // Update discount and bonus percentages if provided
         if (request.getDiscountPercentage() != null) {
             if (request.getDiscountPercentage().compareTo(BigDecimal.ZERO) < 0 ||
@@ -385,8 +358,10 @@ public class ReceiverService {
 
         // Initiate MoPay payment from admin to receiver
         // Pay the full requested amount, not just the difference
-        logger.info("Preparing MoPay payment - Full amount: {}, Current balance: {}, Difference: {}", 
-                newAssignedBalance, currentAssigned, balanceDifference);
+        logger.info("=== PREPARING MOPAY REQUEST ===");
+        logger.info("Payment amount: {}", newAssignedBalance);
+        logger.info("Current assigned balance: {}", currentAssigned);
+        logger.info("Balance difference: {}", balanceDifference);
         
         MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
         moPayRequest.setAmount(newAssignedBalance);  // FULL AMOUNT, not balanceDifference
@@ -394,6 +369,7 @@ public class ReceiverService {
         
         // Normalize admin phone to 12 digits
         String normalizedAdminPhone = normalizePhoneTo12Digits(request.getAdminPhone());
+        logger.info("Normalized admin phone: {}", normalizedAdminPhone);
         moPayRequest.setPhone(Long.parseLong(normalizedAdminPhone));
         moPayRequest.setPayment_mode("MOBILE");
         moPayRequest.setMessage("Balance assignment to " + receiver.getCompanyName());
@@ -405,11 +381,20 @@ public class ReceiverService {
         transfer.setMessage("Balance assignment from admin");
         moPayRequest.setTransfers(java.util.List.of(transfer));
         
-        logger.info("Sending MoPay payment request - Amount: {}, Transfer Amount: {}", 
-                moPayRequest.getAmount(), transfer.getAmount());
+        logger.info("=== MOPAY REQUEST DETAILS ===");
+        logger.info("MoPay request amount: {}", moPayRequest.getAmount());
+        logger.info("Transfer amount: {}", transfer.getAmount());
+        logger.info("Admin phone (Long): {}", moPayRequest.getPhone());
+        logger.info("Receiver phone (Long): {}", transfer.getPhone());
         
         // Initiate payment with MoPay
+        logger.info("=== CALLING MOPAY SERVICE ===");
         MoPayResponse moPayResponse = moPayService.initiatePayment(moPayRequest);
+        logger.info("=== MOPAY RESPONSE RECEIVED ===");
+        logger.info("MoPay response status: {}", moPayResponse != null ? moPayResponse.getStatus() : "NULL");
+        logger.info("MoPay transaction ID: {}", moPayResponse != null ? moPayResponse.getTransactionId() : "NULL");
+        logger.info("MoPay message: {}", moPayResponse != null ? moPayResponse.getMessage() : "NULL");
+        logger.info("MoPay success: {}", moPayResponse != null ? moPayResponse.getSuccess() : "NULL");
         
         // Create balance assignment history
         BalanceAssignmentHistory history = new BalanceAssignmentHistory();
@@ -434,11 +419,17 @@ public class ReceiverService {
             }
         }
         
+        logger.info("=== PROCESSING MOPAY RESPONSE ===");
+        logger.info("Payment initiated flag: {}", paymentInitiated);
+        logger.info("Transaction ID present: {}", transactionId != null);
+        
         if (paymentInitiated && transactionId != null) {
             // Successfully initiated - store transaction ID
             history.setMopayTransactionId(transactionId);
-            logger.info("MoPay payment initiated successfully. Transaction ID: {}, Payment amount: {}, Balance difference: {}", 
-                    transactionId, newAssignedBalance, balanceDifference);
+            logger.info("✅ MoPay payment initiated successfully!");
+            logger.info("   Transaction ID: {}", transactionId);
+            logger.info("   Payment amount: {}", newAssignedBalance);
+            logger.info("   Balance difference: {}", balanceDifference);
         } else {
             // Initiation failed
             history.setStatus(BalanceAssignmentStatus.REJECTED);
@@ -446,17 +437,31 @@ public class ReceiverService {
                 ? moPayResponse.getMessage() 
                 : "MoPay payment initiation failed";
             Integer httpStatus = moPayResponse != null ? moPayResponse.getStatus() : null;
-            logger.error("MoPay payment initiation failed. HTTP Status: {}, Transaction ID: {}, Error: {}", 
-                    httpStatus, transactionId, errorMessage);
+            logger.error("❌ MoPay payment initiation failed!");
+            logger.error("   HTTP Status: {}", httpStatus);
+            logger.error("   Transaction ID: {}", transactionId);
+            logger.error("   Error: {}", errorMessage);
+            logger.error("   Payment initiated flag: {}", paymentInitiated);
             history.setNotes("Balance assignment failed: " + errorMessage);
         }
         
         // Save receiver updates (discount/bonus percentages)
+        logger.info("=== SAVING RECEIVER AND HISTORY ===");
         receiverRepository.save(receiver);
         
         // Save balance assignment history
         BalanceAssignmentHistory savedHistory = balanceAssignmentHistoryRepository.save(history);
-        return mapToBalanceAssignmentHistoryResponse(savedHistory);
+        logger.info("=== ASSIGN BALANCE COMPLETE ===");
+        logger.info("History ID: {}", savedHistory.getId());
+        logger.info("History status: {}", savedHistory.getStatus());
+        logger.info("Assigned balance in history: {}", savedHistory.getAssignedBalance());
+        logger.info("Balance difference in history: {}", savedHistory.getBalanceDifference());
+        logger.info("Payment amount should be: {}", savedHistory.getAssignedBalance());
+        
+        BalanceAssignmentHistoryResponse response = mapToBalanceAssignmentHistoryResponse(savedHistory);
+        logger.info("Response payment amount: {}", response.getPaymentAmount());
+        logger.info("Response assigned balance: {}", response.getAssignedBalance());
+        return response;
     }
 
     public ReceiverResponse suspendReceiver(UUID id) {
@@ -900,6 +905,11 @@ public class ReceiverService {
     }
 
     private BalanceAssignmentHistoryResponse mapToBalanceAssignmentHistoryResponse(BalanceAssignmentHistory history) {
+        logger.info("=== MAPPING BALANCE ASSIGNMENT HISTORY ===");
+        logger.info("History ID: {}", history.getId());
+        logger.info("History assignedBalance: {}", history.getAssignedBalance());
+        logger.info("History balanceDifference: {}", history.getBalanceDifference());
+        
         BalanceAssignmentHistoryResponse response = new BalanceAssignmentHistoryResponse();
         response.setId(history.getId());
         response.setReceiverId(history.getReceiver().getId());
@@ -907,11 +917,21 @@ public class ReceiverService {
         response.setAssignedBalance(history.getAssignedBalance());
         response.setPreviousAssignedBalance(history.getPreviousAssignedBalance());
         response.setBalanceDifference(history.getBalanceDifference());
-        // Payment amount is the full assigned balance when increasing, 0 when reducing
-        BigDecimal paymentAmount = history.getBalanceDifference().compareTo(BigDecimal.ZERO) > 0 
-            ? history.getAssignedBalance()  // Pay full requested amount, not just difference
-            : BigDecimal.ZERO;
+        
+        // Payment amount is always the full assigned balance (regardless of increase or decrease)
+        BigDecimal paymentAmount = history.getAssignedBalance();
+        logger.info("Calculated paymentAmount from assignedBalance: {}", paymentAmount);
+        
         response.setPaymentAmount(paymentAmount);
+        
+        // Verify it was set correctly
+        BigDecimal verifyPaymentAmount = response.getPaymentAmount();
+        logger.info("After setting, response.getPaymentAmount() returns: {}", verifyPaymentAmount);
+        logger.info("Payment amount is null? {}", verifyPaymentAmount == null);
+        if (verifyPaymentAmount != null) {
+            logger.info("Payment amount compareTo zero: {}", verifyPaymentAmount.compareTo(BigDecimal.ZERO));
+        }
+        
         response.setAssignedBy(history.getAssignedBy());
         response.setNotes(history.getNotes());
         response.setStatus(history.getStatus());
@@ -919,6 +939,11 @@ public class ReceiverService {
         response.setApprovedAt(history.getApprovedAt());
         response.setMopayTransactionId(history.getMopayTransactionId());
         response.setCreatedAt(history.getCreatedAt());
+        
+        // Final verification before returning
+        logger.info("Final response paymentAmount before return: {}", response.getPaymentAmount());
+        logger.info("Final response assignedBalance before return: {}", response.getAssignedBalance());
+        
         return response;
     }
 
@@ -952,31 +977,48 @@ public class ReceiverService {
             BigDecimal newAssignedBalance = history.getAssignedBalance();
             BigDecimal currentRemaining = balanceOwner.getRemainingBalance();
             
-            // Calculate the base difference (new assigned - current assigned)
-            BigDecimal baseDifference = newAssignedBalance.subtract(currentAssigned);
+            // Simple logic: Add assigned amount to current assigned, remaining, and wallet balances
+            // NO discount bonus - just add the paid amount only
             
-            // Add discount percentage as bonus to remaining balance (use balance owner's discount percentage)
-            // Example: If assigning 10,000 with 10% discount, remainingBalance gets 10,000 + 1,000 = 11,000
-            BigDecimal discountPercentage = balanceOwner.getDiscountPercentage() != null ? balanceOwner.getDiscountPercentage() : BigDecimal.ZERO;
-            BigDecimal discountBonus = baseDifference.multiply(discountPercentage).divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
-            BigDecimal totalBonus = baseDifference.add(discountBonus);
+            logger.info("=== APPROVAL CALCULATION ===");
+            logger.info("Current assigned: {}, New assigned: {}", currentAssigned, newAssignedBalance);
+            logger.info("Current remaining: {}", currentRemaining);
             
-            // Update remaining balance: current + base difference + discount bonus
-            BigDecimal newRemainingBalance = currentRemaining.add(totalBonus);
+            // Add the assigned amount to assigned balance (sum of current + new)
+            BigDecimal updatedAssignedBalance = currentAssigned.add(newAssignedBalance);
+            logger.info("Updated assigned balance: {} + {} = {}", currentAssigned, newAssignedBalance, updatedAssignedBalance);
             
-            // Ensure remaining balance doesn't go below zero
+            // Add ONLY the assigned amount to remaining balance (NO discount bonus)
+            BigDecimal newRemainingBalance = currentRemaining.add(newAssignedBalance);
+            logger.info("New remaining balance: {} + {} = {} (NO discount bonus)", currentRemaining, newAssignedBalance, newRemainingBalance);
+            
             if (newRemainingBalance.compareTo(BigDecimal.ZERO) < 0) {
                 newRemainingBalance = BigDecimal.ZERO;
             }
             
-            // Update balance owner (shared balance)
-            balanceOwner.setAssignedBalance(newAssignedBalance);
+            // Wallet balance should be the same as assigned balance
+            BigDecimal newWalletBalance = updatedAssignedBalance;
+            logger.info("New wallet balance: {} (same as assigned)", newWalletBalance);
+            
+            balanceOwner.setAssignedBalance(updatedAssignedBalance);
             balanceOwner.setRemainingBalance(newRemainingBalance);
+            balanceOwner.setWalletBalance(newWalletBalance);
+            
+            // Update balance owner (shared balance) - assigned balance is already updated above
             receiverRepository.save(balanceOwner);
             
-            // Also update receiver's assigned balance for tracking (but not remaining balance - that's shared)
-            receiver.setAssignedBalance(newAssignedBalance);
+            // Also update receiver's assigned balance for tracking
+            receiver.setAssignedBalance(balanceOwner.getAssignedBalance());
+            if (receiver.getParentReceiver() == null) {
+                // Only update wallet for main receiver (not submerchants, as wallet is shared)
+                receiver.setWalletBalance(balanceOwner.getWalletBalance());
+            }
             receiverRepository.save(receiver);
+            
+            logger.info("Balance assignment approved - Receiver: {}, Assigned: {} (was {}, added {}), Wallet: {} (same as assigned), Remaining: {} (was {}, added {})", 
+                    receiverId, updatedAssignedBalance, currentAssigned, newAssignedBalance, 
+                    newWalletBalance,
+                    newRemainingBalance, currentRemaining, newAssignedBalance);
         } else {
             history.setStatus(BalanceAssignmentStatus.REJECTED);
             history.setApprovedBy(receiver.getUsername());

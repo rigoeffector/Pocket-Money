@@ -921,8 +921,15 @@ public class PaymentService {
     private UserBonusHistoryResponse mapToUserBonusHistoryResponse(Transaction transaction) {
         UserBonusHistoryResponse response = new UserBonusHistoryResponse();
         response.setTransactionId(transaction.getId());
-        response.setUserId(transaction.getUser().getId());
-        response.setUserFullNames(transaction.getUser().getFullNames());
+        
+        // Handle null user for guest payments
+        if (transaction.getUser() != null) {
+            response.setUserId(transaction.getUser().getId());
+            response.setUserFullNames(transaction.getUser().getFullNames());
+        } else {
+            response.setUserId(null);
+            response.setUserFullNames("Guest User");
+        }
         
         if (transaction.getReceiver() != null) {
             response.setReceiverId(transaction.getReceiver().getId());
@@ -1369,11 +1376,14 @@ public class PaymentService {
         activity.setCreatedAt(transaction.getCreatedAt());
         activity.setStatus(transaction.getStatus().name());
 
+        // Handle null user for guest payments
+        String userName = transaction.getUser() != null ? transaction.getUser().getFullNames() : "Guest User";
+        
         // Set description based on transaction type
         if (transaction.getTransactionType() == TransactionType.PAYMENT) {
             activity.setDescription("Payment to " + 
                 (transaction.getReceiver() != null ? transaction.getReceiver().getCompanyName() : "Unknown"));
-            activity.setUserName(transaction.getUser().getFullNames());
+            activity.setUserName(userName);
             if (transaction.getReceiver() != null) {
                 activity.setReceiverName(transaction.getReceiver().getCompanyName());
             }
@@ -1381,12 +1391,12 @@ public class PaymentService {
                 activity.setPaymentCategoryName(transaction.getPaymentCategory().getName());
             }
         } else if (transaction.getTransactionType() == TransactionType.TOP_UP) {
-            activity.setDescription("Top-up for " + transaction.getUser().getFullNames());
-            activity.setUserName(transaction.getUser().getFullNames());
+            activity.setDescription("Top-up for " + userName);
+            activity.setUserName(userName);
         } else {
             activity.setDescription(transaction.getMessage() != null ? transaction.getMessage() : 
                 transaction.getTransactionType().name());
-            activity.setUserName(transaction.getUser().getFullNames());
+            activity.setUserName(userName);
         }
 
         return activity;

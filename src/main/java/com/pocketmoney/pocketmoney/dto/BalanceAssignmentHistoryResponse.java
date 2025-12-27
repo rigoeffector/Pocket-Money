@@ -19,7 +19,7 @@ public class BalanceAssignmentHistoryResponse {
     private BigDecimal assignedBalance;
     private BigDecimal previousAssignedBalance;
     private BigDecimal balanceDifference;
-    private BigDecimal paymentAmount; // Amount being paid (same as balanceDifference when positive, 0 when negative)
+    private BigDecimal paymentAmount; // Amount being paid (always equals assignedBalance, regardless of balanceDifference)
     private String assignedBy;
     private String notes;
     private BalanceAssignmentStatus status;

@@ -17,6 +17,8 @@ import com.pocketmoney.pocketmoney.entity.ReceiverStatus;
 import com.pocketmoney.pocketmoney.service.ReceiverService;
 import jakarta.validation.Valid;
 import org.springframework.format.annotation.DateTimeFormat;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -29,6 +31,8 @@ import java.util.UUID;
 @RestController
 @RequestMapping("/api/receivers")
 public class ReceiverController {
+
+    private static final Logger logger = LoggerFactory.getLogger(ReceiverController.class);
 
     private final ReceiverService receiverService;
 
@@ -219,15 +223,37 @@ public class ReceiverController {
     public ResponseEntity<ApiResponse<BalanceAssignmentHistoryResponse>> assignBalance(
             @PathVariable UUID id,
             @Valid @RequestBody AssignBalanceRequest request) {
+        logger.info("=== ASSIGN BALANCE ENDPOINT CALLED ===");
+        logger.info("Receiver ID: {}", id);
+        logger.info("Request - Assigned Balance: {}", request.getAssignedBalance());
+        logger.info("Request - Admin Phone: {}", request.getAdminPhone());
+        logger.info("Request - Receiver Phone: {}", request.getReceiverPhone());
+        logger.info("Request - Discount Percentage: {}", request.getDiscountPercentage());
+        logger.info("Request - User Bonus Percentage: {}", request.getUserBonusPercentage());
+        logger.info("Request - Notes: {}", request.getNotes());
+        
         try {
+            logger.info("Calling receiverService.assignBalance()...");
             BalanceAssignmentHistoryResponse response = receiverService.assignBalance(id, request);
+            logger.info("=== ASSIGN BALANCE SERVICE CALL COMPLETED ===");
+            logger.info("Response - Assigned Balance: {}", response.getAssignedBalance());
+            logger.info("Response - Previous Assigned Balance: {}", response.getPreviousAssignedBalance());
+            logger.info("Response - Balance Difference: {}", response.getBalanceDifference());
+            logger.info("Response - Payment Amount: {}", response.getPaymentAmount());
+            logger.info("Response - Status: {}", response.getStatus());
+            logger.info("Response - MoPay Transaction ID: {}", response.getMopayTransactionId());
+            
             String message = "Balance assignment initiated successfully";
             if (response.getPaymentAmount() != null && response.getPaymentAmount().compareTo(BigDecimal.ZERO) > 0) {
                 message = String.format("Balance assignment initiated successfully. Payment amount: %s RWF (Current balance: %s, Target balance: %s)", 
                     response.getPaymentAmount(), response.getPreviousAssignedBalance(), response.getAssignedBalance());
             }
+            logger.info("=== ASSIGN BALANCE ENDPOINT SUCCESS ===");
+            logger.info("Final message: {}", message);
             return ResponseEntity.ok(ApiResponse.success(message, response));
         } catch (RuntimeException e) {
+            logger.error("=== ASSIGN BALANCE ENDPOINT ERROR ===");
+            logger.error("Error message: {}", e.getMessage(), e);
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.error(e.getMessage()));
         }
