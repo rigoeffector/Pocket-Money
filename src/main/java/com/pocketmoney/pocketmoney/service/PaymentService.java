@@ -520,9 +520,9 @@ public class PaymentService {
         @SuppressWarnings("unchecked")
         List<Transaction> transactions = (List<Transaction>) query.getResultList();
         
-        // Convert to PaymentResponse
+        // Convert to PaymentResponse (include receiver information to identify submerchants)
         List<PaymentResponse> content = transactions.stream()
-                .map(this::mapToPaymentResponse)
+                .map(t -> mapToPaymentResponse(t, mainReceiverId))
                 .collect(Collectors.toList());
         
         // Calculate pagination metadata
@@ -601,6 +601,10 @@ public class PaymentService {
     }
 
     private PaymentResponse mapToPaymentResponse(Transaction transaction) {
+        return mapToPaymentResponse(transaction, null);
+    }
+    
+    private PaymentResponse mapToPaymentResponse(Transaction transaction, UUID mainReceiverId) {
         PaymentResponse response = new PaymentResponse();
         response.setId(transaction.getId());
         response.setUserId(transaction.getUser().getId());
@@ -621,6 +625,17 @@ public class PaymentService {
         response.setReceiverBalanceBefore(transaction.getReceiverBalanceBefore());
         response.setReceiverBalanceAfter(transaction.getReceiverBalanceAfter());
         response.setCreatedAt(transaction.getCreatedAt());
+        
+        // Add receiver information (if mainReceiverId is provided, determine if it's a submerchant)
+        if (transaction.getReceiver() != null) {
+            response.setReceiverId(transaction.getReceiver().getId());
+            response.setReceiverCompanyName(transaction.getReceiver().getCompanyName());
+            // Check if this transaction was made by a submerchant (not the main receiver)
+            if (mainReceiverId != null) {
+                response.setIsSubmerchant(!transaction.getReceiver().getId().equals(mainReceiverId));
+            }
+        }
+        
         return response;
     }
 

@@ -3,6 +3,7 @@ package com.pocketmoney.pocketmoney.service;
 import com.pocketmoney.pocketmoney.dto.AssignBalanceRequest;
 import com.pocketmoney.pocketmoney.dto.BalanceAssignmentHistoryResponse;
 import com.pocketmoney.pocketmoney.dto.CreateReceiverRequest;
+import com.pocketmoney.pocketmoney.dto.PaginatedResponse;
 import com.pocketmoney.pocketmoney.dto.CreateSubmerchantRequest;
 import com.pocketmoney.pocketmoney.dto.MoPayInitiateRequest;
 import com.pocketmoney.pocketmoney.dto.MoPayResponse;
@@ -21,6 +22,8 @@ import com.pocketmoney.pocketmoney.repository.BalanceAssignmentHistoryRepository
 import com.pocketmoney.pocketmoney.repository.ReceiverRepository;
 import com.pocketmoney.pocketmoney.repository.TransactionRepository;
 import com.pocketmoney.pocketmoney.util.JwtUtil;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.Query;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -44,16 +47,19 @@ public class ReceiverService {
     private final PasswordEncoder passwordEncoder;
     private final JwtUtil jwtUtil;
     private final MoPayService moPayService;
+    private final EntityManager entityManager;
 
     public ReceiverService(ReceiverRepository receiverRepository, TransactionRepository transactionRepository,
                           BalanceAssignmentHistoryRepository balanceAssignmentHistoryRepository,
-                          PasswordEncoder passwordEncoder, JwtUtil jwtUtil, MoPayService moPayService) {
+                          PasswordEncoder passwordEncoder, JwtUtil jwtUtil, MoPayService moPayService,
+                          EntityManager entityManager) {
         this.receiverRepository = receiverRepository;
         this.transactionRepository = transactionRepository;
         this.balanceAssignmentHistoryRepository = balanceAssignmentHistoryRepository;
         this.passwordEncoder = passwordEncoder;
         this.jwtUtil = jwtUtil;
         this.moPayService = moPayService;
+        this.entityManager = entityManager;
     }
 
     public ReceiverResponse createReceiver(CreateReceiverRequest request) {
@@ -653,6 +659,137 @@ public class ReceiverService {
                 .collect(Collectors.toList());
     }
 
+    @Transactional(readOnly = true)
+    public PaginatedResponse<BalanceAssignmentHistoryResponse> getBalanceAssignmentHistoryPaginated(
+            UUID receiverId,
+            int page,
+            int size,
+            String search,
+            LocalDateTime fromDate,
+            LocalDateTime toDate) {
+        // Verify receiver exists
+        Receiver receiver = receiverRepository.findById(receiverId)
+                .orElseThrow(() -> new RuntimeException("Receiver not found with id: " + receiverId));
+        
+        // Determine which receivers' history to show
+        // If submerchant, show main merchant's history (shared balance)
+        // If main merchant, show only their own history
+        Receiver balanceOwner = receiver.getParentReceiver() != null ? receiver.getParentReceiver() : receiver;
+        UUID balanceOwnerId = balanceOwner.getId();
+        
+        // Build list of receiver IDs to query (balance owner for shared balance)
+        java.util.List<UUID> receiverIds = new java.util.ArrayList<>();
+        receiverIds.add(balanceOwnerId);
+        
+        // Build dynamic query using EntityManager
+        StringBuilder queryBuilder = new StringBuilder();
+        queryBuilder.append("SELECT b FROM BalanceAssignmentHistory b ");
+        queryBuilder.append("LEFT JOIN FETCH b.receiver r ");
+        queryBuilder.append("WHERE b.receiver.id IN :receiverIds ");
+        
+        // Add search filter
+        if (search != null && !search.trim().isEmpty()) {
+            queryBuilder.append("AND (LOWER(r.companyName) LIKE LOWER(:search) ");
+            queryBuilder.append("OR LOWER(b.assignedBy) LIKE LOWER(:search) ");
+            queryBuilder.append("OR LOWER(b.approvedBy) LIKE LOWER(:search) ");
+            queryBuilder.append("OR LOWER(b.notes) LIKE LOWER(:search) ");
+            queryBuilder.append("OR LOWER(CAST(b.status AS string)) LIKE LOWER(:search)) ");
+        }
+        
+        // Add date range filters
+        if (fromDate != null) {
+            queryBuilder.append("AND b.createdAt >= :fromDate ");
+        }
+        if (toDate != null) {
+            queryBuilder.append("AND b.createdAt <= :toDate ");
+        }
+        
+        queryBuilder.append("ORDER BY b.createdAt DESC");
+        
+        // Create query
+        Query query = entityManager.createQuery(queryBuilder.toString(), BalanceAssignmentHistory.class);
+        query.setParameter("receiverIds", receiverIds);
+        
+        // Set search parameter if provided
+        if (search != null && !search.trim().isEmpty()) {
+            String searchPattern = "%" + search.trim() + "%";
+            query.setParameter("search", searchPattern);
+        }
+        
+        // Set date parameters if provided
+        if (fromDate != null) {
+            query.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            query.setParameter("toDate", toDate);
+        }
+        
+        // Get total count (for pagination)
+        StringBuilder countQueryBuilder = new StringBuilder();
+        countQueryBuilder.append("SELECT COUNT(b) FROM BalanceAssignmentHistory b ");
+        countQueryBuilder.append("LEFT JOIN b.receiver r ");
+        countQueryBuilder.append("WHERE b.receiver.id IN :receiverIds ");
+        
+        if (search != null && !search.trim().isEmpty()) {
+            countQueryBuilder.append("AND (LOWER(r.companyName) LIKE LOWER(:search) ");
+            countQueryBuilder.append("OR LOWER(b.assignedBy) LIKE LOWER(:search) ");
+            countQueryBuilder.append("OR LOWER(b.approvedBy) LIKE LOWER(:search) ");
+            countQueryBuilder.append("OR LOWER(b.notes) LIKE LOWER(:search) ");
+            countQueryBuilder.append("OR LOWER(CAST(b.status AS string)) LIKE LOWER(:search)) ");
+        }
+        
+        if (fromDate != null) {
+            countQueryBuilder.append("AND b.createdAt >= :fromDate ");
+        }
+        if (toDate != null) {
+            countQueryBuilder.append("AND b.createdAt <= :toDate ");
+        }
+        
+        Query countQuery = entityManager.createQuery(countQueryBuilder.toString(), Long.class);
+        countQuery.setParameter("receiverIds", receiverIds);
+        
+        if (search != null && !search.trim().isEmpty()) {
+            String searchPattern = "%" + search.trim() + "%";
+            countQuery.setParameter("search", searchPattern);
+        }
+        
+        if (fromDate != null) {
+            countQuery.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            countQuery.setParameter("toDate", toDate);
+        }
+        
+        long totalElements = (Long) countQuery.getSingleResult();
+        
+        // Apply pagination
+        int offset = page * size;
+        query.setFirstResult(offset);
+        query.setMaxResults(size);
+        
+        @SuppressWarnings("unchecked")
+        List<BalanceAssignmentHistory> histories = (List<BalanceAssignmentHistory>) query.getResultList();
+        
+        // Convert to BalanceAssignmentHistoryResponse
+        List<BalanceAssignmentHistoryResponse> content = histories.stream()
+                .map(this::mapToBalanceAssignmentHistoryResponse)
+                .collect(Collectors.toList());
+        
+        // Calculate pagination metadata
+        int totalPages = (int) Math.ceil((double) totalElements / size);
+        
+        PaginatedResponse<BalanceAssignmentHistoryResponse> response = new PaginatedResponse<>();
+        response.setContent(content);
+        response.setTotalElements(totalElements);
+        response.setTotalPages(totalPages);
+        response.setCurrentPage(page);
+        response.setPageSize(size);
+        response.setFirst(page == 0);
+        response.setLast(page >= totalPages - 1);
+        
+        return response;
+    }
+
     private BalanceAssignmentHistoryResponse mapToBalanceAssignmentHistoryResponse(BalanceAssignmentHistory history) {
         BalanceAssignmentHistoryResponse response = new BalanceAssignmentHistoryResponse();
         response.setId(history.getId());
@@ -791,8 +928,8 @@ public class ReceiverService {
         response.setDiscountPercentage(balanceOwner.getDiscountPercentage()); // Use balance owner's percentages
         response.setUserBonusPercentage(balanceOwner.getUserBonusPercentage()); // Use balance owner's percentages
         
-        // Count pending balance assignments
-        List<BalanceAssignmentHistory> pendingAssignments = balanceAssignmentHistoryRepository.findPendingByReceiverId(receiverId);
+        // Count pending balance assignments - use balance owner's pending assignments (shared)
+        List<BalanceAssignmentHistory> pendingAssignments = balanceAssignmentHistoryRepository.findPendingByReceiverId(balanceOwner.getId());
         response.setPendingBalanceAssignments(pendingAssignments.size());
         
         // Check if main merchant or submerchant
@@ -820,28 +957,77 @@ public class ReceiverService {
             response.setFullStatistics(null);
         }
         
-        // Transaction statistics for this receiver only
-        Long totalTransactions = transactionRepository.countAllTransactionsByReceiver(receiverId);
-        response.setTotalTransactions(totalTransactions != null ? totalTransactions : 0L);
+        // Transaction statistics and recent transactions
+        // For main merchant: show all transactions (main + all submerchants)
+        // For submerchant: show only their own transactions
+        if (isMainMerchant) {
+            // Main merchant: Calculate stats and get transactions for all (main + submerchants)
+            // Get all submerchants for stats calculation
+            List<Receiver> submerchants = receiverRepository.findByParentReceiverId(receiverId);
+            
+            // Calculate aggregated statistics
+            Long totalTransactions = transactionRepository.countAllTransactionsByReceiver(receiverId);
+            BigDecimal totalRevenue = transactionRepository.sumSuccessfulAmountByReceiver(receiverId);
+            Long totalCustomers = transactionRepository.countDistinctUsersByReceiver(receiverId);
+            
+            // Aggregate submerchant stats
+            for (Receiver submerchant : submerchants) {
+                Long subTransactions = transactionRepository.countAllTransactionsByReceiver(submerchant.getId());
+                BigDecimal subRevenue = transactionRepository.sumSuccessfulAmountByReceiver(submerchant.getId());
+                Long subCustomers = transactionRepository.countDistinctUsersByReceiver(submerchant.getId());
+                
+                totalTransactions = (totalTransactions != null ? totalTransactions : 0L) + (subTransactions != null ? subTransactions : 0L);
+                totalRevenue = (totalRevenue != null ? totalRevenue : BigDecimal.ZERO).add(subRevenue != null ? subRevenue : BigDecimal.ZERO);
+                totalCustomers = (totalCustomers != null ? totalCustomers : 0L) + (subCustomers != null ? subCustomers : 0L);
+            }
+            
+            response.setTotalTransactions(totalTransactions != null ? totalTransactions : 0L);
+            response.setTotalRevenue(totalRevenue != null ? totalRevenue : BigDecimal.ZERO);
+            response.setTotalCustomers(totalCustomers != null ? totalCustomers : 0L);
+            
+            // Get all transactions (main + all submerchants) for recent transactions
+            List<Transaction> allTransactions = new java.util.ArrayList<>();
+            allTransactions.addAll(transactionRepository.findByReceiverOrderByCreatedAtDescWithUser(receiver));
+            for (Receiver submerchant : submerchants) {
+                allTransactions.addAll(transactionRepository.findByReceiverOrderByCreatedAtDescWithUser(submerchant));
+            }
+            
+            // Sort by date descending and limit to 5
+            allTransactions.sort((t1, t2) -> {
+                if (t1.getCreatedAt() == null && t2.getCreatedAt() == null) return 0;
+                if (t1.getCreatedAt() == null) return 1;
+                if (t2.getCreatedAt() == null) return -1;
+                return t2.getCreatedAt().compareTo(t1.getCreatedAt());
+            });
+            
+            response.setRecentTransactions(allTransactions.stream()
+                    .limit(5)
+                    .map(t -> mapToRecentTransaction(t, receiverId))
+                    .collect(Collectors.toList()));
+        } else {
+            // Submerchant: Show only their own transactions
+            // Calculate stats for this submerchant only
+            Long totalTransactions = transactionRepository.countAllTransactionsByReceiver(receiverId);
+            BigDecimal totalRevenue = transactionRepository.sumSuccessfulAmountByReceiver(receiverId);
+            Long totalCustomers = transactionRepository.countDistinctUsersByReceiver(receiverId);
+            
+            response.setTotalTransactions(totalTransactions != null ? totalTransactions : 0L);
+            response.setTotalRevenue(totalRevenue != null ? totalRevenue : BigDecimal.ZERO);
+            response.setTotalCustomers(totalCustomers != null ? totalCustomers : 0L);
+            
+            // Get only this submerchant's recent transactions
+            List<Transaction> recentTransactions = transactionRepository.findByReceiverOrderByCreatedAtDescWithUser(receiver)
+                    .stream()
+                    .limit(5)
+                    .collect(Collectors.toList());
+            response.setRecentTransactions(recentTransactions.stream()
+                    .map(t -> mapToRecentTransaction(t, receiverId))
+                    .collect(Collectors.toList()));
+        }
         
-        BigDecimal totalRevenue = transactionRepository.sumSuccessfulAmountByReceiver(receiverId);
-        response.setTotalRevenue(totalRevenue != null ? totalRevenue : BigDecimal.ZERO);
-        
-        Long totalCustomers = transactionRepository.countDistinctUsersByReceiver(receiverId);
-        response.setTotalCustomers(totalCustomers != null ? totalCustomers : 0L);
-        
-        // Recent transactions (5 most recent)
-        List<Transaction> recentTransactions = transactionRepository.findByReceiverOrderByCreatedAtDescWithUser(
-                receiverRepository.findById(receiverId).orElseThrow()).stream()
-                .limit(5)
-                .collect(Collectors.toList());
-        response.setRecentTransactions(recentTransactions.stream()
-                .map(this::mapToRecentTransaction)
-                .collect(Collectors.toList()));
-        
-        // Recent balance assignments (5 most recent)
+        // Recent balance assignments (5 most recent) - use balance owner's history (already shared)
         List<BalanceAssignmentHistory> balanceHistories = balanceAssignmentHistoryRepository
-                .findByReceiverOrderByCreatedAtDesc(receiver).stream()
+                .findByReceiverOrderByCreatedAtDesc(balanceOwner).stream()
                 .limit(5)
                 .collect(Collectors.toList());
         response.setRecentBalanceAssignments(balanceHistories.stream()
@@ -916,7 +1102,7 @@ public class ReceiverService {
         return stats;
     }
 
-    private ReceiverDashboardResponse.RecentTransaction mapToRecentTransaction(Transaction transaction) {
+    private ReceiverDashboardResponse.RecentTransaction mapToRecentTransaction(Transaction transaction, UUID mainReceiverId) {
         ReceiverDashboardResponse.RecentTransaction recent = new ReceiverDashboardResponse.RecentTransaction();
         recent.setTransactionId(transaction.getId());
         recent.setUserId(transaction.getUser().getId());
@@ -930,6 +1116,15 @@ public class ReceiverService {
             recent.setPaymentCategoryName(transaction.getPaymentCategory().getName());
         }
         recent.setCreatedAt(transaction.getCreatedAt());
+        
+        // Add receiver information
+        if (transaction.getReceiver() != null) {
+            recent.setReceiverId(transaction.getReceiver().getId());
+            recent.setReceiverCompanyName(transaction.getReceiver().getCompanyName());
+            // Check if this transaction was made by a submerchant (not the main receiver)
+            recent.setIsSubmerchant(!transaction.getReceiver().getId().equals(mainReceiverId));
+        }
+        
         return recent;
     }
 
@@ -1036,13 +1231,22 @@ public class ReceiverService {
     @Transactional(readOnly = true)
     public List<ReceiverResponse> getSubmerchants(UUID mainReceiverId) {
         // Verify main receiver exists
-        receiverRepository.findById(mainReceiverId)
+        Receiver mainReceiver = receiverRepository.findById(mainReceiverId)
                 .orElseThrow(() -> new RuntimeException("Main receiver not found with id: " + mainReceiverId));
         
+        List<ReceiverResponse> result = new java.util.ArrayList<>();
+        
+        // Add main merchant first
+        result.add(mapToResponse(mainReceiver));
+        
+        // Add all submerchants
         List<Receiver> submerchants = receiverRepository.findByParentReceiverId(mainReceiverId);
-        return submerchants.stream()
+        List<ReceiverResponse> submerchantResponses = submerchants.stream()
                 .map(this::mapToResponse)
                 .collect(Collectors.toList());
+        result.addAll(submerchantResponses);
+        
+        return result;
     }
 
     @Transactional(readOnly = true)

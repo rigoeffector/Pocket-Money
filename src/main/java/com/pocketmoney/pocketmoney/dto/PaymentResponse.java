@@ -30,5 +30,9 @@ public class PaymentResponse {
     private BigDecimal receiverBalanceBefore;
     private BigDecimal receiverBalanceAfter;
     private LocalDateTime createdAt;
+    // Receiver information (to identify which receiver/submerchant made this transaction)
+    private UUID receiverId;
+    private String receiverCompanyName;
+    private Boolean isSubmerchant; // true if transaction was made by a submerchant
 }
 

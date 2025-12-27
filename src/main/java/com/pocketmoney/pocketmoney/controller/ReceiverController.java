@@ -6,6 +6,7 @@ import com.pocketmoney.pocketmoney.dto.AssignBalanceRequest;
 import com.pocketmoney.pocketmoney.dto.BalanceAssignmentHistoryResponse;
 import com.pocketmoney.pocketmoney.dto.CreateReceiverRequest;
 import com.pocketmoney.pocketmoney.dto.CreateSubmerchantRequest;
+import com.pocketmoney.pocketmoney.dto.PaginatedResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverAnalyticsResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverDashboardResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverResponse;
@@ -162,9 +163,24 @@ public class ReceiverController {
     }
 
     @GetMapping("/{id}/balance-history")
-    public ResponseEntity<ApiResponse<List<BalanceAssignmentHistoryResponse>>> getBalanceAssignmentHistory(@PathVariable UUID id) {
+    public ResponseEntity<ApiResponse<PaginatedResponse<BalanceAssignmentHistoryResponse>>> getBalanceAssignmentHistory(
+            @PathVariable UUID id,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size,
+            @RequestParam(required = false) String search,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate) {
         try {
-            List<BalanceAssignmentHistoryResponse> history = receiverService.getBalanceAssignmentHistory(id);
+            // Set time to start/end of day if only date is provided
+            if (fromDate != null && fromDate.getHour() == 0 && fromDate.getMinute() == 0 && fromDate.getSecond() == 0) {
+                fromDate = fromDate.withHour(0).withMinute(0).withSecond(0);
+            }
+            if (toDate != null) {
+                toDate = toDate.withHour(23).withMinute(59).withSecond(59);
+            }
+            
+            PaginatedResponse<BalanceAssignmentHistoryResponse> history = receiverService.getBalanceAssignmentHistoryPaginated(
+                    id, page, size, search, fromDate, toDate);
             return ResponseEntity.ok(ApiResponse.success("Balance assignment history retrieved successfully", history));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)
