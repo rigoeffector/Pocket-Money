@@ -604,6 +604,10 @@ public class ReceiverService {
     }
 
     private ReceiverResponse mapToResponse(Receiver receiver) {
+        return mapToResponse(receiver, true);
+    }
+    
+    private ReceiverResponse mapToResponse(Receiver receiver, boolean loadSubmerchantCount) {
         ReceiverResponse response = new ReceiverResponse();
         response.setId(receiver.getId());
         response.setCompanyName(receiver.getCompanyName());
@@ -616,8 +620,12 @@ public class ReceiverService {
         response.setAddress(receiver.getAddress());
         response.setDescription(receiver.getDescription());
         
+        // Check if receiver has parent (is submerchant) - access parent to trigger lazy load if needed
+        Receiver parentReceiver = receiver.getParentReceiver();
+        boolean isSubmerchant = parentReceiver != null;
+        
         // Use shared balance if submerchant (parent's balance), otherwise use own balance
-        Receiver balanceOwner = receiver.getParentReceiver() != null ? receiver.getParentReceiver() : receiver;
+        Receiver balanceOwner = isSubmerchant ? parentReceiver : receiver;
         response.setWalletBalance(balanceOwner.getWalletBalance()); // Shared wallet balance
         response.setTotalReceived(balanceOwner.getTotalReceived()); // Shared total received
         response.setAssignedBalance(balanceOwner.getAssignedBalance()); // Shared assigned balance
@@ -628,18 +636,23 @@ public class ReceiverService {
         response.setPendingBalanceAssignments(0); // Default, will be set in getReceiverById if needed
         
         // Submerchant relationship info
-        if (receiver.getParentReceiver() != null) {
-            response.setParentReceiverId(receiver.getParentReceiver().getId());
-            response.setParentReceiverCompanyName(receiver.getParentReceiver().getCompanyName());
+        if (isSubmerchant) {
+            response.setParentReceiverId(parentReceiver.getId());
+            response.setParentReceiverCompanyName(parentReceiver.getCompanyName());
             response.setIsMainMerchant(false);
-            response.setSubmerchantCount(0);
+            response.setSubmerchantCount(0); // Submerchants don't have submerchants
         } else {
             response.setParentReceiverId(null);
             response.setParentReceiverCompanyName(null);
             response.setIsMainMerchant(true);
-            // Count submerchants
-            List<Receiver> submerchants = receiverRepository.findByParentReceiverId(receiver.getId());
-            response.setSubmerchantCount(submerchants.size());
+            // Only count submerchants if requested (skip for newly created submerchants)
+            if (loadSubmerchantCount) {
+                // Use count query instead of fetching all submerchants for better performance
+                long submerchantCount = receiverRepository.countByParentReceiverId(receiver.getId());
+                response.setSubmerchantCount((int) submerchantCount);
+            } else {
+                response.setSubmerchantCount(0); // Default for new receivers
+            }
         }
         
         response.setLastTransactionDate(receiver.getLastTransactionDate());
@@ -1143,25 +1156,16 @@ public class ReceiverService {
 
     @Transactional
     public ReceiverResponse createSubmerchant(UUID mainReceiverId, CreateReceiverRequest request) {
-        // Verify main receiver exists and is a main merchant (has no parent)
+        // Verify main receiver exists and is a main merchant (has no parent) - use entityManager for better control
         Receiver mainReceiver = receiverRepository.findById(mainReceiverId)
                 .orElseThrow(() -> new RuntimeException("Main receiver not found with id: " + mainReceiverId));
         
+        // Check if main receiver has parent (is already a submerchant) - access parent to trigger lazy load
         if (mainReceiver.getParentReceiver() != null) {
             throw new RuntimeException("Cannot create submerchant. The specified receiver is already a submerchant.");
         }
         
-        // Check if username already exists
-        if (receiverRepository.existsByUsername(request.getUsername())) {
-            throw new RuntimeException("Username already exists: " + request.getUsername());
-        }
-
-        // Check if phone number already exists
-        if (receiverRepository.existsByReceiverPhone(request.getReceiverPhone())) {
-            throw new RuntimeException("Receiver phone number already exists: " + request.getReceiverPhone());
-        }
-
-        // Normalize email: convert empty/blank strings to null
+        // Normalize email: convert empty/blank strings to null (do this before validation)
         String email = (request.getEmail() != null && !request.getEmail().trim().isEmpty()) 
                 ? request.getEmail().trim() 
                 : null;
@@ -1172,13 +1176,25 @@ public class ReceiverService {
             if (!email.matches(emailRegex)) {
                 throw new RuntimeException("Invalid email format");
             }
-            // Check if email already exists
-            if (receiverRepository.existsByEmail(email)) {
-                throw new RuntimeException("Email already exists: " + email);
-            }
+        }
+        
+        // Batch existence checks - these are fast index lookups, but we do them in parallel conceptually
+        // Check if username already exists
+        if (receiverRepository.existsByUsername(request.getUsername())) {
+            throw new RuntimeException("Username already exists: " + request.getUsername());
         }
 
-        // Create new receiver
+        // Check if phone number already exists
+        if (receiverRepository.existsByReceiverPhone(request.getReceiverPhone())) {
+            throw new RuntimeException("Receiver phone number already exists: " + request.getReceiverPhone());
+        }
+
+        // Check if email already exists (only if email is provided)
+        if (email != null && receiverRepository.existsByEmail(email)) {
+            throw new RuntimeException("Email already exists: " + email);
+        }
+
+        // Create new receiver - set all fields at once
         Receiver submerchant = new Receiver();
         submerchant.setCompanyName(request.getCompanyName());
         submerchant.setManagerName(request.getManagerName());
@@ -1191,11 +1207,21 @@ public class ReceiverService {
         submerchant.setAddress(request.getAddress());
         submerchant.setDescription(request.getDescription());
         
-        // Set parent receiver (link as submerchant)
+        // Set parent receiver (link as submerchant) - use the already loaded mainReceiver
         submerchant.setParentReceiver(mainReceiver);
 
+        // Save submerchant
         Receiver savedSubmerchant = receiverRepository.save(submerchant);
-        return mapToResponse(savedSubmerchant);
+        
+        // Flush to ensure the entity is persisted before mapping
+        receiverRepository.flush();
+        
+        // Ensure parent is set in the persisted entity (Hibernate should maintain this, but we ensure it)
+        savedSubmerchant.setParentReceiver(mainReceiver);
+        
+        // Map to response - optimized for submerchants (no submerchant count query needed)
+        // Pass false to skip submerchant count since we know it's a new submerchant (always 0)
+        return mapToResponse(savedSubmerchant, false);
     }
 
     @Transactional
@@ -1239,15 +1265,19 @@ public class ReceiverService {
         // Add main merchant first
         result.add(mapToResponse(mainReceiver));
         
-        // Add all submerchants
-        List<Receiver> submerchants = receiverRepository.findByParentReceiverId(mainReceiverId);
-        List<ReceiverResponse> submerchantResponses = submerchants.stream()
+        // Get all submerchants (both active and suspended/unlinked)
+        // This includes active submerchants and suspended ones that still have the parent relationship
+        List<Receiver> allSubmerchants = receiverRepository.findByParentReceiverId(mainReceiverId);
+        
+        // Map to responses
+        List<ReceiverResponse> submerchantResponses = allSubmerchants.stream()
                 .map(this::mapToResponse)
                 .collect(Collectors.toList());
         result.addAll(submerchantResponses);
         
         return result;
     }
+    
 
     @Transactional(readOnly = true)
     public List<ReceiverResponse> getAllMainMerchants() {
@@ -1267,10 +1297,54 @@ public class ReceiverService {
             throw new RuntimeException("Receiver is not a submerchant. Cannot unlink.");
         }
         
-        submerchant.setParentReceiver(null);
-        receiverRepository.save(submerchant);
+        // IMPORTANT: Instead of setting parentReceiver to null, we keep it for historical tracking
+        // This allows us to still see unlinked submerchants in the submerchants list
+        // Only change status to SUSPENDED - keep the parent relationship for record-keeping
+        submerchant.setStatus(ReceiverStatus.SUSPENDED);
         
-        return mapToResponse(submerchant);
+        // Save the submerchant (with parent still set, just status changed)
+        Receiver savedSubmerchant = receiverRepository.save(submerchant);
+        
+        return mapToResponse(savedSubmerchant);
+    }
+
+    @Transactional
+    public ReceiverResponse linkSubmerchantAgain(UUID mainReceiverId, UUID submerchantId) {
+        // Verify main receiver exists and is a main merchant (has no parent)
+        Receiver mainReceiver = receiverRepository.findById(mainReceiverId)
+                .orElseThrow(() -> new RuntimeException("Main receiver not found with id: " + mainReceiverId));
+        
+        if (mainReceiver.getParentReceiver() != null) {
+            throw new RuntimeException("Cannot link submerchant. The specified receiver is already a submerchant.");
+        }
+        
+        // Verify submerchant exists
+        Receiver submerchant = receiverRepository.findById(submerchantId)
+                .orElseThrow(() -> new RuntimeException("Submerchant receiver not found with id: " + submerchantId));
+        
+        // Verify not linking to itself
+        if (mainReceiverId.equals(submerchantId)) {
+            throw new RuntimeException("Cannot link a receiver to itself as a submerchant.");
+        }
+        
+        // Check if submerchant already has a parent
+        if (submerchant.getParentReceiver() != null) {
+            // If it has a different parent, update it to the new main merchant
+            if (!submerchant.getParentReceiver().getId().equals(mainReceiverId)) {
+                submerchant.setParentReceiver(mainReceiver);
+            }
+            // If it already has this parent, just reactivate it
+        } else {
+            // If no parent, link it to the main merchant
+            submerchant.setParentReceiver(mainReceiver);
+        }
+        
+        // Reactivate the submerchant (set status to ACTIVE)
+        submerchant.setStatus(ReceiverStatus.ACTIVE);
+        
+        Receiver savedSubmerchant = receiverRepository.save(submerchant);
+        
+        return mapToResponse(savedSubmerchant);
     }
 
     @Transactional
@@ -1393,8 +1467,10 @@ public class ReceiverService {
             throw new RuntimeException("Receiver is not a submerchant of the specified main merchant.");
         }
         
-        // Delete the submerchant (this will cascade delete related records if configured)
-        receiverRepository.deleteById(submerchantId);
+        // Instead of deleting, just suspend to preserve records and information
+        // Keep the parent relationship so we can still track it as a submerchant
+        submerchant.setStatus(ReceiverStatus.SUSPENDED);
+        receiverRepository.save(submerchant);
     }
 }
 

@@ -9,6 +9,7 @@ import com.pocketmoney.pocketmoney.entity.TransactionStatus;
 import com.pocketmoney.pocketmoney.entity.TransactionType;
 import com.pocketmoney.pocketmoney.entity.User;
 import com.pocketmoney.pocketmoney.entity.UserStatus;
+import com.pocketmoney.pocketmoney.repository.BalanceAssignmentHistoryRepository;
 import com.pocketmoney.pocketmoney.repository.PaymentCategoryRepository;
 import com.pocketmoney.pocketmoney.repository.ReceiverRepository;
 import com.pocketmoney.pocketmoney.repository.TransactionRepository;
@@ -33,17 +34,20 @@ public class PaymentService {
     private final TransactionRepository transactionRepository;
     private final PaymentCategoryRepository paymentCategoryRepository;
     private final ReceiverRepository receiverRepository;
+    private final BalanceAssignmentHistoryRepository balanceAssignmentHistoryRepository;
     private final MoPayService moPayService;
     private final PasswordEncoder passwordEncoder;
     private final EntityManager entityManager;
 
     public PaymentService(UserRepository userRepository, TransactionRepository transactionRepository,
                          PaymentCategoryRepository paymentCategoryRepository, ReceiverRepository receiverRepository,
+                         BalanceAssignmentHistoryRepository balanceAssignmentHistoryRepository,
                          MoPayService moPayService, PasswordEncoder passwordEncoder, EntityManager entityManager) {
         this.userRepository = userRepository;
         this.transactionRepository = transactionRepository;
         this.paymentCategoryRepository = paymentCategoryRepository;
         this.receiverRepository = receiverRepository;
+        this.balanceAssignmentHistoryRepository = balanceAssignmentHistoryRepository;
         this.moPayService = moPayService;
         this.passwordEncoder = passwordEncoder;
         this.entityManager = entityManager;
@@ -392,13 +396,80 @@ public class PaymentService {
     }
 
     @Transactional(readOnly = true)
-    public List<PaymentResponse> getTransactionsByReceiver(UUID receiverId) {
+    public ReceiverTransactionsResponse getTransactionsByReceiver(UUID receiverId) {
         Receiver receiver = receiverRepository.findById(receiverId)
                 .orElseThrow(() -> new RuntimeException("Receiver not found"));
-        return transactionRepository.findByReceiverOrderByCreatedAtDescWithUser(receiver)
-                .stream()
+        
+        // Get all transactions for this receiver
+        List<Transaction> transactions = transactionRepository.findByReceiverOrderByCreatedAtDescWithUser(receiver);
+        List<PaymentResponse> transactionResponses = transactions.stream()
                 .map(this::mapToPaymentResponse)
                 .collect(Collectors.toList());
+        
+        // Calculate statistics
+        ReceiverTransactionsResponse.TransactionStatistics statistics = calculateReceiverTransactionStatistics(transactions);
+        
+        ReceiverTransactionsResponse response = new ReceiverTransactionsResponse();
+        response.setTransactions(transactionResponses);
+        response.setStatistics(statistics);
+        
+        return response;
+    }
+    
+    private ReceiverTransactionsResponse.TransactionStatistics calculateReceiverTransactionStatistics(List<Transaction> transactions) {
+        ReceiverTransactionsResponse.TransactionStatistics stats = new ReceiverTransactionsResponse.TransactionStatistics();
+        
+        long totalTransactions = transactions.size();
+        BigDecimal totalRevenue = BigDecimal.ZERO;
+        BigDecimal totalDiscountAmount = BigDecimal.ZERO;
+        BigDecimal totalUserBonusAmount = BigDecimal.ZERO;
+        BigDecimal totalAdminIncomeAmount = BigDecimal.ZERO;
+        long successfulTransactions = 0;
+        long pendingTransactions = 0;
+        long failedTransactions = 0;
+        java.util.Set<UUID> distinctUsers = new java.util.HashSet<>();
+        
+        for (Transaction transaction : transactions) {
+            if (transaction.getTransactionType() == TransactionType.PAYMENT) {
+                // Count distinct users
+                if (transaction.getUser() != null) {
+                    distinctUsers.add(transaction.getUser().getId());
+                }
+                
+                // Sum amounts for successful transactions
+                if (transaction.getStatus() == TransactionStatus.SUCCESS) {
+                    if (transaction.getAmount() != null) {
+                        totalRevenue = totalRevenue.add(transaction.getAmount());
+                    }
+                    if (transaction.getDiscountAmount() != null) {
+                        totalDiscountAmount = totalDiscountAmount.add(transaction.getDiscountAmount());
+                    }
+                    if (transaction.getUserBonusAmount() != null) {
+                        totalUserBonusAmount = totalUserBonusAmount.add(transaction.getUserBonusAmount());
+                    }
+                    if (transaction.getAdminIncomeAmount() != null) {
+                        totalAdminIncomeAmount = totalAdminIncomeAmount.add(transaction.getAdminIncomeAmount());
+                    }
+                    successfulTransactions++;
+                } else if (transaction.getStatus() == TransactionStatus.PENDING) {
+                    pendingTransactions++;
+                } else {
+                    failedTransactions++;
+                }
+            }
+        }
+        
+        stats.setTotalTransactions(totalTransactions);
+        stats.setTotalRevenue(totalRevenue);
+        stats.setTotalCustomers((long) distinctUsers.size());
+        stats.setTotalDiscountAmount(totalDiscountAmount);
+        stats.setTotalUserBonusAmount(totalUserBonusAmount);
+        stats.setTotalAdminIncomeAmount(totalAdminIncomeAmount);
+        stats.setSuccessfulTransactions(successfulTransactions);
+        stats.setPendingTransactions(pendingTransactions);
+        stats.setFailedTransactions(failedTransactions);
+        
+        return stats;
     }
 
     @Transactional(readOnly = true)
@@ -704,15 +775,24 @@ public class PaymentService {
             breakdown = getAdminIncomeBreakdown(fromDate, toDate);
         }
 
+        // Get total assigned balance and breakdown
+        BigDecimal totalAssignedBalance = calculateTotalAssignedBalance(fromDate, toDate, receiverId);
+        List<AdminIncomeResponse.AssignedBalanceBreakdown> assignedBalanceBreakdown = null;
+        if (receiverId == null) {
+            assignedBalanceBreakdown = getAssignedBalanceBreakdown(fromDate, toDate);
+        }
+
         // Get detailed transaction list
         List<AdminIncomeResponse.AdminIncomeTransaction> transactions = getAdminIncomeTransactionList(fromDate, toDate, receiverId);
 
         AdminIncomeResponse response = new AdminIncomeResponse();
         response.setTotalIncome(totalIncome);
         response.setTotalTransactions(totalTransactions);
+        response.setTotalAssignedBalance(totalAssignedBalance);
         response.setFromDate(fromDate);
         response.setToDate(toDate);
         response.setBreakdown(breakdown);
+        response.setAssignedBalanceBreakdown(assignedBalanceBreakdown);
         response.setTransactions(transactions);
 
         return response;
@@ -808,6 +888,77 @@ public class PaymentService {
                     item.setReceiverCompanyName((String) row[1]);
                     item.setIncome((BigDecimal) row[2]);
                     item.setTransactionCount(((Number) row[3]).longValue());
+                    return item;
+                })
+                .collect(Collectors.toList());
+    }
+
+    private BigDecimal calculateTotalAssignedBalance(LocalDateTime fromDate, LocalDateTime toDate, UUID receiverId) {
+        StringBuilder sql = new StringBuilder(
+            "SELECT COALESCE(SUM(b.balance_difference), 0) FROM balance_assignment_history b " +
+            "WHERE b.status = 'APPROVED' AND b.balance_difference IS NOT NULL"
+        );
+        
+        if (fromDate != null) {
+            sql.append(" AND b.approved_at >= :fromDate");
+        }
+        if (toDate != null) {
+            sql.append(" AND b.approved_at <= :toDate");
+        }
+        if (receiverId != null) {
+            sql.append(" AND b.receiver_id = :receiverId");
+        }
+        
+        Query query = entityManager.createNativeQuery(sql.toString());
+        if (fromDate != null) {
+            query.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            query.setParameter("toDate", toDate);
+        }
+        if (receiverId != null) {
+            query.setParameter("receiverId", receiverId);
+        }
+        
+        Object result = query.getSingleResult();
+        return result != null ? (BigDecimal) result : BigDecimal.ZERO;
+    }
+
+    private List<AdminIncomeResponse.AssignedBalanceBreakdown> getAssignedBalanceBreakdown(LocalDateTime fromDate, LocalDateTime toDate) {
+        StringBuilder sql = new StringBuilder(
+            "SELECT r.id, r.company_name, COALESCE(SUM(b.balance_difference), 0), COUNT(b.id) " +
+            "FROM balance_assignment_history b " +
+            "JOIN receivers r ON b.receiver_id = r.id " +
+            "WHERE b.status = 'APPROVED' AND b.balance_difference IS NOT NULL"
+        );
+        
+        if (fromDate != null) {
+            sql.append(" AND b.approved_at >= :fromDate");
+        }
+        if (toDate != null) {
+            sql.append(" AND b.approved_at <= :toDate");
+        }
+        
+        sql.append(" GROUP BY r.id, r.company_name ORDER BY SUM(b.balance_difference) DESC");
+        
+        Query query = entityManager.createNativeQuery(sql.toString());
+        if (fromDate != null) {
+            query.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            query.setParameter("toDate", toDate);
+        }
+        
+        @SuppressWarnings("unchecked")
+        List<Object[]> results = query.getResultList();
+        
+        return results.stream()
+                .map(row -> {
+                    AdminIncomeResponse.AssignedBalanceBreakdown item = new AdminIncomeResponse.AssignedBalanceBreakdown();
+                    item.setReceiverId((UUID) row[0]);
+                    item.setReceiverCompanyName((String) row[1]);
+                    item.setAssignedBalance((BigDecimal) row[2]);
+                    item.setAssignmentCount(((Number) row[3]).longValue());
                     return item;
                 })
                 .collect(Collectors.toList());

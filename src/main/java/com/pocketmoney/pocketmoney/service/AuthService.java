@@ -125,7 +125,10 @@ public class AuthService {
             // Get available merchants/submerchants list
             List<AuthResponse.MerchantInfo> availableMerchants = getAvailableMerchants(receiver);
 
-            // Create response with receiver information
+            // Determine balance owner (for shared balance if submerchant)
+            Receiver balanceOwner = receiver.getParentReceiver() != null ? receiver.getParentReceiver() : receiver;
+            
+            // Create response with all receiver information
             AuthResponse response = new AuthResponse();
             response.setToken(token);
             response.setTokenType("Bearer");
@@ -135,6 +138,40 @@ public class AuthService {
             response.setRole(Role.RECEIVER);
             response.setCreatedAt(receiver.getCreatedAt());
             response.setUpdatedAt(receiver.getUpdatedAt());
+            
+            // All receiver details
+            response.setCompanyName(receiver.getCompanyName());
+            response.setManagerName(receiver.getManagerName());
+            response.setReceiverPhone(receiver.getReceiverPhone());
+            response.setAccountNumber(receiver.getAccountNumber());
+            response.setStatus(receiver.getStatus());
+            response.setAddress(receiver.getAddress());
+            response.setDescription(receiver.getDescription());
+            
+            // Wallet and balance information (use shared balance if submerchant)
+            response.setWalletBalance(balanceOwner.getWalletBalance());
+            response.setTotalReceived(balanceOwner.getTotalReceived());
+            response.setAssignedBalance(balanceOwner.getAssignedBalance());
+            response.setRemainingBalance(balanceOwner.getRemainingBalance());
+            response.setDiscountPercentage(balanceOwner.getDiscountPercentage());
+            response.setUserBonusPercentage(balanceOwner.getUserBonusPercentage());
+            response.setLastTransactionDate(receiver.getLastTransactionDate());
+            
+            // Submerchant relationship info
+            if (receiver.getParentReceiver() != null) {
+                response.setParentReceiverId(receiver.getParentReceiver().getId());
+                response.setParentReceiverCompanyName(receiver.getParentReceiver().getCompanyName());
+                response.setIsMainMerchant(false);
+                response.setSubmerchantCount(0);
+            } else {
+                response.setParentReceiverId(null);
+                response.setParentReceiverCompanyName(null);
+                response.setIsMainMerchant(true);
+                // Count submerchants
+                long submerchantCount = receiverRepository.countByParentReceiverId(receiver.getId());
+                response.setSubmerchantCount((int) submerchantCount);
+            }
+            
             response.setAvailableMerchants(availableMerchants);
 
             return response;
@@ -217,7 +254,10 @@ public class AuthService {
         // Get available merchants/submerchants list
         List<AuthResponse.MerchantInfo> availableMerchants = getAvailableMerchants(receiver);
 
-        // Create response with receiver information
+        // Determine balance owner (for shared balance if submerchant)
+        Receiver balanceOwner = receiver.getParentReceiver() != null ? receiver.getParentReceiver() : receiver;
+        
+        // Create response with all receiver information
         AuthResponse response = new AuthResponse();
         response.setToken(token);
         response.setTokenType("Bearer");
@@ -227,6 +267,40 @@ public class AuthService {
         response.setRole(Role.RECEIVER);
         response.setCreatedAt(receiver.getCreatedAt());
         response.setUpdatedAt(receiver.getUpdatedAt());
+        
+        // All receiver details
+        response.setCompanyName(receiver.getCompanyName());
+        response.setManagerName(receiver.getManagerName());
+        response.setReceiverPhone(receiver.getReceiverPhone());
+        response.setAccountNumber(receiver.getAccountNumber());
+        response.setStatus(receiver.getStatus());
+        response.setAddress(receiver.getAddress());
+        response.setDescription(receiver.getDescription());
+        
+        // Wallet and balance information (use shared balance if submerchant)
+        response.setWalletBalance(balanceOwner.getWalletBalance());
+        response.setTotalReceived(balanceOwner.getTotalReceived());
+        response.setAssignedBalance(balanceOwner.getAssignedBalance());
+        response.setRemainingBalance(balanceOwner.getRemainingBalance());
+        response.setDiscountPercentage(balanceOwner.getDiscountPercentage());
+        response.setUserBonusPercentage(balanceOwner.getUserBonusPercentage());
+        response.setLastTransactionDate(receiver.getLastTransactionDate());
+        
+        // Submerchant relationship info
+        if (receiver.getParentReceiver() != null) {
+            response.setParentReceiverId(receiver.getParentReceiver().getId());
+            response.setParentReceiverCompanyName(receiver.getParentReceiver().getCompanyName());
+            response.setIsMainMerchant(false);
+            response.setSubmerchantCount(0);
+        } else {
+            response.setParentReceiverId(null);
+            response.setParentReceiverCompanyName(null);
+            response.setIsMainMerchant(true);
+            // Count submerchants
+            long submerchantCount = receiverRepository.countByParentReceiverId(receiver.getId());
+            response.setSubmerchantCount((int) submerchantCount);
+        }
+        
         response.setAvailableMerchants(availableMerchants);
 
         return response;

@@ -1,10 +1,12 @@
 package com.pocketmoney.pocketmoney.dto;
 
+import com.pocketmoney.pocketmoney.entity.ReceiverStatus;
 import com.pocketmoney.pocketmoney.entity.Role;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
@@ -21,6 +23,30 @@ public class AuthResponse {
     private Role role;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
+    
+    // Additional fields for Auth (ADMIN/USER) - currently minimal, can be extended if needed
+    
+    // Additional fields for RECEIVER role - all receiver information
+    private String companyName;
+    private String managerName;
+    private String receiverPhone;
+    private String accountNumber;
+    private ReceiverStatus status;
+    private String address;
+    private String description;
+    private BigDecimal walletBalance;
+    private BigDecimal totalReceived;
+    private BigDecimal assignedBalance;
+    private BigDecimal remainingBalance;
+    private BigDecimal discountPercentage;
+    private BigDecimal userBonusPercentage;
+    private LocalDateTime lastTransactionDate;
+    
+    // Submerchant relationship info (for RECEIVER role)
+    private UUID parentReceiverId;
+    private String parentReceiverCompanyName;
+    private Boolean isMainMerchant;
+    private Integer submerchantCount;
     
     // For RECEIVER role only - list of available merchants/submerchants to switch between
     private List<MerchantInfo> availableMerchants;

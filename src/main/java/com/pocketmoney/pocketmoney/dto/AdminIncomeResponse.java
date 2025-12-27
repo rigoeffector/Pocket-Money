@@ -18,8 +18,14 @@ public class AdminIncomeResponse {
     private LocalDateTime fromDate;
     private LocalDateTime toDate;
     
-    // Summary breakdown by receiver
+    // Total assigned balance to receivers (sum of approved balance assignments)
+    private BigDecimal totalAssignedBalance;
+    
+    // Summary breakdown by receiver (for income)
     private List<IncomeBreakdown> breakdown;
+    
+    // Breakdown by receiver for assigned balances
+    private List<AssignedBalanceBreakdown> assignedBalanceBreakdown;
     
     // Detailed transaction list
     private List<AdminIncomeTransaction> transactions;
@@ -32,6 +38,16 @@ public class AdminIncomeResponse {
         private String receiverCompanyName;
         private BigDecimal income;
         private Long transactionCount;
+    }
+    
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class AssignedBalanceBreakdown {
+        private UUID receiverId;
+        private String receiverCompanyName;
+        private BigDecimal assignedBalance;
+        private Long assignmentCount;
     }
     
     @Data

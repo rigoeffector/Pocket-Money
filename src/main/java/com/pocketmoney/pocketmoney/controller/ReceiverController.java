@@ -287,14 +287,27 @@ public class ReceiverController {
         }
     }
 
-    @DeleteMapping("/{id}/submerchants/{submerchantId}/unlink")
+    @PutMapping("/{id}/submerchants/{submerchantId}/unlink")
     public ResponseEntity<ApiResponse<ReceiverResponse>> unlinkSubmerchant(
             @PathVariable UUID id,
             @PathVariable UUID submerchantId) {
         try {
             // Verify the main merchant ID matches (for consistency, though we only need submerchantId)
             ReceiverResponse response = receiverService.unlinkSubmerchant(submerchantId);
-            return ResponseEntity.ok(ApiResponse.success("Submerchant unlinked successfully", response));
+            return ResponseEntity.ok(ApiResponse.success("Submerchant unlinked and suspended successfully. Records preserved.", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PutMapping("/{id}/submerchants/{submerchantId}/link")
+    public ResponseEntity<ApiResponse<ReceiverResponse>> linkSubmerchantAgain(
+            @PathVariable UUID id,
+            @PathVariable UUID submerchantId) {
+        try {
+            ReceiverResponse response = receiverService.linkSubmerchantAgain(id, submerchantId);
+            return ResponseEntity.ok(ApiResponse.success("Submerchant linked and activated successfully", response));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.error(e.getMessage()));
@@ -335,7 +348,7 @@ public class ReceiverController {
             @PathVariable UUID submerchantId) {
         try {
             receiverService.deleteSubmerchant(id, submerchantId);
-            return ResponseEntity.ok(ApiResponse.success("Submerchant deleted successfully", null));
+            return ResponseEntity.ok(ApiResponse.success("Submerchant suspended and unlinked successfully. Records preserved.", null));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.error(e.getMessage()));

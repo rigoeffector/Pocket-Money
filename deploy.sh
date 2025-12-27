@@ -198,6 +198,68 @@ setup_database() {
     print_success "PostgreSQL database setup completed successfully"
 }
 
+# Apply database migrations
+apply_migrations() {
+    print_status "Applying database migrations to remote server..."
+    
+    # Check if migration file exists
+    if [ ! -f "migrate_remote_database.sql" ]; then
+        print_error "Migration file 'migrate_remote_database.sql' not found in current directory"
+        exit 1
+    fi
+    
+    # Copy migration script to remote server
+    print_status "Copying migration script to remote server..."
+    scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        migrate_remote_database.sql ${SERVER_USER}@${SERVER_HOST}:/tmp/migrate_remote_database.sql
+    
+    if [ $? -ne 0 ]; then
+        print_error "Failed to copy migration script to remote server"
+        exit 1
+    fi
+    
+    # Run migration script on remote server
+    print_status "Running migration script on remote database..."
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${SERVER_USER}@${SERVER_HOST} "
+        export PGPASSWORD='${DB_PASSWORD}'
+        echo 'Applying migrations to database ${DB_NAME}...'
+        psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -f /tmp/migrate_remote_database.sql
+        
+        if [ \$? -eq 0 ]; then
+            echo '✅ Migrations applied successfully!'
+            
+            # Verify the changes
+            echo ''
+            echo 'Verifying changes...'
+            echo 'Checking receivers table columns:'
+            psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c \"\\d receivers\" | grep -E '(assigned_balance|remaining_balance|discount_percentage|user_bonus_percentage|parent_receiver_id)' || echo 'Columns verification completed'
+            
+            echo ''
+            echo 'Checking transactions table columns:'
+            psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c \"\\d transactions\" | grep -E '(admin_income_amount|discount_amount|user_bonus_amount|receiver_balance_before|receiver_balance_after)' || echo 'Columns verification completed'
+            
+            echo ''
+            echo 'Checking balance_assignment_history table:'
+            psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c \"\\d balance_assignment_history\" > /dev/null 2>&1 && echo '✅ balance_assignment_history table exists' || echo '⚠️  balance_assignment_history table may not exist'
+            
+            # Clean up migration file
+            rm -f /tmp/migrate_remote_database.sql
+            echo ''
+            echo 'Migration verification completed'
+        else
+            echo '❌ Migration failed'
+            exit 1
+        fi
+    " || {
+        print_error "Failed to apply migrations to remote database"
+        print_warning "Please check the error messages above"
+        print_warning "You can manually run migrations using: ./apply_migrations_remote.sh"
+        exit 1
+    }
+    
+    print_success "Database migrations applied successfully"
+}
+
 # Check and install Java on server
 setup_java() {
     print_status "Checking Java installation on server..."
@@ -448,6 +510,7 @@ main() {
     build_application
     test_connection
     setup_database
+    apply_migrations
     setup_java
     setup_server_directory
     stop_existing_app

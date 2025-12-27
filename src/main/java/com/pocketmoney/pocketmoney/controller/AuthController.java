@@ -71,6 +71,34 @@ public class AuthController {
         }
     }
 
+    @PutMapping("/admin/reset-password/{username}")
+    public ResponseEntity<ApiResponse<Void>> resetAdminPasswordByUsername(
+            @PathVariable String username,
+            @Valid @RequestBody ResetPasswordRequest request) {
+        try {
+            // This endpoint is specifically for admin password reset
+            authService.resetPasswordByUsername(username, request.getNewPassword());
+            return ResponseEntity.ok(ApiResponse.success("Admin password reset successfully", null));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PutMapping("/admin/{id}/reset-password")
+    public ResponseEntity<ApiResponse<Void>> resetAdminPasswordById(
+            @PathVariable UUID id,
+            @Valid @RequestBody ResetPasswordRequest request) {
+        try {
+            // This endpoint is specifically for admin password reset by ID
+            authService.resetPassword(id, request.getNewPassword());
+            return ResponseEntity.ok(ApiResponse.success("Admin password reset successfully", null));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
     @PostMapping("/switch-merchant/{receiverId}")
     public ResponseEntity<ApiResponse<AuthResponse>> switchMerchant(@PathVariable UUID receiverId) {
         try {
