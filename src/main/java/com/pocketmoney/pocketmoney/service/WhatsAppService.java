@@ -34,7 +34,7 @@ public class WhatsAppService {
             return;
         }
 
-        String url = whatsappApiUrl + "/whatsapp/bulk-json";
+        String url = whatsappApiUrl + "/sms/bulk-json";
         
         WhatsAppRequest request = new WhatsAppRequest();
         request.setMessage(message);
@@ -46,8 +46,8 @@ public class WhatsAppService {
         HttpEntity<WhatsAppRequest> entity = new HttpEntity<>(request, headers);
 
         try {
-            logger.info("Sending WhatsApp message to {} recipient(s)", phoneNumbers.size());
-            logger.debug("WhatsApp URL: {}, Message length: {}", url, message.length());
+            logger.info("Sending WhatsApp message to {} recipient(s): {}", phoneNumbers.size(), phoneNumbers);
+            logger.debug("WhatsApp URL: {}, Message: {}, PhoneNumbers: {}", url, message, phoneNumbers);
             
             ResponseEntity<String> response = restTemplate.exchange(
                     url,
