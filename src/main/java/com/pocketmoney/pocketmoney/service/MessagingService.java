@@ -15,8 +15,8 @@ public class MessagingService {
 
     private static final Logger logger = LoggerFactory.getLogger(MessagingService.class);
 
-    @Value("${sms.api.url:https://swiftqom.io/api/prod}")
-    private String smsApiUrl;
+    @Value("${whatsapp.api.url:https://server.yunotify.com/api}")
+    private String whatsappApiUrl;
 
     private final RestTemplate restTemplate;
 
@@ -35,8 +35,8 @@ public class MessagingService {
         }
 
         try {
-            // SwiftQom API uses POST request with JSON body
-            String url = smsApiUrl + "/sms/bulk-json";
+            // Use WhatsApp API endpoint for SMS as well
+            String url = whatsappApiUrl + "/sms/bulk-json";
             
             SmsRequest request = new SmsRequest();
             request.setMessage(message);
@@ -47,7 +47,7 @@ public class MessagingService {
 
             HttpEntity<SmsRequest> entity = new HttpEntity<>(request, headers);
 
-            logger.info("Sending SMS to {} recipient(s) via SwiftQom", phoneNumbers.size());
+            logger.info("Sending SMS to {} recipient(s) via WhatsApp API", phoneNumbers.size());
             logger.debug("SMS URL: {}, Message length: {}", url, message.length());
             
             ResponseEntity<String> response = restTemplate.exchange(
@@ -60,7 +60,7 @@ public class MessagingService {
             logger.info("SMS sent successfully. Response status: {}", response.getStatusCode());
             logger.debug("SMS response body: {}", response.getBody());
         } catch (Exception e) {
-            logger.error("Error sending SMS via SwiftQom: ", e);
+            logger.error("Error sending SMS via WhatsApp API: ", e);
             // Don't throw exception - SMS failure shouldn't break the main flow
         }
     }
