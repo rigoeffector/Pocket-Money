@@ -52,11 +52,12 @@ public class ReceiverService {
     private final JwtUtil jwtUtil;
     private final MoPayService moPayService;
     private final EntityManager entityManager;
+    private final MessagingService messagingService;
 
     public ReceiverService(ReceiverRepository receiverRepository, TransactionRepository transactionRepository,
                           BalanceAssignmentHistoryRepository balanceAssignmentHistoryRepository,
                           PasswordEncoder passwordEncoder, JwtUtil jwtUtil, MoPayService moPayService,
-                          EntityManager entityManager) {
+                          EntityManager entityManager, MessagingService messagingService) {
         this.receiverRepository = receiverRepository;
         this.transactionRepository = transactionRepository;
         this.balanceAssignmentHistoryRepository = balanceAssignmentHistoryRepository;
@@ -64,6 +65,7 @@ public class ReceiverService {
         this.jwtUtil = jwtUtil;
         this.moPayService = moPayService;
         this.entityManager = entityManager;
+        this.messagingService = messagingService;
     }
 
     public ReceiverResponse createReceiver(CreateReceiverRequest request) {
@@ -403,6 +405,7 @@ public class ReceiverService {
         history.setPreviousAssignedBalance(currentAssigned);
         history.setBalanceDifference(balanceDifference);
         history.setAssignedBy("ADMIN"); // TODO: Get from authentication context
+        history.setAdminPhone(request.getAdminPhone()); // Store admin phone for SMS notifications
         history.setNotes(request.getNotes() != null ? request.getNotes() : "Balance assignment via MoPay payment");
         history.setStatus(BalanceAssignmentStatus.PENDING);
         
@@ -457,6 +460,20 @@ public class ReceiverService {
         logger.info("Assigned balance in history: {}", savedHistory.getAssignedBalance());
         logger.info("Balance difference in history: {}", savedHistory.getBalanceDifference());
         logger.info("Payment amount should be: {}", savedHistory.getAssignedBalance());
+        
+        // Send SMS notification to receiver about balance assignment
+        if (paymentInitiated && transactionId != null) {
+            try {
+                String receiverPhoneNormalized = normalizePhoneTo12Digits(receiver.getReceiverPhone());
+                String message = String.format("Balance of %s RWF assigned. Please approve or reject in your account.", 
+                    newAssignedBalance.toPlainString());
+                messagingService.sendSms(message, receiverPhoneNormalized);
+                logger.info("SMS sent to receiver {} about balance assignment", receiverPhoneNormalized);
+            } catch (Exception e) {
+                logger.error("Failed to send SMS to receiver: ", e);
+                // Don't fail the balance assignment if SMS fails
+            }
+        }
         
         BalanceAssignmentHistoryResponse response = mapToBalanceAssignmentHistoryResponse(savedHistory);
         logger.info("Response payment amount: {}", response.getPaymentAmount());
@@ -1019,6 +1036,21 @@ public class ReceiverService {
                     receiverId, updatedAssignedBalance, currentAssigned, newAssignedBalance, 
                     newWalletBalance,
                     newRemainingBalance, currentRemaining, newAssignedBalance);
+            
+            // Send SMS notification to admin when receiver approves
+            String adminPhone = history.getAdminPhone();
+            if (adminPhone != null && !adminPhone.trim().isEmpty()) {
+                try {
+                    String adminPhoneNormalized = normalizePhoneTo12Digits(adminPhone);
+                    String message = String.format("Balance of %s RWF approved and received by %s", 
+                        newAssignedBalance.toPlainString(), receiver.getCompanyName());
+                    messagingService.sendSms(message, adminPhoneNormalized);
+                    logger.info("SMS sent to admin {} about balance approval", adminPhoneNormalized);
+                } catch (Exception e) {
+                    logger.error("Failed to send SMS to admin: ", e);
+                    // Don't fail the approval if SMS fails
+                }
+            }
         } else {
             history.setStatus(BalanceAssignmentStatus.REJECTED);
             history.setApprovedBy(receiver.getUsername());

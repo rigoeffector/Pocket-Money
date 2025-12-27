@@ -42,11 +42,13 @@ public class PaymentService {
     private final MoPayService moPayService;
     private final PasswordEncoder passwordEncoder;
     private final EntityManager entityManager;
+    private final MessagingService messagingService;
 
     public PaymentService(UserRepository userRepository, TransactionRepository transactionRepository,
                          PaymentCategoryRepository paymentCategoryRepository, ReceiverRepository receiverRepository,
                          BalanceAssignmentHistoryRepository balanceAssignmentHistoryRepository,
-                         MoPayService moPayService, PasswordEncoder passwordEncoder, EntityManager entityManager) {
+                         MoPayService moPayService, PasswordEncoder passwordEncoder, EntityManager entityManager,
+                         MessagingService messagingService) {
         this.userRepository = userRepository;
         this.transactionRepository = transactionRepository;
         this.paymentCategoryRepository = paymentCategoryRepository;
@@ -55,6 +57,7 @@ public class PaymentService {
         this.moPayService = moPayService;
         this.passwordEncoder = passwordEncoder;
         this.entityManager = entityManager;
+        this.messagingService = messagingService;
     }
 
     // Helper method to normalize phone number to 12 digits (250XXXXXXXXX format)
@@ -318,6 +321,27 @@ public class PaymentService {
         transaction.setStatus(TransactionStatus.SUCCESS); // Immediate success for internal transfers
 
         Transaction savedTransaction = transactionRepository.save(transaction);
+        
+        // Send SMS notifications to user and receiver
+        try {
+            // Send SMS to user
+            String userPhoneNormalized = normalizePhoneTo12Digits(user.getPhoneNumber());
+            String userMessage = String.format("Payment of %s RWF to %s successful. New balance: %s RWF", 
+                paymentAmount.toPlainString(), receiver.getCompanyName(), userNewBalance.toPlainString());
+            messagingService.sendSms(userMessage, userPhoneNormalized);
+            logger.info("SMS sent to user {} about payment", userPhoneNormalized);
+            
+            // Send SMS to receiver
+            String receiverPhoneNormalized = normalizePhoneTo12Digits(receiver.getReceiverPhone());
+            String receiverMessage = String.format("Received %s RWF from %s", 
+                paymentAmount.toPlainString(), user.getFullNames());
+            messagingService.sendSms(receiverMessage, receiverPhoneNormalized);
+            logger.info("SMS sent to receiver {} about payment", receiverPhoneNormalized);
+        } catch (Exception e) {
+            logger.error("Failed to send payment SMS notifications: ", e);
+            // Don't fail the payment if SMS fails
+        }
+        
         return mapToPaymentResponse(savedTransaction);
     }
 
@@ -640,6 +664,31 @@ public class PaymentService {
                                 userRepository.save(transactionUser);
                             }
                             // If user is null (guest payment), user bonus is not credited
+                            
+                            // Send SMS notifications for MOMO payments when status changes to SUCCESS
+                            try {
+                                // Send SMS to receiver
+                                if (receiver.getReceiverPhone() != null) {
+                                    String receiverPhoneNormalized = normalizePhoneTo12Digits(receiver.getReceiverPhone());
+                                    String payerName = transactionUser != null ? transactionUser.getFullNames() : "Guest";
+                                    String receiverMessage = String.format("Received %s RWF from %s", 
+                                        paymentAmount.toPlainString(), payerName);
+                                    messagingService.sendSms(receiverMessage, receiverPhoneNormalized);
+                                    logger.info("SMS sent to receiver {} about MOMO payment", receiverPhoneNormalized);
+                                }
+                                
+                                // Send SMS to user (if user exists, not guest payment)
+                                if (transactionUser != null && transactionUser.getPhoneNumber() != null) {
+                                    String userPhoneNormalized = normalizePhoneTo12Digits(transactionUser.getPhoneNumber());
+                                    String userMessage = String.format("Payment of %s RWF to %s successful", 
+                                        paymentAmount.toPlainString(), receiver.getCompanyName());
+                                    messagingService.sendSms(userMessage, userPhoneNormalized);
+                                    logger.info("SMS sent to user {} about MOMO payment", userPhoneNormalized);
+                                }
+                            } catch (Exception e) {
+                                logger.error("Failed to send SMS notifications for MOMO payment: ", e);
+                                // Don't fail the transaction if SMS fails
+                            }
                         }
                     }
                 }

@@ -38,6 +38,9 @@ public class BalanceAssignmentHistory {
     @Column(name = "assigned_by", length = 255)
     private String assignedBy; // Username or identifier of who assigned the balance
 
+    @Column(name = "admin_phone", length = 20)
+    private String adminPhone; // Admin phone number for SMS notifications
+
     @Column(name = "notes", length = 1000)
     private String notes;
 
