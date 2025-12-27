@@ -61,6 +61,18 @@ public class PaymentController {
         }
     }
 
+    @PostMapping("/pay/momo")
+    public ResponseEntity<ApiResponse<PaymentResponse>> makeMomoPayment(
+            @Valid @RequestBody MomoPaymentRequest request) {
+        try {
+            PaymentResponse response = paymentService.makeMomoPayment(request);
+            return ResponseEntity.ok(ApiResponse.success("MOMO payment initiated successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
     @GetMapping("/balance/{userId}")
     public ResponseEntity<ApiResponse<BalanceResponse>> checkBalance(@PathVariable UUID userId) {
         try {

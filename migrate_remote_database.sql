@@ -102,7 +102,14 @@ CREATE INDEX IF NOT EXISTS idx_receivers_parent_receiver_id ON receivers(parent_
 COMMENT ON COLUMN receivers.parent_receiver_id IS 'Reference to parent receiver for submerchant relationships. NULL if main merchant.';
 
 -- ===================================================================
--- 5. Initialize existing receivers with default balance values if needed
+-- 5. Make user_id nullable in transactions table for guest MOMO payments
+-- ===================================================================
+ALTER TABLE transactions ALTER COLUMN user_id DROP NOT NULL;
+
+COMMENT ON COLUMN transactions.user_id IS 'Reference to user who made the payment. NULL for guest MOMO payments.';
+
+-- ===================================================================
+-- 6. Initialize existing receivers with default balance values if needed
 -- ===================================================================
 -- Uncomment the following lines if you want to initialize existing receivers
 -- UPDATE receivers 

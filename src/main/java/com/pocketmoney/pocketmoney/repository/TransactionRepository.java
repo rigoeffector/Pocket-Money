@@ -19,19 +19,19 @@ public interface TransactionRepository extends JpaRepository<Transaction, UUID> 
     List<Transaction> findByUserOrderByCreatedAtDesc(User user);
     Optional<Transaction> findByMopayTransactionId(String mopayTransactionId);
 
-    @Query("SELECT t FROM Transaction t JOIN FETCH t.user LEFT JOIN FETCH t.paymentCategory ORDER BY t.createdAt DESC")
+    @Query("SELECT t FROM Transaction t LEFT JOIN FETCH t.user LEFT JOIN FETCH t.paymentCategory ORDER BY t.createdAt DESC")
     List<Transaction> findAllWithUser();
 
     @Query("SELECT t FROM Transaction t JOIN FETCH t.user LEFT JOIN FETCH t.paymentCategory WHERE t.user = :user ORDER BY t.createdAt DESC")
     List<Transaction> findByUserOrderByCreatedAtDescWithUser(@Param("user") User user);
 
-    @Query("SELECT t FROM Transaction t JOIN FETCH t.user LEFT JOIN FETCH t.paymentCategory WHERE t.id = :id")
+    @Query("SELECT t FROM Transaction t LEFT JOIN FETCH t.user LEFT JOIN FETCH t.paymentCategory WHERE t.id = :id")
     Optional<Transaction> findByIdWithUser(@Param("id") UUID id);
 
-    @Query("SELECT t FROM Transaction t JOIN FETCH t.user LEFT JOIN FETCH t.paymentCategory WHERE t.mopayTransactionId = :mopayTransactionId")
+    @Query("SELECT t FROM Transaction t LEFT JOIN FETCH t.user LEFT JOIN FETCH t.paymentCategory WHERE t.mopayTransactionId = :mopayTransactionId")
     Optional<Transaction> findByMopayTransactionIdWithUser(@Param("mopayTransactionId") String mopayTransactionId);
 
-    @Query("SELECT t FROM Transaction t JOIN FETCH t.user LEFT JOIN FETCH t.paymentCategory WHERE t.receiver = :receiver ORDER BY t.createdAt DESC")
+    @Query("SELECT t FROM Transaction t LEFT JOIN FETCH t.user LEFT JOIN FETCH t.paymentCategory WHERE t.receiver = :receiver ORDER BY t.createdAt DESC")
     List<Transaction> findByReceiverOrderByCreatedAtDescWithUser(@Param("receiver") Receiver receiver);
 
     // Analytics queries for receiver

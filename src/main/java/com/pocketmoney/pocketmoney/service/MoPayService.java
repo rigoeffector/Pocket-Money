@@ -30,7 +30,14 @@ public class MoPayService {
         String url = mopayApiUrl + "/initiate-payment";
         
         logger.info("Initiating MoPay payment to: {}", url);
-        logger.debug("MoPay request: {}", request);
+        logger.info("MoPay request - Phone: {}, Amount: {}, Currency: {}", request.getPhone(), request.getAmount(), request.getCurrency());
+        if (request.getTransfers() != null && !request.getTransfers().isEmpty()) {
+            for (int i = 0; i < request.getTransfers().size(); i++) {
+                MoPayInitiateRequest.Transfer transfer = request.getTransfers().get(i);
+                logger.info("Transfer #{} - Phone: {}, Amount: {}, Message: {}", i + 1, transfer.getPhone(), transfer.getAmount(), transfer.getMessage());
+            }
+        }
+        logger.debug("Full MoPay request: {}", request);
         
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);

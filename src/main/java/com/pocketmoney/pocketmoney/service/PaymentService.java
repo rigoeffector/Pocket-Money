@@ -16,6 +16,8 @@ import com.pocketmoney.pocketmoney.repository.TransactionRepository;
 import com.pocketmoney.pocketmoney.repository.UserRepository;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.Query;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -29,6 +31,8 @@ import java.util.stream.Collectors;
 @Service
 @Transactional
 public class PaymentService {
+
+    private static final Logger logger = LoggerFactory.getLogger(PaymentService.class);
 
     private final UserRepository userRepository;
     private final TransactionRepository transactionRepository;
@@ -55,18 +59,51 @@ public class PaymentService {
 
     // Helper method to normalize phone number to 12 digits (250XXXXXXXXX format)
     private String normalizePhoneTo12Digits(String phone) {
-        String cleaned = phone.replaceAll("[^0-9]", "");
-        if (cleaned.startsWith("250") && cleaned.length() == 12) {
-            return cleaned;
-        } else if (cleaned.startsWith("0") && cleaned.length() == 10) {
-            return "250" + cleaned.substring(1);
-        } else if (cleaned.length() == 9) {
-            return "250" + cleaned;
-        } else if (cleaned.startsWith("250")) {
-            return cleaned; // Already has country code, use as is
-        } else {
-            return "250" + cleaned; // Default: add country code
+        if (phone == null || phone.trim().isEmpty()) {
+            throw new RuntimeException("Phone number cannot be null or empty");
         }
+        
+        String cleaned = phone.replaceAll("[^0-9]", "");
+        
+        // If exactly 12 digits and starts with 250, return as is
+        if (cleaned.length() == 12 && cleaned.startsWith("250")) {
+            return cleaned;
+        }
+        
+        // If starts with 250, extract the 9-digit number part
+        if (cleaned.startsWith("250")) {
+            String without250 = cleaned.substring(3);
+            // If we have exactly 9 digits after 250, we're good
+            if (without250.length() == 9) {
+                return "250" + without250;
+            }
+            // If more than 9 digits, take the last 9
+            if (without250.length() > 9) {
+                String last9 = without250.substring(without250.length() - 9);
+                return "250" + last9;
+            }
+            // If less than 9, this is an error case
+            throw new RuntimeException("Invalid phone format after 250 prefix. Expected 9 digits, got: " + without250.length() + " (phone: " + phone + ")");
+        }
+        
+        // If starts with 0, remove it first
+        if (cleaned.startsWith("0")) {
+            cleaned = cleaned.substring(1);
+        }
+        
+        // Now cleaned should be 9 or 10 digits (or potentially 11 if original was malformed)
+        // Extract the last 9 digits to ensure we get the correct format
+        if (cleaned.length() >= 9) {
+            String last9 = cleaned.substring(Math.max(0, cleaned.length() - 9));
+            return "250" + last9;
+        }
+        
+        // If less than 9 digits, pad with leading zeros
+        String padded = cleaned;
+        while (padded.length() < 9) {
+            padded = "0" + padded;
+        }
+        return "250" + padded;
     }
 
     public PaymentResponse topUp(String nfcCardId, TopUpRequest request) {
@@ -284,6 +321,189 @@ public class PaymentService {
         return mapToPaymentResponse(savedTransaction);
     }
 
+    public PaymentResponse makeMomoPayment(MomoPaymentRequest request) {
+        // User is optional for MOMO payments (guests can pay without an account)
+        User user = null;
+        if (request.getUserId() != null) {
+            user = userRepository.findById(request.getUserId())
+                    .orElseThrow(() -> new RuntimeException("User not found"));
+        }
+
+        // Verify payment category exists
+        PaymentCategory paymentCategory = paymentCategoryRepository.findById(request.getPaymentCategoryId())
+                .orElseThrow(() -> new RuntimeException("Payment category not found"));
+
+        if (!paymentCategory.getIsActive()) {
+            throw new RuntimeException("Payment category is not active");
+        }
+
+        // Verify receiver exists and is active
+        Receiver receiver = receiverRepository.findById(request.getReceiverId())
+                .orElseThrow(() -> new RuntimeException("Receiver not found"));
+
+        if (receiver.getStatus() != ReceiverStatus.ACTIVE) {
+            throw new RuntimeException("Receiver is not active. Status: " + receiver.getStatus());
+        }
+        
+        // Determine the balance owner: if receiver is a submerchant, use parent's balance
+        Receiver balanceOwner = receiver.getParentReceiver() != null ? receiver.getParentReceiver() : receiver;
+
+        // Note: PIN is not required for MOMO payments as they are authenticated via MoPay
+        // The payment is initiated from the payer's MOMO wallet which requires their own authentication
+
+        // Determine payer phone number: must be provided if userId is not provided
+        String payerPhone = request.getPayerPhone();
+        if (payerPhone == null || payerPhone.trim().isEmpty()) {
+            if (user != null && user.getPhoneNumber() != null && !user.getPhoneNumber().trim().isEmpty()) {
+                // Use user's default phone number if available
+                payerPhone = user.getPhoneNumber();
+            } else {
+                throw new RuntimeException("Payer phone number is required for MOMO payment when user ID is not provided.");
+            }
+        } else {
+            // Validate the provided phone number format
+            payerPhone = payerPhone.trim();
+            if (!payerPhone.matches("^[0-9]{10,15}$")) {
+                throw new RuntimeException("Invalid phone number format. Phone number must be between 10 and 15 digits.");
+            }
+        }
+
+        BigDecimal paymentAmount = request.getAmount();
+        
+        // Calculate discount and bonus amounts (use balance owner's percentages)
+        BigDecimal discountPercentage = balanceOwner.getDiscountPercentage() != null ? balanceOwner.getDiscountPercentage() : BigDecimal.ZERO;
+        BigDecimal userBonusPercentage = balanceOwner.getUserBonusPercentage() != null ? balanceOwner.getUserBonusPercentage() : BigDecimal.ZERO;
+        
+        // Calculate discount/charge amount (based on payment amount) - This is the TOTAL charge (e.g., 10%)
+        BigDecimal discountAmount = paymentAmount.multiply(discountPercentage).divide(new BigDecimal("100"), 2, java.math.RoundingMode.HALF_UP);
+        
+        // Calculate user bonus amount (e.g., 2% of payment amount)
+        BigDecimal userBonusAmount = paymentAmount.multiply(userBonusPercentage).divide(new BigDecimal("100"), 2, java.math.RoundingMode.HALF_UP);
+        
+        // Calculate admin income amount (e.g., 8% = 10% - 2%)
+        BigDecimal adminIncomeAmount = discountAmount.subtract(userBonusAmount);
+        
+        // Check if balance owner has sufficient remaining balance
+        BigDecimal receiverBalanceBefore = balanceOwner.getRemainingBalance() != null ? balanceOwner.getRemainingBalance() : BigDecimal.ZERO;
+        BigDecimal receiverBalanceReduction = paymentAmount; // Only deduct payment amount
+        BigDecimal receiverBalanceAfter = receiverBalanceBefore.subtract(receiverBalanceReduction);
+        
+        // Check if remaining balance would be below 1 after this transaction
+        if (receiverBalanceAfter.compareTo(new BigDecimal("1")) < 0) {
+            throw new RuntimeException("Insufficient Remaining Balance. Please Contact BeFosot Administrator");
+        }
+
+        // Create MoPay initiate request
+        MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
+        moPayRequest.setAmount(paymentAmount);
+        moPayRequest.setCurrency("RWF");
+        
+        // Normalize payer phone to 12 digits and convert to Long (MoPay API requires 12 digits)
+        String normalizedPayerPhone = normalizePhoneTo12Digits(payerPhone);
+        
+        logger.info("Payer phone normalization - Original: '{}', Normalized: '{}' ({} digits)", payerPhone, normalizedPayerPhone, normalizedPayerPhone.length());
+        
+        // Validate the normalized phone is exactly 12 digits
+        if (normalizedPayerPhone.length() != 12) {
+            throw new RuntimeException("Payer phone number must be normalized to exactly 12 digits. Got: " + normalizedPayerPhone.length() + " digits: " + normalizedPayerPhone);
+        }
+        
+        // Validate it's numeric only
+        if (!normalizedPayerPhone.matches("^[0-9]{12}$")) {
+            throw new RuntimeException("Normalized payer phone must contain only digits. Got: '" + normalizedPayerPhone + "'");
+        }
+        
+        Long payerPhoneLong = Long.parseLong(normalizedPayerPhone);
+        logger.info("Setting payer phone in MoPay request to: {} (Long value)", payerPhoneLong);
+        moPayRequest.setPhone(payerPhoneLong);
+        moPayRequest.setPayment_mode("MOBILE");
+        moPayRequest.setMessage(request.getMessage() != null ? request.getMessage() : "Payment to " + receiver.getCompanyName());
+        
+        // Create transfer to receiver
+        MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
+        transfer.setAmount(paymentAmount);
+        // Get receiver phone from request body, or use default hardcoded number (250794230137)
+        String receiverPhone = request.getReceiverPhone();
+        if (receiverPhone == null || receiverPhone.trim().isEmpty()) {
+            // Use default hardcoded phone number for receiving MOMO payments
+            receiverPhone = "250794230137";
+            logger.info("Receiver phone not provided in request, using default: {}", receiverPhone);
+        } else {
+            receiverPhone = receiverPhone.trim();
+            // Validate the provided receiver phone number format
+            if (!receiverPhone.matches("^[0-9]{10,15}$")) {
+                throw new RuntimeException("Invalid receiver phone number format. Phone number must be between 10 and 15 digits.");
+            }
+        }
+        
+        // Normalize receiver phone to 12 digits - ensure it's exactly 12 digits
+        String normalizedReceiverPhone = normalizePhoneTo12Digits(receiverPhone);
+        
+        logger.info("Receiver phone normalization - Original: '{}', Normalized: '{}' ({} digits)", receiverPhone, normalizedReceiverPhone, normalizedReceiverPhone.length());
+        
+        // Validate the normalized phone is exactly 12 digits
+        if (normalizedReceiverPhone.length() != 12) {
+            throw new RuntimeException("Receiver phone number must be normalized to exactly 12 digits. Original: '" + receiverPhone + "', Normalized: '" + normalizedReceiverPhone + "' (" + normalizedReceiverPhone.length() + " digits)");
+        }
+        
+        // Validate it's numeric only
+        if (!normalizedReceiverPhone.matches("^[0-9]{12}$")) {
+            throw new RuntimeException("Normalized receiver phone must contain only digits. Got: '" + normalizedReceiverPhone + "'");
+        }
+        
+        Long receiverPhoneLong = Long.parseLong(normalizedReceiverPhone);
+        logger.info("Setting receiver phone in transfer to: {} (Long value)", receiverPhoneLong);
+        transfer.setPhone(receiverPhoneLong);
+        String payerName = user != null ? user.getFullNames() : "Guest User";
+        transfer.setMessage("Payment from " + payerName);
+        moPayRequest.setTransfers(java.util.List.of(transfer));
+
+        // Initiate payment with MoPay
+        MoPayResponse moPayResponse = moPayService.initiatePayment(moPayRequest);
+
+        // Create transaction record - MOMO PAYMENT starts as PENDING
+        // Note: If userId is null, user will be null - this requires user_id to be nullable in Transaction entity
+        Transaction transaction = new Transaction();
+        transaction.setUser(user); // Can be null for guest payments
+        transaction.setPaymentCategory(paymentCategory);
+        transaction.setReceiver(receiver);
+        transaction.setTransactionType(TransactionType.PAYMENT);
+        transaction.setAmount(paymentAmount);
+        transaction.setPhoneNumber(payerPhone); // Payer's phone
+        transaction.setMessage(request.getMessage() != null ? request.getMessage() : "MOMO payment to " + receiver.getCompanyName());
+        // For MOMO payments, user balance is not deducted (they pay from MOMO wallet)
+        // Balance will be set after MoPay confirms the payment
+        if (user != null) {
+            transaction.setBalanceBefore(user.getAmountRemaining()); // User's card balance before (for reference)
+        }
+        transaction.setDiscountAmount(discountAmount);
+        transaction.setUserBonusAmount(userBonusAmount);
+        transaction.setAdminIncomeAmount(adminIncomeAmount);
+        transaction.setReceiverBalanceBefore(receiverBalanceBefore); // Balance owner's balance before
+        transaction.setReceiverBalanceAfter(receiverBalanceAfter); // Balance owner's balance after (to be applied on SUCCESS)
+
+        // Check MoPay response - API returns status 201 and transactionId on success
+        String transactionId = moPayResponse != null ? moPayResponse.getTransactionId() : null;
+        if (moPayResponse != null && moPayResponse.getStatus() != null && moPayResponse.getStatus() == 201 
+            && transactionId != null) {
+            // Successfully initiated - store transaction ID and set as PENDING
+            transaction.setMopayTransactionId(transactionId);
+            transaction.setStatus(TransactionStatus.PENDING);
+        } else {
+            // Initiation failed - mark as FAILED with error message
+            transaction.setStatus(TransactionStatus.FAILED);
+            String errorMessage = moPayResponse != null && moPayResponse.getMessage() != null 
+                ? moPayResponse.getMessage() 
+                : "Payment initiation failed - status: " + (moPayResponse != null ? moPayResponse.getStatus() : "null") 
+                    + ", transactionId: " + transactionId;
+            transaction.setMessage(errorMessage);
+        }
+
+        // DO NOT update balances here - balances will be updated when status is checked and becomes SUCCESS
+        Transaction savedTransaction = transactionRepository.save(transaction);
+        return mapToPaymentResponse(savedTransaction);
+    }
+
     @Transactional(readOnly = true)
     public BalanceResponse checkBalance(UUID userId) {
         User user = userRepository.findById(userId)
@@ -350,10 +570,59 @@ public class PaymentService {
                         user.setAmountRemaining(newBalance);
                         user.setAmountOnCard(user.getAmountOnCard().add(transaction.getAmount()));
                         transaction.setBalanceAfter(newBalance);
+                    } else if (transaction.getTransactionType() == TransactionType.PAYMENT && transaction.getMopayTransactionId() != null) {
+                        // This is a MOMO PAYMENT - update receiver balance and user bonus
+                        Receiver receiver = transaction.getReceiver();
+                        if (receiver != null) {
+                            // Determine the balance owner: if receiver is a submerchant, use parent's balance
+                            Receiver balanceOwner = receiver.getParentReceiver() != null ? receiver.getParentReceiver() : receiver;
+                            
+                            // Get the calculated values from transaction
+                            BigDecimal paymentAmount = transaction.getAmount();
+                            BigDecimal userBonusAmount = transaction.getUserBonusAmount() != null ? transaction.getUserBonusAmount() : BigDecimal.ZERO;
+                            BigDecimal receiverBalanceAfter = transaction.getReceiverBalanceAfter();
+                            
+                            // Update balance owner's remaining balance (shared balance)
+                            balanceOwner.setRemainingBalance(receiverBalanceAfter);
+                            balanceOwner.setLastTransactionDate(LocalDateTime.now());
+                            
+                            // Update balance owner's wallet balance and total received (shared)
+                            BigDecimal balanceOwnerNewWallet = balanceOwner.getWalletBalance().add(paymentAmount);
+                            BigDecimal balanceOwnerNewTotal = balanceOwner.getTotalReceived().add(paymentAmount);
+                            balanceOwner.setWalletBalance(balanceOwnerNewWallet);
+                            balanceOwner.setTotalReceived(balanceOwnerNewTotal);
+                            receiverRepository.save(balanceOwner);
+                            
+                            // Also update individual receiver's wallet balance and total received
+                            if (receiver.getId() != balanceOwner.getId()) {
+                                // Only update if receiver is different from balance owner
+                                BigDecimal receiverNewBalance = receiver.getWalletBalance().add(paymentAmount);
+                                BigDecimal receiverNewTotal = receiver.getTotalReceived().add(paymentAmount);
+                                receiver.setWalletBalance(receiverNewBalance);
+                                receiver.setTotalReceived(receiverNewTotal);
+                                receiver.setLastTransactionDate(LocalDateTime.now());
+                                receiverRepository.save(receiver);
+                            }
+                            
+                            // Add user bonus to user's card balance if applicable (only if user exists)
+                            User transactionUser = transaction.getUser();
+                            if (transactionUser != null) {
+                                if (userBonusAmount.compareTo(BigDecimal.ZERO) > 0) {
+                                    BigDecimal userBalanceBefore = transactionUser.getAmountRemaining();
+                                    BigDecimal userNewBalance = userBalanceBefore.add(userBonusAmount);
+                                    transactionUser.setAmountRemaining(userNewBalance);
+                                    transaction.setBalanceAfter(userNewBalance);
+                                } else {
+                                    // No bonus, so balance remains the same
+                                    transaction.setBalanceAfter(transactionUser.getAmountRemaining());
+                                }
+                                
+                                transactionUser.setLastTransactionDate(LocalDateTime.now());
+                                userRepository.save(transactionUser);
+                            }
+                            // If user is null (guest payment), user bonus is not credited
+                        }
                     }
-                    
-                    user.setLastTransactionDate(LocalDateTime.now());
-                    userRepository.save(user);
                 }
                 
                 transaction.setStatus(TransactionStatus.SUCCESS);
@@ -678,8 +947,11 @@ public class PaymentService {
     private PaymentResponse mapToPaymentResponse(Transaction transaction, UUID mainReceiverId) {
         PaymentResponse response = new PaymentResponse();
         response.setId(transaction.getId());
-        response.setUserId(transaction.getUser().getId());
-        response.setUser(mapToUserResponse(transaction.getUser())); // Include full user information
+        // Handle null user for guest MOMO payments
+        if (transaction.getUser() != null) {
+            response.setUserId(transaction.getUser().getId());
+            response.setUser(mapToUserResponse(transaction.getUser())); // Include full user information
+        }
         // Include payment category if it exists (for PAYMENT transactions)
         if (transaction.getPaymentCategory() != null) {
             response.setPaymentCategory(mapToPaymentCategoryResponse(transaction.getPaymentCategory()));
@@ -705,6 +977,30 @@ public class PaymentService {
             if (mainReceiverId != null) {
                 response.setIsSubmerchant(!transaction.getReceiver().getId().equals(mainReceiverId));
             }
+        }
+        
+        // Add payment method information
+        // MOMO payments have mopayTransactionId (go through MoPay API) and phoneNumber is the payer's phone
+        // NFC payments don't have mopayTransactionId (internal transfers) and phoneNumber is the receiver's phone
+        if (transaction.getTransactionType() == TransactionType.PAYMENT) {
+            if (transaction.getMopayTransactionId() != null && !transaction.getMopayTransactionId().trim().isEmpty()) {
+                // MOMO payment - has mopayTransactionId, phoneNumber is payer's phone
+                response.setPayerPhone(transaction.getPhoneNumber());
+                response.setPaymentMethod("MOMO");
+            } else {
+                // NFC Card payment - no mopayTransactionId, internal transfer
+                response.setPaymentMethod("NFC_CARD");
+                // For NFC, phoneNumber field contains receiver phone (not payer), so we don't set payerPhone
+            }
+        } else if (transaction.getTransactionType() == TransactionType.TOP_UP) {
+            // Top-up - typically MOMO, phoneNumber is the top-up source phone
+            if (transaction.getPhoneNumber() != null && !transaction.getPhoneNumber().trim().isEmpty()) {
+                response.setPayerPhone(transaction.getPhoneNumber());
+            }
+            response.setPaymentMethod("TOP_UP");
+        } else {
+            // REFUND or other
+            response.setPaymentMethod("UNKNOWN");
         }
         
         return response;
@@ -1096,4 +1392,5 @@ public class PaymentService {
         return activity;
     }
 }
+
 

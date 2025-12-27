@@ -24,8 +24,8 @@ public class Transaction {
     private UUID id;
 
     @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "user_id", nullable = false)
-    private User user;
+    @JoinColumn(name = "user_id", nullable = true)
+    private User user; // Nullable for guest MOMO payments
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "payment_category_id")

@@ -34,5 +34,8 @@ public class PaymentResponse {
     private UUID receiverId;
     private String receiverCompanyName;
     private Boolean isSubmerchant; // true if transaction was made by a submerchant
+    // Payment method information
+    private String payerPhone; // Phone number used for payment (if MOMO payment)
+    private String paymentMethod; // "MOMO" or "NFC_CARD"
 }
 

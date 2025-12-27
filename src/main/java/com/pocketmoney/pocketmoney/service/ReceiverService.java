@@ -556,17 +556,17 @@ public class ReceiverService {
         response.setFromDate(fromDate);
         response.setToDate(toDate);
 
-        // Calculate metrics
-        BigDecimal totalPaid = transactionRepository.sumSuccessfulAmountByReceiverAndFilters(receiverId, fromDate, toDate, categoryId);
+        // Calculate metrics using dynamic queries to avoid parameter type issues
+        BigDecimal totalPaid = sumSuccessfulAmountByReceiverAndFilters(receiverId, fromDate, toDate, categoryId);
         response.setTotalPaid(totalPaid != null ? totalPaid : BigDecimal.ZERO);
 
-        Long totalTransactions = transactionRepository.countAllTransactionsByReceiverAndFilters(receiverId, fromDate, toDate, categoryId);
+        Long totalTransactions = countAllTransactionsByReceiverAndFilters(receiverId, fromDate, toDate, categoryId);
         response.setTotalTransactions(totalTransactions != null ? totalTransactions : 0L);
 
-        Long approvedTransactions = transactionRepository.countSuccessfulTransactionsByReceiverAndFilters(receiverId, fromDate, toDate, categoryId);
+        Long approvedTransactions = countSuccessfulTransactionsByReceiverAndFilters(receiverId, fromDate, toDate, categoryId);
         response.setApprovedTransactions(approvedTransactions != null ? approvedTransactions : 0L);
 
-        Long totalUsers = transactionRepository.countDistinctUsersByReceiverAndDateRange(receiverId, fromDate, toDate);
+        Long totalUsers = countDistinctUsersByReceiverAndDateRange(receiverId, fromDate, toDate);
         response.setTotalUsers(totalUsers != null ? totalUsers : 0L);
 
         // Calculate average transaction amount
@@ -579,7 +579,7 @@ public class ReceiverService {
 
         // Get category breakdown (only if categoryId is not specified)
         if (categoryId == null) {
-            List<Object[]> categoryBreakdown = transactionRepository.getCategoryBreakdownByReceiver(receiverId, fromDate, toDate);
+            List<Object[]> categoryBreakdown = getCategoryBreakdownByReceiver(receiverId, fromDate, toDate);
             Map<UUID, ReceiverAnalyticsResponse.CategoryAnalytics> categoryMap = new HashMap<>();
             
             for (Object[] row : categoryBreakdown) {
@@ -600,7 +600,72 @@ public class ReceiverService {
             response.setCategoryBreakdown(categoryMap);
         }
 
+        // Get recent transactions (5 most recent) - filter by date range and category if provided
+        // Create final copies for lambda usage
+        final LocalDateTime finalFromDate = fromDate;
+        final LocalDateTime finalToDate = toDate;
+        final UUID finalCategoryId = categoryId;
+        
+        List<Transaction> recentTransactions = transactionRepository.findByReceiverOrderByCreatedAtDescWithUser(receiver)
+                .stream()
+                .filter(t -> {
+                    // Apply date range filter if provided
+                    if (finalFromDate != null && t.getCreatedAt().isBefore(finalFromDate)) {
+                        return false;
+                    }
+                    if (finalToDate != null && t.getCreatedAt().isAfter(finalToDate)) {
+                        return false;
+                    }
+                    // Apply category filter if provided
+                    if (finalCategoryId != null && (t.getPaymentCategory() == null || !t.getPaymentCategory().getId().equals(finalCategoryId))) {
+                        return false;
+                    }
+                    return true;
+                })
+                .limit(5)
+                .collect(Collectors.toList());
+        
+        response.setRecentTransactions(recentTransactions.stream()
+                .map(t -> mapToAnalyticsRecentTransaction(t, receiverId))
+                .collect(Collectors.toList()));
+
         return response;
+    }
+
+    private ReceiverAnalyticsResponse.RecentTransaction mapToAnalyticsRecentTransaction(Transaction transaction, UUID receiverId) {
+        ReceiverAnalyticsResponse.RecentTransaction recent = new ReceiverAnalyticsResponse.RecentTransaction();
+        recent.setTransactionId(transaction.getId());
+        
+        // Handle null user for guest MOMO payments
+        if (transaction.getUser() != null) {
+            recent.setUserId(transaction.getUser().getId());
+            recent.setUserName(transaction.getUser().getFullNames());
+            recent.setUserPhone(transaction.getUser().getPhoneNumber());
+        } else {
+            // Guest payment - use phone number from transaction if available
+            recent.setUserId(null);
+            recent.setUserName("Guest User");
+            recent.setUserPhone(transaction.getPhoneNumber()); // Use phone number stored in transaction for MOMO payments
+        }
+        
+        recent.setAmount(transaction.getAmount());
+        recent.setDiscountAmount(transaction.getDiscountAmount());
+        recent.setUserBonusAmount(transaction.getUserBonusAmount());
+        recent.setStatus(transaction.getStatus() != null ? transaction.getStatus().name() : null);
+        if (transaction.getPaymentCategory() != null) {
+            recent.setPaymentCategoryName(transaction.getPaymentCategory().getName());
+        }
+        recent.setCreatedAt(transaction.getCreatedAt());
+        
+        // Add receiver information
+        if (transaction.getReceiver() != null) {
+            recent.setReceiverId(transaction.getReceiver().getId());
+            recent.setReceiverCompanyName(transaction.getReceiver().getCompanyName());
+            // Check if this transaction was made by a submerchant (not the main receiver)
+            recent.setIsSubmerchant(!transaction.getReceiver().getId().equals(receiverId));
+        }
+        
+        return recent;
     }
 
     private ReceiverResponse mapToResponse(Receiver receiver) {
@@ -1118,9 +1183,19 @@ public class ReceiverService {
     private ReceiverDashboardResponse.RecentTransaction mapToRecentTransaction(Transaction transaction, UUID mainReceiverId) {
         ReceiverDashboardResponse.RecentTransaction recent = new ReceiverDashboardResponse.RecentTransaction();
         recent.setTransactionId(transaction.getId());
-        recent.setUserId(transaction.getUser().getId());
-        recent.setUserName(transaction.getUser().getFullNames());
-        recent.setUserPhone(transaction.getUser().getPhoneNumber());
+        
+        // Handle null user for guest MOMO payments
+        if (transaction.getUser() != null) {
+            recent.setUserId(transaction.getUser().getId());
+            recent.setUserName(transaction.getUser().getFullNames());
+            recent.setUserPhone(transaction.getUser().getPhoneNumber());
+        } else {
+            // Guest payment - use phone number from transaction if available
+            recent.setUserId(null);
+            recent.setUserName("Guest User");
+            recent.setUserPhone(transaction.getPhoneNumber()); // Use phone number stored in transaction for MOMO payments
+        }
+        
         recent.setAmount(transaction.getAmount());
         recent.setDiscountAmount(transaction.getDiscountAmount());
         recent.setUserBonusAmount(transaction.getUserBonusAmount());
@@ -1471,6 +1546,169 @@ public class ReceiverService {
         // Keep the parent relationship so we can still track it as a submerchant
         submerchant.setStatus(ReceiverStatus.SUSPENDED);
         receiverRepository.save(submerchant);
+    }
+
+    // Helper methods for dynamic queries to avoid parameter type issues with null values
+    private BigDecimal sumSuccessfulAmountByReceiverAndFilters(UUID receiverId, LocalDateTime fromDate, 
+                                                               LocalDateTime toDate, UUID categoryId) {
+        StringBuilder sql = new StringBuilder(
+            "SELECT COALESCE(SUM(t.amount), 0) FROM transactions t " +
+            "WHERE t.receiver_id = :receiverId " +
+            "AND t.transaction_type = 'PAYMENT' AND t.status = 'SUCCESS'"
+        );
+        
+        if (fromDate != null) {
+            sql.append(" AND t.created_at >= :fromDate");
+        }
+        if (toDate != null) {
+            sql.append(" AND t.created_at <= :toDate");
+        }
+        if (categoryId != null) {
+            sql.append(" AND t.payment_category_id = :categoryId");
+        }
+        
+        Query query = entityManager.createNativeQuery(sql.toString());
+        query.setParameter("receiverId", receiverId);
+        if (fromDate != null) {
+            query.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            query.setParameter("toDate", toDate);
+        }
+        if (categoryId != null) {
+            query.setParameter("categoryId", categoryId);
+        }
+        
+        Object result = query.getSingleResult();
+        return result != null ? (BigDecimal) result : BigDecimal.ZERO;
+    }
+
+    private Long countAllTransactionsByReceiverAndFilters(UUID receiverId, LocalDateTime fromDate, 
+                                                          LocalDateTime toDate, UUID categoryId) {
+        StringBuilder sql = new StringBuilder(
+            "SELECT COUNT(*) FROM transactions t " +
+            "WHERE t.receiver_id = :receiverId " +
+            "AND t.transaction_type = 'PAYMENT'"
+        );
+        
+        if (fromDate != null) {
+            sql.append(" AND t.created_at >= :fromDate");
+        }
+        if (toDate != null) {
+            sql.append(" AND t.created_at <= :toDate");
+        }
+        if (categoryId != null) {
+            sql.append(" AND t.payment_category_id = :categoryId");
+        }
+        
+        Query query = entityManager.createNativeQuery(sql.toString());
+        query.setParameter("receiverId", receiverId);
+        if (fromDate != null) {
+            query.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            query.setParameter("toDate", toDate);
+        }
+        if (categoryId != null) {
+            query.setParameter("categoryId", categoryId);
+        }
+        
+        Object result = query.getSingleResult();
+        return result != null ? ((Number) result).longValue() : 0L;
+    }
+
+    private Long countSuccessfulTransactionsByReceiverAndFilters(UUID receiverId, LocalDateTime fromDate, 
+                                                                 LocalDateTime toDate, UUID categoryId) {
+        StringBuilder sql = new StringBuilder(
+            "SELECT COUNT(*) FROM transactions t " +
+            "WHERE t.receiver_id = :receiverId " +
+            "AND t.transaction_type = 'PAYMENT' AND t.status = 'SUCCESS'"
+        );
+        
+        if (fromDate != null) {
+            sql.append(" AND t.created_at >= :fromDate");
+        }
+        if (toDate != null) {
+            sql.append(" AND t.created_at <= :toDate");
+        }
+        if (categoryId != null) {
+            sql.append(" AND t.payment_category_id = :categoryId");
+        }
+        
+        Query query = entityManager.createNativeQuery(sql.toString());
+        query.setParameter("receiverId", receiverId);
+        if (fromDate != null) {
+            query.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            query.setParameter("toDate", toDate);
+        }
+        if (categoryId != null) {
+            query.setParameter("categoryId", categoryId);
+        }
+        
+        Object result = query.getSingleResult();
+        return result != null ? ((Number) result).longValue() : 0L;
+    }
+
+    private Long countDistinctUsersByReceiverAndDateRange(UUID receiverId, LocalDateTime fromDate, 
+                                                          LocalDateTime toDate) {
+        StringBuilder sql = new StringBuilder(
+            "SELECT COUNT(DISTINCT t.user_id) FROM transactions t " +
+            "WHERE t.receiver_id = :receiverId " +
+            "AND t.transaction_type = 'PAYMENT'"
+        );
+        
+        if (fromDate != null) {
+            sql.append(" AND t.created_at >= :fromDate");
+        }
+        if (toDate != null) {
+            sql.append(" AND t.created_at <= :toDate");
+        }
+        
+        Query query = entityManager.createNativeQuery(sql.toString());
+        query.setParameter("receiverId", receiverId);
+        if (fromDate != null) {
+            query.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            query.setParameter("toDate", toDate);
+        }
+        
+        Object result = query.getSingleResult();
+        return result != null ? ((Number) result).longValue() : 0L;
+    }
+
+    private List<Object[]> getCategoryBreakdownByReceiver(UUID receiverId, LocalDateTime fromDate, 
+                                                          LocalDateTime toDate) {
+        StringBuilder sql = new StringBuilder(
+            "SELECT pc.id, pc.name, COUNT(t.id), COALESCE(SUM(t.amount), 0) FROM transactions t " +
+            "LEFT JOIN payment_categories pc ON t.payment_category_id = pc.id " +
+            "WHERE t.receiver_id = :receiverId AND t.transaction_type = 'PAYMENT' AND t.status = 'SUCCESS' " +
+            "AND t.payment_category_id IS NOT NULL"
+        );
+        
+        if (fromDate != null) {
+            sql.append(" AND t.created_at >= :fromDate");
+        }
+        if (toDate != null) {
+            sql.append(" AND t.created_at <= :toDate");
+        }
+        
+        sql.append(" GROUP BY pc.id, pc.name");
+        
+        Query query = entityManager.createNativeQuery(sql.toString());
+        query.setParameter("receiverId", receiverId);
+        if (fromDate != null) {
+            query.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            query.setParameter("toDate", toDate);
+        }
+        
+        @SuppressWarnings("unchecked")
+        List<Object[]> results = query.getResultList();
+        return results;
     }
 }
 
