@@ -70,5 +70,16 @@ public class AuthController {
                     .body(ApiResponse.error(e.getMessage()));
         }
     }
+
+    @PostMapping("/switch-merchant/{receiverId}")
+    public ResponseEntity<ApiResponse<AuthResponse>> switchMerchant(@PathVariable UUID receiverId) {
+        try {
+            AuthResponse response = authService.switchMerchant(receiverId);
+            return ResponseEntity.ok(ApiResponse.success("Merchant switched successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
 }
 

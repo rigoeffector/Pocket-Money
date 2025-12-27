@@ -5,7 +5,9 @@ import com.pocketmoney.pocketmoney.dto.ApproveBalanceAssignmentRequest;
 import com.pocketmoney.pocketmoney.dto.AssignBalanceRequest;
 import com.pocketmoney.pocketmoney.dto.BalanceAssignmentHistoryResponse;
 import com.pocketmoney.pocketmoney.dto.CreateReceiverRequest;
+import com.pocketmoney.pocketmoney.dto.CreateSubmerchantRequest;
 import com.pocketmoney.pocketmoney.dto.ReceiverAnalyticsResponse;
+import com.pocketmoney.pocketmoney.dto.ReceiverDashboardResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverWalletResponse;
 import com.pocketmoney.pocketmoney.dto.ResetPasswordRequest;
@@ -203,6 +205,121 @@ public class ReceiverController {
         try {
             BalanceAssignmentHistoryResponse response = receiverService.assignBalance(id, request);
             return ResponseEntity.ok(ApiResponse.success("Balance assignment initiated successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @GetMapping("/{id}/dashboard")
+    public ResponseEntity<ApiResponse<ReceiverDashboardResponse>> getReceiverDashboard(@PathVariable UUID id) {
+        try {
+            ReceiverDashboardResponse response = receiverService.getReceiverDashboard(id);
+            return ResponseEntity.ok(ApiResponse.success("Receiver dashboard retrieved successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PostMapping("/{id}/submerchants")
+    public ResponseEntity<ApiResponse<ReceiverResponse>> createSubmerchant(
+            @PathVariable UUID id,
+            @Valid @RequestBody CreateReceiverRequest request) {
+        try {
+            ReceiverResponse response = receiverService.createSubmerchant(id, request);
+            return ResponseEntity.status(HttpStatus.CREATED)
+                    .body(ApiResponse.success("Submerchant created and linked successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PostMapping("/{id}/submerchants/link")
+    public ResponseEntity<ApiResponse<ReceiverResponse>> linkExistingReceiverAsSubmerchant(
+            @PathVariable UUID id,
+            @Valid @RequestBody CreateSubmerchantRequest request) {
+        try {
+            ReceiverResponse response = receiverService.linkExistingReceiverAsSubmerchant(id, request);
+            return ResponseEntity.ok(ApiResponse.success("Existing receiver linked as submerchant successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @GetMapping("/{id}/submerchants")
+    public ResponseEntity<ApiResponse<List<ReceiverResponse>>> getSubmerchants(@PathVariable UUID id) {
+        try {
+            List<ReceiverResponse> submerchants = receiverService.getSubmerchants(id);
+            return ResponseEntity.ok(ApiResponse.success("Submerchants retrieved successfully", submerchants));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @GetMapping("/main-merchants")
+    public ResponseEntity<ApiResponse<List<ReceiverResponse>>> getAllMainMerchants() {
+        try {
+            List<ReceiverResponse> mainMerchants = receiverService.getAllMainMerchants();
+            return ResponseEntity.ok(ApiResponse.success("Main merchants retrieved successfully", mainMerchants));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @DeleteMapping("/{id}/submerchants/{submerchantId}/unlink")
+    public ResponseEntity<ApiResponse<ReceiverResponse>> unlinkSubmerchant(
+            @PathVariable UUID id,
+            @PathVariable UUID submerchantId) {
+        try {
+            // Verify the main merchant ID matches (for consistency, though we only need submerchantId)
+            ReceiverResponse response = receiverService.unlinkSubmerchant(submerchantId);
+            return ResponseEntity.ok(ApiResponse.success("Submerchant unlinked successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PutMapping("/{id}/submerchants/{submerchantId}")
+    public ResponseEntity<ApiResponse<ReceiverResponse>> updateSubmerchant(
+            @PathVariable UUID id,
+            @PathVariable UUID submerchantId,
+            @Valid @RequestBody UpdateReceiverRequest request) {
+        try {
+            ReceiverResponse response = receiverService.updateSubmerchant(id, submerchantId, request);
+            return ResponseEntity.ok(ApiResponse.success("Submerchant updated successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PutMapping("/{id}/submerchants/{submerchantId}/change-parent")
+    public ResponseEntity<ApiResponse<ReceiverResponse>> updateSubmerchantParent(
+            @PathVariable UUID id,
+            @PathVariable UUID submerchantId,
+            @Valid @RequestBody CreateSubmerchantRequest request) {
+        try {
+            ReceiverResponse response = receiverService.updateSubmerchantParent(submerchantId, request);
+            return ResponseEntity.ok(ApiResponse.success("Submerchant parent updated successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @DeleteMapping("/{id}/submerchants/{submerchantId}")
+    public ResponseEntity<ApiResponse<Void>> deleteSubmerchant(
+            @PathVariable UUID id,
+            @PathVariable UUID submerchantId) {
+        try {
+            receiverService.deleteSubmerchant(id, submerchantId);
+            return ResponseEntity.ok(ApiResponse.success("Submerchant deleted successfully", null));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.error(e.getMessage()));

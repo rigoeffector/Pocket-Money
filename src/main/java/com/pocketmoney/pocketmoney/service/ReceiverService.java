@@ -3,14 +3,17 @@ package com.pocketmoney.pocketmoney.service;
 import com.pocketmoney.pocketmoney.dto.AssignBalanceRequest;
 import com.pocketmoney.pocketmoney.dto.BalanceAssignmentHistoryResponse;
 import com.pocketmoney.pocketmoney.dto.CreateReceiverRequest;
+import com.pocketmoney.pocketmoney.dto.CreateSubmerchantRequest;
 import com.pocketmoney.pocketmoney.dto.MoPayInitiateRequest;
 import com.pocketmoney.pocketmoney.dto.MoPayResponse;
 import com.pocketmoney.pocketmoney.entity.BalanceAssignmentStatus;
 import com.pocketmoney.pocketmoney.dto.ReceiverAnalyticsResponse;
+import com.pocketmoney.pocketmoney.dto.ReceiverDashboardResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverLoginResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverWalletResponse;
 import com.pocketmoney.pocketmoney.dto.UpdateReceiverRequest;
+import com.pocketmoney.pocketmoney.entity.Transaction;
 import com.pocketmoney.pocketmoney.entity.BalanceAssignmentHistory;
 import com.pocketmoney.pocketmoney.entity.Receiver;
 import com.pocketmoney.pocketmoney.entity.ReceiverStatus;
@@ -498,16 +501,19 @@ public class ReceiverService {
         Receiver receiver = receiverRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Receiver not found with id: " + id));
 
+        // Use shared balance if submerchant (parent's balance)
+        Receiver balanceOwner = receiver.getParentReceiver() != null ? receiver.getParentReceiver() : receiver;
+
         ReceiverWalletResponse response = new ReceiverWalletResponse();
         response.setReceiverId(receiver.getId());
         response.setCompanyName(receiver.getCompanyName());
         response.setReceiverPhone(receiver.getReceiverPhone());
-        response.setWalletBalance(receiver.getWalletBalance());
-        response.setTotalReceived(receiver.getTotalReceived());
-        response.setAssignedBalance(receiver.getAssignedBalance());
-        response.setRemainingBalance(receiver.getRemainingBalance());
-        response.setDiscountPercentage(receiver.getDiscountPercentage());
-        response.setUserBonusPercentage(receiver.getUserBonusPercentage());
+        response.setWalletBalance(balanceOwner.getWalletBalance()); // Shared wallet balance
+        response.setTotalReceived(balanceOwner.getTotalReceived()); // Shared total received
+        response.setAssignedBalance(balanceOwner.getAssignedBalance()); // Shared assigned balance
+        response.setRemainingBalance(balanceOwner.getRemainingBalance()); // Shared remaining balance
+        response.setDiscountPercentage(balanceOwner.getDiscountPercentage()); // Use balance owner's percentages
+        response.setUserBonusPercentage(balanceOwner.getUserBonusPercentage()); // Use balance owner's percentages
         response.setLastTransactionDate(receiver.getLastTransactionDate());
         return response;
     }
@@ -603,13 +609,33 @@ public class ReceiverService {
         response.setEmail(receiver.getEmail());
         response.setAddress(receiver.getAddress());
         response.setDescription(receiver.getDescription());
-        response.setWalletBalance(receiver.getWalletBalance());
-        response.setTotalReceived(receiver.getTotalReceived());
-        response.setAssignedBalance(receiver.getAssignedBalance());
-        response.setRemainingBalance(receiver.getRemainingBalance());
-        response.setDiscountPercentage(receiver.getDiscountPercentage());
-        response.setUserBonusPercentage(receiver.getUserBonusPercentage());
+        
+        // Use shared balance if submerchant (parent's balance), otherwise use own balance
+        Receiver balanceOwner = receiver.getParentReceiver() != null ? receiver.getParentReceiver() : receiver;
+        response.setWalletBalance(balanceOwner.getWalletBalance()); // Shared wallet balance
+        response.setTotalReceived(balanceOwner.getTotalReceived()); // Shared total received
+        response.setAssignedBalance(balanceOwner.getAssignedBalance()); // Shared assigned balance
+        response.setRemainingBalance(balanceOwner.getRemainingBalance()); // Shared remaining balance
+        response.setDiscountPercentage(balanceOwner.getDiscountPercentage()); // Use balance owner's percentages
+        response.setUserBonusPercentage(balanceOwner.getUserBonusPercentage()); // Use balance owner's percentages
+        
         response.setPendingBalanceAssignments(0); // Default, will be set in getReceiverById if needed
+        
+        // Submerchant relationship info
+        if (receiver.getParentReceiver() != null) {
+            response.setParentReceiverId(receiver.getParentReceiver().getId());
+            response.setParentReceiverCompanyName(receiver.getParentReceiver().getCompanyName());
+            response.setIsMainMerchant(false);
+            response.setSubmerchantCount(0);
+        } else {
+            response.setParentReceiverId(null);
+            response.setParentReceiverCompanyName(null);
+            response.setIsMainMerchant(true);
+            // Count submerchants
+            List<Receiver> submerchants = receiverRepository.findByParentReceiverId(receiver.getId());
+            response.setSubmerchantCount(submerchants.size());
+        }
+        
         response.setLastTransactionDate(receiver.getLastTransactionDate());
         response.setCreatedAt(receiver.getCreatedAt());
         response.setUpdatedAt(receiver.getUpdatedAt());
@@ -667,17 +693,20 @@ public class ReceiverService {
             history.setApprovedBy(receiver.getUsername());
             history.setApprovedAt(LocalDateTime.now());
             
-            // Apply the balance change to receiver
-            BigDecimal currentAssigned = receiver.getAssignedBalance();
+            // Determine balance owner: if receiver is a submerchant, update parent's balance
+            Receiver balanceOwner = receiver.getParentReceiver() != null ? receiver.getParentReceiver() : receiver;
+            
+            // Apply the balance change to balance owner (main merchant if submerchant, otherwise receiver itself)
+            BigDecimal currentAssigned = balanceOwner.getAssignedBalance();
             BigDecimal newAssignedBalance = history.getAssignedBalance();
-            BigDecimal currentRemaining = receiver.getRemainingBalance();
+            BigDecimal currentRemaining = balanceOwner.getRemainingBalance();
             
             // Calculate the base difference (new assigned - current assigned)
             BigDecimal baseDifference = newAssignedBalance.subtract(currentAssigned);
             
-            // Add discount percentage as bonus to remaining balance
+            // Add discount percentage as bonus to remaining balance (use balance owner's discount percentage)
             // Example: If assigning 10,000 with 10% discount, remainingBalance gets 10,000 + 1,000 = 11,000
-            BigDecimal discountPercentage = receiver.getDiscountPercentage() != null ? receiver.getDiscountPercentage() : BigDecimal.ZERO;
+            BigDecimal discountPercentage = balanceOwner.getDiscountPercentage() != null ? balanceOwner.getDiscountPercentage() : BigDecimal.ZERO;
             BigDecimal discountBonus = baseDifference.multiply(discountPercentage).divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
             BigDecimal totalBonus = baseDifference.add(discountBonus);
             
@@ -689,8 +718,13 @@ public class ReceiverService {
                 newRemainingBalance = BigDecimal.ZERO;
             }
             
+            // Update balance owner (shared balance)
+            balanceOwner.setAssignedBalance(newAssignedBalance);
+            balanceOwner.setRemainingBalance(newRemainingBalance);
+            receiverRepository.save(balanceOwner);
+            
+            // Also update receiver's assigned balance for tracking (but not remaining balance - that's shared)
             receiver.setAssignedBalance(newAssignedBalance);
-            receiver.setRemainingBalance(newRemainingBalance);
             receiverRepository.save(receiver);
         } else {
             history.setStatus(BalanceAssignmentStatus.REJECTED);
@@ -731,6 +765,432 @@ public class ReceiverService {
         } else {
             throw new RuntimeException("Invalid phone number format. Expected 9-12 digits, got: " + digitsOnly.length());
         }
+    }
+
+    @Transactional(readOnly = true)
+    public ReceiverDashboardResponse getReceiverDashboard(UUID receiverId) {
+        Receiver receiver = receiverRepository.findById(receiverId)
+                .orElseThrow(() -> new RuntimeException("Receiver not found with id: " + receiverId));
+
+        ReceiverDashboardResponse response = new ReceiverDashboardResponse();
+        
+        // Basic receiver info
+        response.setReceiverId(receiver.getId());
+        response.setCompanyName(receiver.getCompanyName());
+        response.setManagerName(receiver.getManagerName());
+        response.setReceiverPhone(receiver.getReceiverPhone());
+        response.setEmail(receiver.getEmail());
+        response.setAddress(receiver.getAddress());
+        
+        // Wallet information - use shared balance if submerchant (parent's balance)
+        Receiver balanceOwner = receiver.getParentReceiver() != null ? receiver.getParentReceiver() : receiver;
+        response.setWalletBalance(balanceOwner.getWalletBalance()); // Shared wallet balance
+        response.setTotalReceived(balanceOwner.getTotalReceived()); // Shared total received
+        response.setAssignedBalance(balanceOwner.getAssignedBalance()); // Shared assigned balance
+        response.setRemainingBalance(balanceOwner.getRemainingBalance()); // Shared remaining balance
+        response.setDiscountPercentage(balanceOwner.getDiscountPercentage()); // Use balance owner's percentages
+        response.setUserBonusPercentage(balanceOwner.getUserBonusPercentage()); // Use balance owner's percentages
+        
+        // Count pending balance assignments
+        List<BalanceAssignmentHistory> pendingAssignments = balanceAssignmentHistoryRepository.findPendingByReceiverId(receiverId);
+        response.setPendingBalanceAssignments(pendingAssignments.size());
+        
+        // Check if main merchant or submerchant
+        boolean isMainMerchant = receiver.getParentReceiver() == null;
+        response.setIsMainMerchant(isMainMerchant);
+        
+        if (isMainMerchant) {
+            response.setParentReceiverId(null);
+            response.setParentReceiverCompanyName(null);
+            
+            // Get submerchants
+            List<Receiver> submerchants = receiverRepository.findByParentReceiverId(receiverId);
+            List<ReceiverDashboardResponse.SubmerchantInfo> submerchantInfos = submerchants.stream()
+                    .map(this::mapToSubmerchantInfo)
+                    .collect(Collectors.toList());
+            response.setSubmerchants(submerchantInfos);
+            
+            // Calculate full statistics (including all submerchants)
+            ReceiverDashboardResponse.FullStatistics fullStats = calculateFullStatistics(receiverId, submerchants);
+            response.setFullStatistics(fullStats);
+        } else {
+            response.setParentReceiverId(receiver.getParentReceiver().getId());
+            response.setParentReceiverCompanyName(receiver.getParentReceiver().getCompanyName());
+            response.setSubmerchants(null);
+            response.setFullStatistics(null);
+        }
+        
+        // Transaction statistics for this receiver only
+        Long totalTransactions = transactionRepository.countAllTransactionsByReceiver(receiverId);
+        response.setTotalTransactions(totalTransactions != null ? totalTransactions : 0L);
+        
+        BigDecimal totalRevenue = transactionRepository.sumSuccessfulAmountByReceiver(receiverId);
+        response.setTotalRevenue(totalRevenue != null ? totalRevenue : BigDecimal.ZERO);
+        
+        Long totalCustomers = transactionRepository.countDistinctUsersByReceiver(receiverId);
+        response.setTotalCustomers(totalCustomers != null ? totalCustomers : 0L);
+        
+        // Recent transactions (5 most recent)
+        List<Transaction> recentTransactions = transactionRepository.findByReceiverOrderByCreatedAtDescWithUser(
+                receiverRepository.findById(receiverId).orElseThrow()).stream()
+                .limit(5)
+                .collect(Collectors.toList());
+        response.setRecentTransactions(recentTransactions.stream()
+                .map(this::mapToRecentTransaction)
+                .collect(Collectors.toList()));
+        
+        // Recent balance assignments (5 most recent)
+        List<BalanceAssignmentHistory> balanceHistories = balanceAssignmentHistoryRepository
+                .findByReceiverOrderByCreatedAtDesc(receiver).stream()
+                .limit(5)
+                .collect(Collectors.toList());
+        response.setRecentBalanceAssignments(balanceHistories.stream()
+                .map(this::mapToBalanceAssignmentSummary)
+                .collect(Collectors.toList()));
+        
+        return response;
+    }
+
+    private ReceiverDashboardResponse.SubmerchantInfo mapToSubmerchantInfo(Receiver submerchant) {
+        ReceiverDashboardResponse.SubmerchantInfo info = new ReceiverDashboardResponse.SubmerchantInfo();
+        info.setSubmerchantId(submerchant.getId());
+        info.setCompanyName(submerchant.getCompanyName());
+        info.setManagerName(submerchant.getManagerName());
+        info.setReceiverPhone(submerchant.getReceiverPhone());
+        info.setWalletBalance(submerchant.getWalletBalance());
+        info.setTotalReceived(submerchant.getTotalReceived());
+        info.setRemainingBalance(submerchant.getRemainingBalance());
+        info.setStatus(submerchant.getStatus());
+        info.setCreatedAt(submerchant.getCreatedAt());
+        
+        // Get transaction stats for submerchant
+        Long subTransactions = transactionRepository.countAllTransactionsByReceiver(submerchant.getId());
+        info.setTotalTransactions(subTransactions != null ? subTransactions : 0L);
+        
+        BigDecimal subRevenue = transactionRepository.sumSuccessfulAmountByReceiver(submerchant.getId());
+        info.setTotalRevenue(subRevenue != null ? subRevenue : BigDecimal.ZERO);
+        
+        return info;
+    }
+
+    private ReceiverDashboardResponse.FullStatistics calculateFullStatistics(UUID mainReceiverId, List<Receiver> submerchants) {
+        ReceiverDashboardResponse.FullStatistics stats = new ReceiverDashboardResponse.FullStatistics();
+        
+        // Get main receiver stats
+        Long mainTransactions = transactionRepository.countAllTransactionsByReceiver(mainReceiverId);
+        BigDecimal mainRevenue = transactionRepository.sumSuccessfulAmountByReceiver(mainReceiverId);
+        Long mainCustomers = transactionRepository.countDistinctUsersByReceiver(mainReceiverId);
+        
+        Receiver mainReceiver = receiverRepository.findById(mainReceiverId).orElseThrow();
+        BigDecimal mainWalletBalance = mainReceiver.getWalletBalance();
+        BigDecimal mainRemainingBalance = mainReceiver.getRemainingBalance();
+        
+        // Aggregate submerchant stats
+        long totalTransactions = mainTransactions != null ? mainTransactions : 0L;
+        BigDecimal totalRevenue = mainRevenue != null ? mainRevenue : BigDecimal.ZERO;
+        long totalCustomers = mainCustomers != null ? mainCustomers : 0L;
+        BigDecimal combinedWalletBalance = mainWalletBalance;
+        BigDecimal combinedRemainingBalance = mainRemainingBalance;
+        
+        for (Receiver submerchant : submerchants) {
+            Long subTransactions = transactionRepository.countAllTransactionsByReceiver(submerchant.getId());
+            BigDecimal subRevenue = transactionRepository.sumSuccessfulAmountByReceiver(submerchant.getId());
+            Long subCustomers = transactionRepository.countDistinctUsersByReceiver(submerchant.getId());
+            
+            totalTransactions += (subTransactions != null ? subTransactions : 0L);
+            totalRevenue = totalRevenue.add(subRevenue != null ? subRevenue : BigDecimal.ZERO);
+            combinedWalletBalance = combinedWalletBalance.add(submerchant.getWalletBalance());
+            combinedRemainingBalance = combinedRemainingBalance.add(submerchant.getRemainingBalance());
+            
+            // For customers, we need distinct count - this is approximate
+            totalCustomers += (subCustomers != null ? subCustomers : 0L);
+        }
+        
+        stats.setTotalTransactions(totalTransactions);
+        stats.setTotalRevenue(totalRevenue);
+        stats.setTotalCustomers(totalCustomers);
+        stats.setTotalSubmerchants((long) submerchants.size());
+        stats.setCombinedWalletBalance(combinedWalletBalance);
+        stats.setCombinedRemainingBalance(combinedRemainingBalance);
+        
+        return stats;
+    }
+
+    private ReceiverDashboardResponse.RecentTransaction mapToRecentTransaction(Transaction transaction) {
+        ReceiverDashboardResponse.RecentTransaction recent = new ReceiverDashboardResponse.RecentTransaction();
+        recent.setTransactionId(transaction.getId());
+        recent.setUserId(transaction.getUser().getId());
+        recent.setUserName(transaction.getUser().getFullNames());
+        recent.setUserPhone(transaction.getUser().getPhoneNumber());
+        recent.setAmount(transaction.getAmount());
+        recent.setDiscountAmount(transaction.getDiscountAmount());
+        recent.setUserBonusAmount(transaction.getUserBonusAmount());
+        recent.setStatus(transaction.getStatus());
+        if (transaction.getPaymentCategory() != null) {
+            recent.setPaymentCategoryName(transaction.getPaymentCategory().getName());
+        }
+        recent.setCreatedAt(transaction.getCreatedAt());
+        return recent;
+    }
+
+    private ReceiverDashboardResponse.BalanceAssignmentSummary mapToBalanceAssignmentSummary(BalanceAssignmentHistory history) {
+        ReceiverDashboardResponse.BalanceAssignmentSummary summary = new ReceiverDashboardResponse.BalanceAssignmentSummary();
+        summary.setHistoryId(history.getId());
+        summary.setAssignedBalance(history.getAssignedBalance());
+        summary.setBalanceDifference(history.getBalanceDifference());
+        summary.setStatus(history.getStatus());
+        summary.setNotes(history.getNotes());
+        summary.setCreatedAt(history.getCreatedAt());
+        summary.setApprovedAt(history.getApprovedAt());
+        summary.setApprovedBy(history.getApprovedBy());
+        return summary;
+    }
+
+    @Transactional
+    public ReceiverResponse createSubmerchant(UUID mainReceiverId, CreateReceiverRequest request) {
+        // Verify main receiver exists and is a main merchant (has no parent)
+        Receiver mainReceiver = receiverRepository.findById(mainReceiverId)
+                .orElseThrow(() -> new RuntimeException("Main receiver not found with id: " + mainReceiverId));
+        
+        if (mainReceiver.getParentReceiver() != null) {
+            throw new RuntimeException("Cannot create submerchant. The specified receiver is already a submerchant.");
+        }
+        
+        // Check if username already exists
+        if (receiverRepository.existsByUsername(request.getUsername())) {
+            throw new RuntimeException("Username already exists: " + request.getUsername());
+        }
+
+        // Check if phone number already exists
+        if (receiverRepository.existsByReceiverPhone(request.getReceiverPhone())) {
+            throw new RuntimeException("Receiver phone number already exists: " + request.getReceiverPhone());
+        }
+
+        // Normalize email: convert empty/blank strings to null
+        String email = (request.getEmail() != null && !request.getEmail().trim().isEmpty()) 
+                ? request.getEmail().trim() 
+                : null;
+
+        // Validate email format if provided
+        if (email != null) {
+            String emailRegex = "^[A-Za-z0-9+_.-]+@([A-Za-z0-9.-]+\\.[A-Za-z]{2,})$";
+            if (!email.matches(emailRegex)) {
+                throw new RuntimeException("Invalid email format");
+            }
+            // Check if email already exists
+            if (receiverRepository.existsByEmail(email)) {
+                throw new RuntimeException("Email already exists: " + email);
+            }
+        }
+
+        // Create new receiver
+        Receiver submerchant = new Receiver();
+        submerchant.setCompanyName(request.getCompanyName());
+        submerchant.setManagerName(request.getManagerName());
+        submerchant.setUsername(request.getUsername());
+        submerchant.setPassword(passwordEncoder.encode(request.getPassword())); // Hash the password
+        submerchant.setReceiverPhone(request.getReceiverPhone());
+        submerchant.setAccountNumber(request.getAccountNumber());
+        submerchant.setStatus(request.getStatus() != null ? request.getStatus() : ReceiverStatus.NOT_ACTIVE);
+        submerchant.setEmail(email);
+        submerchant.setAddress(request.getAddress());
+        submerchant.setDescription(request.getDescription());
+        
+        // Set parent receiver (link as submerchant)
+        submerchant.setParentReceiver(mainReceiver);
+
+        Receiver savedSubmerchant = receiverRepository.save(submerchant);
+        return mapToResponse(savedSubmerchant);
+    }
+
+    @Transactional
+    public ReceiverResponse linkExistingReceiverAsSubmerchant(UUID mainReceiverId, CreateSubmerchantRequest request) {
+        Receiver mainReceiver = receiverRepository.findById(mainReceiverId)
+                .orElseThrow(() -> new RuntimeException("Main receiver not found with id: " + mainReceiverId));
+        
+        // Verify main receiver has no parent (is a main merchant)
+        if (mainReceiver.getParentReceiver() != null) {
+            throw new RuntimeException("Cannot link submerchant. The specified receiver is already a submerchant.");
+        }
+        
+        Receiver submerchant = receiverRepository.findById(request.getSubmerchantReceiverId())
+                .orElseThrow(() -> new RuntimeException("Submerchant receiver not found with id: " + request.getSubmerchantReceiverId()));
+        
+        // Verify submerchant is not already linked
+        if (submerchant.getParentReceiver() != null) {
+            throw new RuntimeException("Receiver is already linked as a submerchant to another merchant.");
+        }
+        
+        // Verify not linking to itself
+        if (mainReceiverId.equals(request.getSubmerchantReceiverId())) {
+            throw new RuntimeException("Cannot link a receiver to itself as a submerchant.");
+        }
+        
+        // Link submerchant to main receiver
+        submerchant.setParentReceiver(mainReceiver);
+        receiverRepository.save(submerchant);
+        
+        return mapToResponse(submerchant);
+    }
+
+    @Transactional(readOnly = true)
+    public List<ReceiverResponse> getSubmerchants(UUID mainReceiverId) {
+        // Verify main receiver exists
+        receiverRepository.findById(mainReceiverId)
+                .orElseThrow(() -> new RuntimeException("Main receiver not found with id: " + mainReceiverId));
+        
+        List<Receiver> submerchants = receiverRepository.findByParentReceiverId(mainReceiverId);
+        return submerchants.stream()
+                .map(this::mapToResponse)
+                .collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public List<ReceiverResponse> getAllMainMerchants() {
+        // Get all receivers without a parent (main merchants)
+        List<Receiver> mainMerchants = receiverRepository.findByParentReceiverIsNull();
+        return mainMerchants.stream()
+                .map(this::mapToResponse)
+                .collect(Collectors.toList());
+    }
+
+    @Transactional
+    public ReceiverResponse unlinkSubmerchant(UUID submerchantId) {
+        Receiver submerchant = receiverRepository.findById(submerchantId)
+                .orElseThrow(() -> new RuntimeException("Submerchant receiver not found with id: " + submerchantId));
+        
+        if (submerchant.getParentReceiver() == null) {
+            throw new RuntimeException("Receiver is not a submerchant. Cannot unlink.");
+        }
+        
+        submerchant.setParentReceiver(null);
+        receiverRepository.save(submerchant);
+        
+        return mapToResponse(submerchant);
+    }
+
+    @Transactional
+    public ReceiverResponse updateSubmerchantParent(UUID submerchantId, CreateSubmerchantRequest request) {
+        Receiver submerchant = receiverRepository.findById(submerchantId)
+                .orElseThrow(() -> new RuntimeException("Submerchant receiver not found with id: " + submerchantId));
+        
+        Receiver newParentReceiver = receiverRepository.findById(request.getSubmerchantReceiverId())
+                .orElseThrow(() -> new RuntimeException("New parent receiver not found with id: " + request.getSubmerchantReceiverId()));
+        
+        // Verify new parent is not already a submerchant
+        if (newParentReceiver.getParentReceiver() != null) {
+            throw new RuntimeException("Cannot set parent. The specified receiver is already a submerchant.");
+        }
+        
+        // Verify not linking to itself
+        if (submerchantId.equals(request.getSubmerchantReceiverId())) {
+            throw new RuntimeException("Cannot link a receiver to itself as a parent.");
+        }
+        
+        // Update parent
+        submerchant.setParentReceiver(newParentReceiver);
+        receiverRepository.save(submerchant);
+        
+        return mapToResponse(submerchant);
+    }
+
+    @Transactional
+    public ReceiverResponse updateSubmerchant(UUID mainReceiverId, UUID submerchantId, UpdateReceiverRequest request) {
+        // Verify main receiver exists
+        if (!receiverRepository.existsById(mainReceiverId)) {
+            throw new RuntimeException("Main receiver not found with id: " + mainReceiverId);
+        }
+        
+        // Verify submerchant exists and belongs to the main receiver
+        Receiver submerchant = receiverRepository.findById(submerchantId)
+                .orElseThrow(() -> new RuntimeException("Submerchant receiver not found with id: " + submerchantId));
+        
+        if (submerchant.getParentReceiver() == null || !submerchant.getParentReceiver().getId().equals(mainReceiverId)) {
+            throw new RuntimeException("Receiver is not a submerchant of the specified main merchant.");
+        }
+        
+        // Check if username is being changed and if it conflicts
+        if (request.getUsername() != null && !submerchant.getUsername().equals(request.getUsername())) {
+            if (receiverRepository.existsByUsername(request.getUsername())) {
+                throw new RuntimeException("Username already exists: " + request.getUsername());
+            }
+            submerchant.setUsername(request.getUsername());
+        }
+
+        // Check if phone is being changed and if it conflicts
+        if (request.getReceiverPhone() != null && !submerchant.getReceiverPhone().equals(request.getReceiverPhone())) {
+            if (receiverRepository.existsByReceiverPhone(request.getReceiverPhone())) {
+                throw new RuntimeException("Receiver phone number already exists: " + request.getReceiverPhone());
+            }
+            submerchant.setReceiverPhone(request.getReceiverPhone());
+        }
+
+        // Update password if provided
+        if (request.getPassword() != null && !request.getPassword().isEmpty()) {
+            submerchant.setPassword(passwordEncoder.encode(request.getPassword()));
+        }
+
+        // Update other fields
+        if (request.getCompanyName() != null) {
+            submerchant.setCompanyName(request.getCompanyName());
+        }
+        if (request.getManagerName() != null) {
+            submerchant.setManagerName(request.getManagerName());
+        }
+        if (request.getAccountNumber() != null) {
+            submerchant.setAccountNumber(request.getAccountNumber());
+        }
+        if (request.getStatus() != null) {
+            submerchant.setStatus(request.getStatus());
+        }
+        if (request.getEmail() != null) {
+            // Normalize email: convert empty/blank strings to null
+            String email = request.getEmail().trim().isEmpty() ? null : request.getEmail().trim();
+            
+            if (email != null) {
+                String emailRegex = "^[A-Za-z0-9+_.-]+@([A-Za-z0-9.-]+\\.[A-Za-z]{2,})$";
+                if (!email.matches(emailRegex)) {
+                    throw new RuntimeException("Invalid email format");
+                }
+                // Check if email already exists (for other receivers)
+                if (!submerchant.getEmail().equals(email) && receiverRepository.existsByEmail(email)) {
+                    throw new RuntimeException("Email already exists: " + email);
+                }
+            }
+            submerchant.setEmail(email);
+        }
+        if (request.getAddress() != null) {
+            submerchant.setAddress(request.getAddress());
+        }
+        if (request.getDescription() != null) {
+            submerchant.setDescription(request.getDescription());
+        }
+        
+        // Note: assignedBalance, discountPercentage, userBonusPercentage are typically managed 
+        // through the balance assignment endpoint, but we can update them here if provided
+        // For now, we'll leave these as they are managed separately
+        
+        Receiver updatedSubmerchant = receiverRepository.save(submerchant);
+        return mapToResponse(updatedSubmerchant);
+    }
+
+    @Transactional
+    public void deleteSubmerchant(UUID mainReceiverId, UUID submerchantId) {
+        // Verify main receiver exists
+        if (!receiverRepository.existsById(mainReceiverId)) {
+            throw new RuntimeException("Main receiver not found with id: " + mainReceiverId);
+        }
+        
+        // Verify submerchant exists and belongs to the main receiver
+        Receiver submerchant = receiverRepository.findById(submerchantId)
+                .orElseThrow(() -> new RuntimeException("Submerchant receiver not found with id: " + submerchantId));
+        
+        if (submerchant.getParentReceiver() == null || !submerchant.getParentReceiver().getId().equals(mainReceiverId)) {
+            throw new RuntimeException("Receiver is not a submerchant of the specified main merchant.");
+        }
+        
+        // Delete the submerchant (this will cascade delete related records if configured)
+        receiverRepository.deleteById(submerchantId);
     }
 }
 

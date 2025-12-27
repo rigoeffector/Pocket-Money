@@ -179,6 +179,9 @@ public class PaymentService {
         if (receiver.getStatus() != ReceiverStatus.ACTIVE) {
             throw new RuntimeException("Receiver is not active. Status: " + receiver.getStatus());
         }
+        
+        // Determine the balance owner: if receiver is a submerchant, use parent's balance
+        Receiver balanceOwner = receiver.getParentReceiver() != null ? receiver.getParentReceiver() : receiver;
 
         // Verify PIN
         if (!passwordEncoder.matches(request.getPin(), user.getPin())) {
@@ -193,9 +196,9 @@ public class PaymentService {
 
         BigDecimal paymentAmount = request.getAmount();
         
-        // Calculate discount and bonus amounts
-        BigDecimal discountPercentage = receiver.getDiscountPercentage() != null ? receiver.getDiscountPercentage() : BigDecimal.ZERO;
-        BigDecimal userBonusPercentage = receiver.getUserBonusPercentage() != null ? receiver.getUserBonusPercentage() : BigDecimal.ZERO;
+        // Calculate discount and bonus amounts (use balance owner's percentages)
+        BigDecimal discountPercentage = balanceOwner.getDiscountPercentage() != null ? balanceOwner.getDiscountPercentage() : BigDecimal.ZERO;
+        BigDecimal userBonusPercentage = balanceOwner.getUserBonusPercentage() != null ? balanceOwner.getUserBonusPercentage() : BigDecimal.ZERO;
         
         // Calculate discount/charge amount (based on payment amount) - This is the TOTAL charge (e.g., 10%)
         BigDecimal discountAmount = paymentAmount.multiply(discountPercentage).divide(new BigDecimal("100"), 2, java.math.RoundingMode.HALF_UP);
@@ -206,10 +209,11 @@ public class PaymentService {
         // Calculate admin income amount (e.g., 8% = 10% - 2%)
         BigDecimal adminIncomeAmount = discountAmount.subtract(userBonusAmount);
         
+        // Use balance owner's remaining balance (main merchant if submerchant, otherwise receiver itself)
         // Receiver's remaining balance is deducted by ONLY the payment amount (discount was already added as bonus when balance was assigned)
         // Example: User pays 500, deduct only 500 from receiver balance (no discount deduction)
-        // Check if receiver has sufficient remaining balance BEFORE processing payment
-        BigDecimal receiverBalanceBefore = receiver.getRemainingBalance() != null ? receiver.getRemainingBalance() : BigDecimal.ZERO;
+        // Check if balance owner has sufficient remaining balance BEFORE processing payment
+        BigDecimal receiverBalanceBefore = balanceOwner.getRemainingBalance() != null ? balanceOwner.getRemainingBalance() : BigDecimal.ZERO;
         BigDecimal receiverBalanceReduction = paymentAmount; // Only deduct payment amount, not payment + discount
         BigDecimal receiverBalanceAfter = receiverBalanceBefore.subtract(receiverBalanceReduction);
         
@@ -231,19 +235,28 @@ public class PaymentService {
         user.setLastTransactionDate(LocalDateTime.now());
         userRepository.save(user);
 
-        // Credit receiver's wallet balance (full payment amount)
+        // Credit receiver's wallet balance (full payment amount) - individual receiver's wallet
         BigDecimal receiverNewBalance = receiver.getWalletBalance().add(paymentAmount);
         BigDecimal receiverNewTotal = receiver.getTotalReceived().add(paymentAmount);
         receiver.setWalletBalance(receiverNewBalance);
         receiver.setTotalReceived(receiverNewTotal);
-        
-        // Update receiver's remaining balance
-        // Receiver remaining balance is reduced by ONLY the payment amount
-        // The discount percentage was already added as a bonus when balance was assigned
-        // (Already calculated and validated above - receiverBalanceAfter is safe to use)
-        receiver.setRemainingBalance(receiverBalanceAfter);
         receiver.setLastTransactionDate(LocalDateTime.now());
         receiverRepository.save(receiver);
+        
+        // Update balance owner's remaining balance (shared balance - main merchant's if submerchant)
+        // Balance owner's remaining balance is reduced by ONLY the payment amount
+        // The discount percentage was already added as a bonus when balance was assigned
+        // (Already calculated and validated above - receiverBalanceAfter is safe to use)
+        balanceOwner.setRemainingBalance(receiverBalanceAfter);
+        balanceOwner.setLastTransactionDate(LocalDateTime.now());
+        receiverRepository.save(balanceOwner);
+        
+        // Also update balance owner's wallet balance and total received (shared)
+        BigDecimal balanceOwnerNewWallet = balanceOwner.getWalletBalance().add(paymentAmount);
+        BigDecimal balanceOwnerNewTotal = balanceOwner.getTotalReceived().add(paymentAmount);
+        balanceOwner.setWalletBalance(balanceOwnerNewWallet);
+        balanceOwner.setTotalReceived(balanceOwnerNewTotal);
+        receiverRepository.save(balanceOwner);
 
         // Create transaction record - PAYMENT is immediate (no MoPay, internal transfer)
         Transaction transaction = new Transaction();
@@ -259,8 +272,8 @@ public class PaymentService {
         transaction.setDiscountAmount(discountAmount);
         transaction.setUserBonusAmount(userBonusAmount);
         transaction.setAdminIncomeAmount(adminIncomeAmount);
-        transaction.setReceiverBalanceBefore(receiverBalanceBefore);
-        transaction.setReceiverBalanceAfter(receiverBalanceAfter);
+        transaction.setReceiverBalanceBefore(receiverBalanceBefore); // Balance owner's balance before
+        transaction.setReceiverBalanceAfter(receiverBalanceAfter); // Balance owner's balance after
         transaction.setStatus(TransactionStatus.SUCCESS); // Immediate success for internal transfers
 
         Transaction savedTransaction = transactionRepository.save(transaction);
@@ -383,6 +396,167 @@ public class PaymentService {
         Receiver receiver = receiverRepository.findById(receiverId)
                 .orElseThrow(() -> new RuntimeException("Receiver not found"));
         return transactionRepository.findByReceiverOrderByCreatedAtDescWithUser(receiver)
+                .stream()
+                .map(this::mapToPaymentResponse)
+                .collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public PaginatedResponse<PaymentResponse> getAllTransactionsForMainMerchant(
+            UUID mainReceiverId, 
+            int page, 
+            int size,
+            String search,
+            LocalDateTime fromDate,
+            LocalDateTime toDate) {
+        // Verify main receiver exists and is a main merchant (has no parent)
+        Receiver mainReceiver = receiverRepository.findById(mainReceiverId)
+                .orElseThrow(() -> new RuntimeException("Main receiver not found"));
+        
+        if (mainReceiver.getParentReceiver() != null) {
+            throw new RuntimeException("Receiver is not a main merchant. Only main merchants can view all transactions.");
+        }
+        
+        // Get all submerchants
+        List<Receiver> submerchants = receiverRepository.findByParentReceiverId(mainReceiverId);
+        
+        // Build list of receiver IDs (main + all submerchants)
+        List<UUID> receiverIds = new java.util.ArrayList<>();
+        receiverIds.add(mainReceiverId);
+        for (Receiver submerchant : submerchants) {
+            receiverIds.add(submerchant.getId());
+        }
+        
+        // Build dynamic query using EntityManager
+        StringBuilder queryBuilder = new StringBuilder();
+        queryBuilder.append("SELECT t FROM Transaction t ");
+        queryBuilder.append("LEFT JOIN FETCH t.user u ");
+        queryBuilder.append("LEFT JOIN FETCH t.paymentCategory pc ");
+        queryBuilder.append("LEFT JOIN FETCH t.receiver r ");
+        queryBuilder.append("WHERE t.receiver.id IN :receiverIds ");
+        queryBuilder.append("AND t.transactionType = 'PAYMENT' ");
+        
+        // Add search filter
+        if (search != null && !search.trim().isEmpty()) {
+            queryBuilder.append("AND (LOWER(u.fullNames) LIKE LOWER(:search) ");
+            queryBuilder.append("OR LOWER(u.phoneNumber) LIKE LOWER(:search) ");
+            queryBuilder.append("OR LOWER(r.companyName) LIKE LOWER(:search) ");
+            queryBuilder.append("OR LOWER(pc.name) LIKE LOWER(:search)) ");
+        }
+        
+        // Add date range filters
+        if (fromDate != null) {
+            queryBuilder.append("AND t.createdAt >= :fromDate ");
+        }
+        if (toDate != null) {
+            queryBuilder.append("AND t.createdAt <= :toDate ");
+        }
+        
+        queryBuilder.append("ORDER BY t.createdAt DESC");
+        
+        // Create query
+        Query query = entityManager.createQuery(queryBuilder.toString(), Transaction.class);
+        query.setParameter("receiverIds", receiverIds);
+        
+        // Set search parameter if provided
+        if (search != null && !search.trim().isEmpty()) {
+            String searchPattern = "%" + search.trim() + "%";
+            query.setParameter("search", searchPattern);
+        }
+        
+        // Set date parameters if provided
+        if (fromDate != null) {
+            query.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            query.setParameter("toDate", toDate);
+        }
+        
+        // Get total count (for pagination)
+        StringBuilder countQueryBuilder = new StringBuilder();
+        countQueryBuilder.append("SELECT COUNT(t) FROM Transaction t ");
+        countQueryBuilder.append("LEFT JOIN t.user u ");
+        countQueryBuilder.append("LEFT JOIN t.paymentCategory pc ");
+        countQueryBuilder.append("LEFT JOIN t.receiver r ");
+        countQueryBuilder.append("WHERE t.receiver.id IN :receiverIds ");
+        countQueryBuilder.append("AND t.transactionType = 'PAYMENT' ");
+        
+        if (search != null && !search.trim().isEmpty()) {
+            countQueryBuilder.append("AND (LOWER(u.fullNames) LIKE LOWER(:search) ");
+            countQueryBuilder.append("OR LOWER(u.phoneNumber) LIKE LOWER(:search) ");
+            countQueryBuilder.append("OR LOWER(r.companyName) LIKE LOWER(:search) ");
+            countQueryBuilder.append("OR LOWER(pc.name) LIKE LOWER(:search)) ");
+        }
+        
+        if (fromDate != null) {
+            countQueryBuilder.append("AND t.createdAt >= :fromDate ");
+        }
+        if (toDate != null) {
+            countQueryBuilder.append("AND t.createdAt <= :toDate ");
+        }
+        
+        Query countQuery = entityManager.createQuery(countQueryBuilder.toString(), Long.class);
+        countQuery.setParameter("receiverIds", receiverIds);
+        
+        if (search != null && !search.trim().isEmpty()) {
+            String searchPattern = "%" + search.trim() + "%";
+            countQuery.setParameter("search", searchPattern);
+        }
+        
+        if (fromDate != null) {
+            countQuery.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            countQuery.setParameter("toDate", toDate);
+        }
+        
+        long totalElements = (Long) countQuery.getSingleResult();
+        
+        // Apply pagination
+        int offset = page * size;
+        query.setFirstResult(offset);
+        query.setMaxResults(size);
+        
+        @SuppressWarnings("unchecked")
+        List<Transaction> transactions = (List<Transaction>) query.getResultList();
+        
+        // Convert to PaymentResponse
+        List<PaymentResponse> content = transactions.stream()
+                .map(this::mapToPaymentResponse)
+                .collect(Collectors.toList());
+        
+        // Calculate pagination metadata
+        int totalPages = (int) Math.ceil((double) totalElements / size);
+        
+        PaginatedResponse<PaymentResponse> response = new PaginatedResponse<>();
+        response.setContent(content);
+        response.setTotalElements(totalElements);
+        response.setTotalPages(totalPages);
+        response.setCurrentPage(page);
+        response.setPageSize(size);
+        response.setFirst(page == 0);
+        response.setLast(page >= totalPages - 1);
+        
+        return response;
+    }
+
+    @Transactional(readOnly = true)
+    public List<PaymentResponse> getTransactionsForSubmerchant(UUID mainReceiverId, UUID submerchantId) {
+        // Verify main receiver exists
+        if (!receiverRepository.existsById(mainReceiverId)) {
+            throw new RuntimeException("Main receiver not found");
+        }
+        
+        // Verify submerchant exists and belongs to main receiver
+        Receiver submerchant = receiverRepository.findById(submerchantId)
+                .orElseThrow(() -> new RuntimeException("Submerchant receiver not found"));
+        
+        if (submerchant.getParentReceiver() == null || !submerchant.getParentReceiver().getId().equals(mainReceiverId)) {
+            throw new RuntimeException("Receiver is not a submerchant of the specified main merchant.");
+        }
+        
+        // Return submerchant's transactions
+        return transactionRepository.findByReceiverOrderByCreatedAtDescWithUser(submerchant)
                 .stream()
                 .map(this::mapToPaymentResponse)
                 .collect(Collectors.toList());

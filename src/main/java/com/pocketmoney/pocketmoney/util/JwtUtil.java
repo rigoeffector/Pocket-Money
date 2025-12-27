@@ -44,6 +44,7 @@ public class JwtUtil {
 
         return Jwts.builder()
                 .subject(username)
+                .claim("role", Role.RECEIVER.name())
                 .claim("type", "RECEIVER")
                 .issuedAt(now)
                 .expiration(expiryDate)

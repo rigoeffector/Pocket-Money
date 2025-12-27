@@ -18,5 +18,11 @@ public interface ReceiverRepository extends JpaRepository<Receiver, UUID> {
     boolean existsByEmail(String email);
     List<Receiver> findByStatus(ReceiverStatus status);
     List<Receiver> findByStatusIn(List<ReceiverStatus> statuses);
+    
+    // Submerchant relationships
+    List<Receiver> findByParentReceiverId(UUID parentReceiverId);
+    Optional<Receiver> findByIdAndParentReceiverIsNull(UUID id); // Check if main merchant (no parent)
+    List<Receiver> findByParentReceiverIsNull(); // Get all main merchants (receivers without parent)
+    long countByParentReceiverId(UUID parentReceiverId); // Count submerchants for a main merchant
 }
 

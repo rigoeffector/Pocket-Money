@@ -72,6 +72,10 @@ public class Receiver {
     @Column(name = "user_bonus_percentage", precision = 5, scale = 2)
     private BigDecimal userBonusPercentage = BigDecimal.ZERO;
 
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "parent_receiver_id")
+    private Receiver parentReceiver; // For submerchant relationships
+
     @Column(name = "last_transaction_date")
     private LocalDateTime lastTransactionDate;
 

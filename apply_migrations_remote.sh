@@ -30,7 +30,7 @@ ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${REMOTE_USER}@$
     echo "✅ Migration completed successfully!"
     echo ""
     echo "Verifying changes..."
-    psql -h localhost -U ${DB_USER} -d ${DB_NAME} -c "\d receivers" | grep -E "(assigned_balance|remaining_balance|discount_percentage|user_bonus_percentage)" || echo "Columns may already exist"
+    psql -h localhost -U ${DB_USER} -d ${DB_NAME} -c "\d receivers" | grep -E "(assigned_balance|remaining_balance|discount_percentage|user_bonus_percentage|parent_receiver_id)" || echo "Columns may already exist"
     psql -h localhost -U ${DB_USER} -d ${DB_NAME} -c "\d transactions" | grep -E "(admin_income_amount|discount_amount|user_bonus_amount)" || echo "Columns may already exist"
     psql -h localhost -U ${DB_USER} -d ${DB_NAME} -c "\d balance_assignment_history" || echo "Table may already exist"
 EOFSSH

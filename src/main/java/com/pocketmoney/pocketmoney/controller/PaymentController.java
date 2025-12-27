@@ -123,6 +123,45 @@ public class PaymentController {
         }
     }
 
+    @GetMapping("/transactions/main-merchant/{mainReceiverId}/all")
+    public ResponseEntity<ApiResponse<PaginatedResponse<PaymentResponse>>> getAllTransactionsForMainMerchant(
+            @PathVariable UUID mainReceiverId,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size,
+            @RequestParam(required = false) String search,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate) {
+        try {
+            // Set time to start/end of day if only date is provided
+            if (fromDate != null && fromDate.getHour() == 0 && fromDate.getMinute() == 0 && fromDate.getSecond() == 0) {
+                fromDate = fromDate.withHour(0).withMinute(0).withSecond(0);
+            }
+            if (toDate != null) {
+                toDate = toDate.withHour(23).withMinute(59).withSecond(59);
+            }
+            
+            PaginatedResponse<PaymentResponse> response = paymentService.getAllTransactionsForMainMerchant(
+                    mainReceiverId, page, size, search, fromDate, toDate);
+            return ResponseEntity.ok(ApiResponse.success("All transactions for main merchant and submerchants retrieved successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @GetMapping("/transactions/main-merchant/{mainReceiverId}/submerchant/{submerchantId}")
+    public ResponseEntity<ApiResponse<List<PaymentResponse>>> getTransactionsForSubmerchant(
+            @PathVariable UUID mainReceiverId,
+            @PathVariable UUID submerchantId) {
+        try {
+            List<PaymentResponse> transactions = paymentService.getTransactionsForSubmerchant(mainReceiverId, submerchantId);
+            return ResponseEntity.ok(ApiResponse.success("Submerchant transactions retrieved successfully", transactions));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
     @GetMapping("/bonus-history/{userId}")
     public ResponseEntity<ApiResponse<List<UserBonusHistoryResponse>>> getUserBonusHistory(@PathVariable UUID userId) {
         try {

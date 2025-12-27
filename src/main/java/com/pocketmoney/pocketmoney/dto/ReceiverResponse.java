@@ -30,6 +30,13 @@ public class ReceiverResponse {
     private BigDecimal discountPercentage;
     private BigDecimal userBonusPercentage;
     private Integer pendingBalanceAssignments; // Count of pending balance assignment requests
+    
+    // Submerchant relationship info
+    private UUID parentReceiverId; // null if main merchant, set if submerchant
+    private String parentReceiverCompanyName; // null if main merchant
+    private Boolean isMainMerchant; // true if has no parent (main merchant), false if is submerchant
+    private Integer submerchantCount; // Number of submerchants (only for main merchants)
+    
     private LocalDateTime lastTransactionDate;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;

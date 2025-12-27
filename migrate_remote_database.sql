@@ -77,7 +77,32 @@ COMMENT ON COLUMN balance_assignment_history.approved_at IS 'Timestamp when the 
 COMMENT ON COLUMN balance_assignment_history.mopay_transaction_id IS 'MoPay transaction ID for balance assignment payment';
 
 -- ===================================================================
--- 4. Initialize existing receivers with default balance values if needed
+-- 4. Add parent_receiver_id column to receivers table for submerchant relationships
+-- ===================================================================
+ALTER TABLE receivers ADD COLUMN IF NOT EXISTS parent_receiver_id UUID;
+
+-- Add foreign key constraint (drop first if exists to avoid errors)
+DO $$ 
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_receivers_parent_receiver') THEN
+        ALTER TABLE receivers DROP CONSTRAINT fk_receivers_parent_receiver;
+    END IF;
+END $$;
+
+ALTER TABLE receivers 
+ADD CONSTRAINT fk_receivers_parent_receiver 
+FOREIGN KEY (parent_receiver_id) 
+REFERENCES receivers(id) 
+ON DELETE SET NULL;
+
+-- Add index for better query performance
+CREATE INDEX IF NOT EXISTS idx_receivers_parent_receiver_id ON receivers(parent_receiver_id);
+
+-- Add comment
+COMMENT ON COLUMN receivers.parent_receiver_id IS 'Reference to parent receiver for submerchant relationships. NULL if main merchant.';
+
+-- ===================================================================
+-- 5. Initialize existing receivers with default balance values if needed
 -- ===================================================================
 -- Uncomment the following lines if you want to initialize existing receivers
 -- UPDATE receivers 
