@@ -997,20 +997,29 @@ public class ReceiverService {
             BigDecimal newAssignedBalance = history.getAssignedBalance();
             BigDecimal currentRemaining = balanceOwner.getRemainingBalance();
             
-            // Simple logic: Add assigned amount to current assigned, remaining, and wallet balances
-            // NO discount bonus - just add the paid amount only
+            // Calculate discount amount based on discount percentage
+            BigDecimal discountPercentage = balanceOwner.getDiscountPercentage() != null 
+                ? balanceOwner.getDiscountPercentage() 
+                : BigDecimal.ZERO;
+            BigDecimal discountAmount = newAssignedBalance
+                .multiply(discountPercentage)
+                .divide(new BigDecimal("100"), 2, java.math.RoundingMode.HALF_UP);
             
             logger.info("=== APPROVAL CALCULATION ===");
-            logger.info("Current assigned: {}, New assigned: {}", currentAssigned, newAssignedBalance);
+            logger.info("Current assigned: {}, New assigned: {}, Discount %: {}", 
+                currentAssigned, newAssignedBalance, discountPercentage);
+            logger.info("Discount amount: {} ({}% of {})", discountAmount, discountPercentage, newAssignedBalance);
             logger.info("Current remaining: {}", currentRemaining);
             
-            // Add the assigned amount to assigned balance (sum of current + new)
-            BigDecimal updatedAssignedBalance = currentAssigned.add(newAssignedBalance);
-            logger.info("Updated assigned balance: {} + {} = {}", currentAssigned, newAssignedBalance, updatedAssignedBalance);
+            // Add the assigned amount + discount amount to assigned balance
+            BigDecimal updatedAssignedBalance = currentAssigned.add(newAssignedBalance).add(discountAmount);
+            logger.info("Updated assigned balance: {} + {} + {} = {}", 
+                currentAssigned, newAssignedBalance, discountAmount, updatedAssignedBalance);
             
-            // Add ONLY the assigned amount to remaining balance (NO discount bonus)
-            BigDecimal newRemainingBalance = currentRemaining.add(newAssignedBalance);
-            logger.info("New remaining balance: {} + {} = {} (NO discount bonus)", currentRemaining, newAssignedBalance, newRemainingBalance);
+            // Add assigned amount + discount amount to remaining balance
+            BigDecimal newRemainingBalance = currentRemaining.add(newAssignedBalance).add(discountAmount);
+            logger.info("New remaining balance: {} + {} + {} = {}", 
+                currentRemaining, newAssignedBalance, discountAmount, newRemainingBalance);
             
             if (newRemainingBalance.compareTo(BigDecimal.ZERO) < 0) {
                 newRemainingBalance = BigDecimal.ZERO;
@@ -1035,10 +1044,10 @@ public class ReceiverService {
             }
             receiverRepository.save(receiver);
             
-            logger.info("Balance assignment approved - Receiver: {}, Assigned: {} (was {}, added {}), Wallet: {} (same as assigned), Remaining: {} (was {}, added {})", 
-                    receiverId, updatedAssignedBalance, currentAssigned, newAssignedBalance, 
+            logger.info("Balance assignment approved - Receiver: {}, Assigned: {} (was {}, added {} + discount {}), Wallet: {} (same as assigned), Remaining: {} (was {}, added {} + discount {})", 
+                    receiverId, updatedAssignedBalance, currentAssigned, newAssignedBalance, discountAmount,
                     newWalletBalance,
-                    newRemainingBalance, currentRemaining, newAssignedBalance);
+                    newRemainingBalance, currentRemaining, newAssignedBalance, discountAmount);
             
             // Send SMS and WhatsApp notification to admin when receiver approves
             String adminPhone = history.getAdminPhone();
