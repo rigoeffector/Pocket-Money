@@ -51,6 +51,15 @@ public class AuthResponse {
     // For RECEIVER role only - list of available merchants/submerchants to switch between
     private List<MerchantInfo> availableMerchants;
     
+    // For ADMIN role - when viewing as a merchant, this is the receiver ID being viewed
+    private UUID viewAsReceiverId;
+    
+    // Indicates if the user is currently switching/viewing as another merchant/receiver
+    private Boolean isSwitchingClaiming;
+    
+    // Indicates if the switch action was done by the main merchant
+    private Boolean isDoneByMain;
+    
     @Data
     @NoArgsConstructor
     @AllArgsConstructor

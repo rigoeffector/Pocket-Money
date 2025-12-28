@@ -100,10 +100,26 @@ public class AuthController {
     }
 
     @PostMapping("/switch-merchant/{receiverId}")
-    public ResponseEntity<ApiResponse<AuthResponse>> switchMerchant(@PathVariable UUID receiverId) {
+    public ResponseEntity<ApiResponse<AuthResponse>> switchMerchant(
+            @PathVariable UUID receiverId,
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
         try {
-            AuthResponse response = authService.switchMerchant(receiverId);
+            String token = authHeader != null ? authHeader.trim() : null;
+            AuthResponse response = authService.switchMerchant(receiverId, token);
             return ResponseEntity.ok(ApiResponse.success("Merchant switched successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PostMapping("/switch-back")
+    public ResponseEntity<ApiResponse<AuthResponse>> switchBackToMainMerchant(
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+        try {
+            String token = authHeader != null ? authHeader.trim() : null;
+            AuthResponse response = authService.switchBackToMainMerchant(token);
+            return ResponseEntity.ok(ApiResponse.success("Switched back to main merchant view successfully", response));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.error(e.getMessage()));

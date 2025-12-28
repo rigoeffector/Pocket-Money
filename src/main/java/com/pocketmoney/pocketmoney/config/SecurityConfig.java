@@ -65,6 +65,8 @@ public class SecurityConfig {
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/api/auth/admin/**").hasRole("ADMIN")
+                        .requestMatchers("/api/auth/switch-merchant/**").hasRole("RECEIVER")
+                        .requestMatchers("/api/auth/switch-back").hasRole("RECEIVER")
                         .requestMatchers("/api/auth/**").permitAll()
                         .requestMatchers("/api/public/**").permitAll()
                         .requestMatchers("/api/payments/top-up").hasAnyRole("USER", "ADMIN")
