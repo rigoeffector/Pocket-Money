@@ -467,10 +467,12 @@ public class ReceiverService {
         if (paymentInitiated && transactionId != null) {
             try {
                 String receiverPhoneNormalized = normalizePhoneTo12Digits(receiver.getReceiverPhone());
-                String message = String.format("Balance of %s RWF assigned. Please approve or reject in your account.", 
+                String smsMessage = String.format("Balance of %s RWF assigned. Please approve or reject in your account.", 
                     newAssignedBalance.toPlainString());
-                messagingService.sendSms(message, receiverPhoneNormalized);
-                whatsAppService.sendWhatsApp(message, receiverPhoneNormalized);
+                String whatsAppMessage = String.format("[Besoft Group]: Assigned %s RWF to your Balance via Momo.\n\nPlease Confirm by Approving", 
+                    newAssignedBalance.toPlainString());
+                messagingService.sendSms(smsMessage, receiverPhoneNormalized);
+                whatsAppService.sendWhatsApp(whatsAppMessage, receiverPhoneNormalized);
                 logger.info("SMS and WhatsApp sent to receiver {} about balance assignment", receiverPhoneNormalized);
             } catch (Exception e) {
                 logger.error("Failed to send SMS/WhatsApp to receiver: ", e);
@@ -994,40 +996,43 @@ public class ReceiverService {
             
             // Apply the balance change to balance owner (main merchant if submerchant, otherwise receiver itself)
             BigDecimal currentAssigned = balanceOwner.getAssignedBalance();
-            BigDecimal newAssignedBalance = history.getAssignedBalance();
+            BigDecimal sentAmount = history.getAssignedBalance(); // Amount that was sent/paid
             BigDecimal currentRemaining = balanceOwner.getRemainingBalance();
+            BigDecimal currentWallet = balanceOwner.getWalletBalance() != null ? balanceOwner.getWalletBalance() : BigDecimal.ZERO;
             
-            // Calculate discount amount based on discount percentage
+            // Calculate discount amount based on discount percentage (discount is calculated on the sent amount)
             BigDecimal discountPercentage = balanceOwner.getDiscountPercentage() != null 
                 ? balanceOwner.getDiscountPercentage() 
                 : BigDecimal.ZERO;
-            BigDecimal discountAmount = newAssignedBalance
+            BigDecimal discountAmount = sentAmount
                 .multiply(discountPercentage)
                 .divide(new BigDecimal("100"), 2, java.math.RoundingMode.HALF_UP);
             
             logger.info("=== APPROVAL CALCULATION ===");
-            logger.info("Current assigned: {}, New assigned: {}, Discount %: {}", 
-                currentAssigned, newAssignedBalance, discountPercentage);
-            logger.info("Discount amount: {} ({}% of {})", discountAmount, discountPercentage, newAssignedBalance);
+            logger.info("Current assigned: {}, Sent amount: {}, Discount %: {}", 
+                currentAssigned, sentAmount, discountPercentage);
+            logger.info("Discount amount: {} ({}% of {})", discountAmount, discountPercentage, sentAmount);
             logger.info("Current remaining: {}", currentRemaining);
+            logger.info("Current wallet: {}", currentWallet);
             
-            // Add the assigned amount + discount amount to assigned balance
-            BigDecimal updatedAssignedBalance = currentAssigned.add(newAssignedBalance).add(discountAmount);
+            // Add the sent amount + discount amount to previous assigned balance
+            BigDecimal updatedAssignedBalance = currentAssigned.add(sentAmount).add(discountAmount);
             logger.info("Updated assigned balance: {} + {} + {} = {}", 
-                currentAssigned, newAssignedBalance, discountAmount, updatedAssignedBalance);
+                currentAssigned, sentAmount, discountAmount, updatedAssignedBalance);
             
-            // Add assigned amount + discount amount to remaining balance
-            BigDecimal newRemainingBalance = currentRemaining.add(newAssignedBalance).add(discountAmount);
+            // Add sent amount + discount amount to remaining balance
+            BigDecimal newRemainingBalance = currentRemaining.add(sentAmount).add(discountAmount);
             logger.info("New remaining balance: {} + {} + {} = {}", 
-                currentRemaining, newAssignedBalance, discountAmount, newRemainingBalance);
+                currentRemaining, sentAmount, discountAmount, newRemainingBalance);
             
             if (newRemainingBalance.compareTo(BigDecimal.ZERO) < 0) {
                 newRemainingBalance = BigDecimal.ZERO;
             }
             
-            // Wallet balance should be the same as assigned balance
-            BigDecimal newWalletBalance = updatedAssignedBalance;
-            logger.info("New wallet balance: {} (same as assigned)", newWalletBalance);
+            // Wallet balance = Previous wallet balance + Sent amount + Discount amount
+            BigDecimal newWalletBalance = currentWallet.add(sentAmount).add(discountAmount);
+            logger.info("New wallet balance: {} + {} + {} = {}", 
+                currentWallet, sentAmount, discountAmount, newWalletBalance);
             
             balanceOwner.setAssignedBalance(updatedAssignedBalance);
             balanceOwner.setRemainingBalance(newRemainingBalance);
@@ -1044,20 +1049,22 @@ public class ReceiverService {
             }
             receiverRepository.save(receiver);
             
-            logger.info("Balance assignment approved - Receiver: {}, Assigned: {} (was {}, added {} + discount {}), Wallet: {} (same as assigned), Remaining: {} (was {}, added {} + discount {})", 
-                    receiverId, updatedAssignedBalance, currentAssigned, newAssignedBalance, discountAmount,
-                    newWalletBalance,
-                    newRemainingBalance, currentRemaining, newAssignedBalance, discountAmount);
+            logger.info("Balance assignment approved - Receiver: {}, Assigned: {} (was {}, added {} + discount {}), Wallet: {} (was {}, added {} + discount {}), Remaining: {} (was {}, added {} + discount {})", 
+                    receiverId, updatedAssignedBalance, currentAssigned, sentAmount, discountAmount,
+                    newWalletBalance, currentWallet, sentAmount, discountAmount,
+                    newRemainingBalance, currentRemaining, sentAmount, discountAmount);
             
             // Send SMS and WhatsApp notification to admin when receiver approves
             String adminPhone = history.getAdminPhone();
             if (adminPhone != null && !adminPhone.trim().isEmpty()) {
                 try {
                     String adminPhoneNormalized = normalizePhoneTo12Digits(adminPhone);
-                    String message = String.format("Balance of %s RWF approved and received by %s", 
+                    String smsMessage = String.format("Balance of %s RWF approved and received by %s", 
                         newAssignedBalance.toPlainString(), receiver.getCompanyName());
-                    messagingService.sendSms(message, adminPhoneNormalized);
-                    whatsAppService.sendWhatsApp(message, adminPhoneNormalized);
+                    String whatsAppMessage = String.format("[%s]: Approved %s RWF.", 
+                        receiver.getCompanyName(), newAssignedBalance.toPlainString());
+                    messagingService.sendSms(smsMessage, adminPhoneNormalized);
+                    whatsAppService.sendWhatsApp(whatsAppMessage, adminPhoneNormalized);
                     logger.info("SMS and WhatsApp sent to admin {} about balance approval", adminPhoneNormalized);
                 } catch (Exception e) {
                     logger.error("Failed to send SMS/WhatsApp to admin: ", e);
@@ -1068,6 +1075,22 @@ public class ReceiverService {
             history.setStatus(BalanceAssignmentStatus.REJECTED);
             history.setApprovedBy(receiver.getUsername());
             history.setApprovedAt(LocalDateTime.now());
+            
+            // Send SMS and WhatsApp notification to admin when receiver rejects
+            String adminPhone = history.getAdminPhone();
+            if (adminPhone != null && !adminPhone.trim().isEmpty()) {
+                try {
+                    String adminPhoneNormalized = normalizePhoneTo12Digits(adminPhone);
+                    String message = String.format("Balance of %s RWF rejected by %s", 
+                        history.getAssignedBalance().toPlainString(), receiver.getCompanyName());
+                    messagingService.sendSms(message, adminPhoneNormalized);
+                    whatsAppService.sendWhatsApp(message, adminPhoneNormalized);
+                    logger.info("SMS and WhatsApp sent to admin {} about balance rejection", adminPhoneNormalized);
+                } catch (Exception e) {
+                    logger.error("Failed to send SMS/WhatsApp to admin: ", e);
+                    // Don't fail the rejection if SMS/WhatsApp fails
+                }
+            }
         }
         
         BalanceAssignmentHistory updatedHistory = balanceAssignmentHistoryRepository.save(history);

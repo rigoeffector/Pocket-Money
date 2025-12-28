@@ -331,31 +331,24 @@ public class PaymentService {
             String userSmsMessage = String.format("Payment of %s RWF to %s successful. New balance: %s RWF", 
                 paymentAmount.toPlainString(), receiver.getCompanyName(), userNewBalance.toPlainString());
             
-            // Build WhatsApp message with cashback information - show payer/user name (not shop name)
+            // Build WhatsApp message format: [Payer Name]: Paid X RWF to [Company Name] via Card.
             String userPayerName = (user.getFullNames() != null && !user.getFullNames().trim().isEmpty()) 
                 ? user.getFullNames() 
                 : user.getPhoneNumber();
-            String userWhatsAppMessage;
-            if (userBonusAmount != null && userBonusAmount.compareTo(BigDecimal.ZERO) > 0) {
-                userWhatsAppMessage = String.format("[%s]: Paid %s RWF via Card.\n\nCashback: %s RWF credited.\n\nEvery purchase gives you cashback. Keep shopping and earn more!",
-                    userPayerName, paymentAmount.toPlainString(), userBonusAmount.toPlainString());
-            } else {
-                userWhatsAppMessage = String.format("[%s]: Paid %s RWF via Card.",
-                    userPayerName, paymentAmount.toPlainString());
-            }
+            String userWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via Card.",
+                userPayerName, paymentAmount.toPlainString(), receiver.getCompanyName());
             
             messagingService.sendSms(userSmsMessage, userPhoneNormalized);
             whatsAppService.sendWhatsApp(userWhatsAppMessage, userPhoneNormalized);
             logger.info("SMS sent to user {}: {}", userPhoneNormalized, userSmsMessage);
             logger.info("WhatsApp sent to user {}: {}", userPhoneNormalized, userWhatsAppMessage);
             
-            // Send SMS and WhatsApp to receiver
+            // Send SMS and WhatsApp to receiver - same format
             String receiverPhoneNormalized = normalizePhoneTo12Digits(receiver.getReceiverPhone());
-            // For NFC Card payment: Include payer name in WhatsApp message (reuse userPayerName from above)
             String receiverSmsMessage = String.format("Received %s RWF from %s", 
                 paymentAmount.toPlainString(), userPayerName);
-            String receiverWhatsAppMessage = String.format("Received %s RWF from %s (NFC Card)", 
-                paymentAmount.toPlainString(), userPayerName);
+            String receiverWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via Card.",
+                userPayerName, paymentAmount.toPlainString(), receiver.getCompanyName());
             messagingService.sendSms(receiverSmsMessage, receiverPhoneNormalized);
             whatsAppService.sendWhatsApp(receiverWhatsAppMessage, receiverPhoneNormalized);
             logger.info("SMS and WhatsApp sent to receiver {} about payment", receiverPhoneNormalized);
@@ -714,47 +707,40 @@ public class PaymentService {
                             
                             // Send SMS and WhatsApp notifications for MOMO payments when status changes to SUCCESS
                             try {
+                                // Get payer phone and name (works for both registered users and guests)
+                                String payerPhone = transaction.getPhoneNumber();
+                                String payerName = payerPhone; // Default to phone number
+                                if (transactionUser != null && transactionUser.getFullNames() != null 
+                                    && !transactionUser.getFullNames().trim().isEmpty()) {
+                                    payerName = transactionUser.getFullNames();
+                                }
+                                
                                 // Send SMS and WhatsApp to receiver
                                 if (receiver.getReceiverPhone() != null) {
                                     String receiverPhoneNormalized = normalizePhoneTo12Digits(receiver.getReceiverPhone());
-                                    // For MOMO payment: Use payer phone number in WhatsApp message
-                                    String payerPhone = transaction.getPhoneNumber() != null && !transaction.getPhoneNumber().trim().isEmpty()
-                                        ? transaction.getPhoneNumber()
-                                        : (transactionUser != null && transactionUser.getPhoneNumber() != null 
-                                            ? transactionUser.getPhoneNumber() 
-                                            : "Guest");
                                     String receiverSmsMessage = String.format("Received %s RWF from %s", 
-                                        paymentAmount.toPlainString(), payerPhone);
-                                    String receiverWhatsAppMessage = String.format("Received %s RWF from %s (MOMO)", 
-                                        paymentAmount.toPlainString(), payerPhone);
+                                        paymentAmount.toPlainString(), payerName);
+                                    String receiverWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via MM.",
+                                        payerName, paymentAmount.toPlainString(), receiver.getCompanyName());
                                     messagingService.sendSms(receiverSmsMessage, receiverPhoneNormalized);
                                     whatsAppService.sendWhatsApp(receiverWhatsAppMessage, receiverPhoneNormalized);
                                     logger.info("SMS and WhatsApp sent to receiver {} about MOMO payment", receiverPhoneNormalized);
                                 }
                                 
-                                // Send SMS and WhatsApp to user (if user exists, not guest payment)
-                                if (transactionUser != null && transactionUser.getPhoneNumber() != null) {
-                                    String userPhoneNormalized = normalizePhoneTo12Digits(transactionUser.getPhoneNumber());
-                                    String userSmsMessage = String.format("Payment of %s RWF to %s successful", 
+                                // Send SMS and WhatsApp to payer
+                                if (payerPhone != null && !payerPhone.trim().isEmpty()) {
+                                    String payerPhoneNormalized = normalizePhoneTo12Digits(payerPhone);
+                                    String payerSmsMessage = String.format("Payment of %s RWF to %s successful", 
                                         paymentAmount.toPlainString(), receiver.getCompanyName());
+                                    String userWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via MM.",
+                                        payerName, paymentAmount.toPlainString(), receiver.getCompanyName());
                                     
-                                    // Build WhatsApp message with cashback information for MOMO payment - show payer phone
-                                    String momoPayerPhone = transaction.getPhoneNumber() != null && !transaction.getPhoneNumber().trim().isEmpty()
-                                        ? transaction.getPhoneNumber()
-                                        : transactionUser.getPhoneNumber();
-                                    String userWhatsAppMessage;
-                                    if (userBonusAmount != null && userBonusAmount.compareTo(BigDecimal.ZERO) > 0) {
-                                        userWhatsAppMessage = String.format("[%s]: Paid %s RWF via MM.\n\nCashback: %s RWF credited.\n\nEvery purchase gives you cashback. Keep shopping and earn more!",
-                                            momoPayerPhone, paymentAmount.toPlainString(), userBonusAmount.toPlainString());
-                                    } else {
-                                        userWhatsAppMessage = String.format("[%s]: Paid %s RWF via MM.",
-                                            momoPayerPhone, paymentAmount.toPlainString());
-                                    }
-                                    
-                                    messagingService.sendSms(userSmsMessage, userPhoneNormalized);
-                                    whatsAppService.sendWhatsApp(userWhatsAppMessage, userPhoneNormalized);
-                                    logger.info("SMS sent to user {}: {}", userPhoneNormalized, userSmsMessage);
-                                    logger.info("WhatsApp sent to user {}: {}", userPhoneNormalized, userWhatsAppMessage);
+                                    messagingService.sendSms(payerSmsMessage, payerPhoneNormalized);
+                                    whatsAppService.sendWhatsApp(userWhatsAppMessage, payerPhoneNormalized);
+                                    logger.info("SMS sent to payer {}: {}", payerPhoneNormalized, payerSmsMessage);
+                                    logger.info("WhatsApp sent to payer {}: {}", payerPhoneNormalized, userWhatsAppMessage);
+                                } else {
+                                    logger.warn("Payer phone number is null or empty in transaction, skipping SMS/WhatsApp to payer");
                                 }
                             } catch (Exception e) {
                                 logger.error("Failed to send SMS/WhatsApp notifications for MOMO payment: ", e);
