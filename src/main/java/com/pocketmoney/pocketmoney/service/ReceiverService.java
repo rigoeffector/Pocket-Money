@@ -1060,9 +1060,9 @@ public class ReceiverService {
                 try {
                     String adminPhoneNormalized = normalizePhoneTo12Digits(adminPhone);
                     String smsMessage = String.format("Balance of %s RWF approved and received by %s", 
-                        newAssignedBalance.toPlainString(), receiver.getCompanyName());
+                        sentAmount.toPlainString(), receiver.getCompanyName());
                     String whatsAppMessage = String.format("[%s]: Approved %s RWF.", 
-                        receiver.getCompanyName(), newAssignedBalance.toPlainString());
+                        receiver.getCompanyName(), sentAmount.toPlainString());
                     messagingService.sendSms(smsMessage, adminPhoneNormalized);
                     whatsAppService.sendWhatsApp(whatsAppMessage, adminPhoneNormalized);
                     logger.info("SMS and WhatsApp sent to admin {} about balance approval", adminPhoneNormalized);
