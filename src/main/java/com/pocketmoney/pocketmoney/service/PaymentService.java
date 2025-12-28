@@ -14,6 +14,8 @@ import com.pocketmoney.pocketmoney.repository.PaymentCategoryRepository;
 import com.pocketmoney.pocketmoney.repository.ReceiverRepository;
 import com.pocketmoney.pocketmoney.repository.TransactionRepository;
 import com.pocketmoney.pocketmoney.repository.UserRepository;
+import com.pocketmoney.pocketmoney.repository.PaymentCommissionSettingRepository;
+import com.pocketmoney.pocketmoney.entity.PaymentCommissionSetting;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.Query;
 import org.slf4j.Logger;
@@ -39,6 +41,7 @@ public class PaymentService {
     private final PaymentCategoryRepository paymentCategoryRepository;
     private final ReceiverRepository receiverRepository;
     private final BalanceAssignmentHistoryRepository balanceAssignmentHistoryRepository;
+    private final PaymentCommissionSettingRepository paymentCommissionSettingRepository;
     private final MoPayService moPayService;
     private final PasswordEncoder passwordEncoder;
     private final EntityManager entityManager;
@@ -48,6 +51,7 @@ public class PaymentService {
     public PaymentService(UserRepository userRepository, TransactionRepository transactionRepository,
                          PaymentCategoryRepository paymentCategoryRepository, ReceiverRepository receiverRepository,
                          BalanceAssignmentHistoryRepository balanceAssignmentHistoryRepository,
+                         PaymentCommissionSettingRepository paymentCommissionSettingRepository,
                          MoPayService moPayService, PasswordEncoder passwordEncoder, EntityManager entityManager,
                          MessagingService messagingService, WhatsAppService whatsAppService) {
         this.userRepository = userRepository;
@@ -55,6 +59,7 @@ public class PaymentService {
         this.paymentCategoryRepository = paymentCategoryRepository;
         this.receiverRepository = receiverRepository;
         this.balanceAssignmentHistoryRepository = balanceAssignmentHistoryRepository;
+        this.paymentCommissionSettingRepository = paymentCommissionSettingRepository;
         this.moPayService = moPayService;
         this.passwordEncoder = passwordEncoder;
         this.entityManager = entityManager;
@@ -1109,6 +1114,16 @@ public class PaymentService {
             if (mainReceiverId != null) {
                 response.setIsSubmerchant(!transaction.getReceiver().getId().equals(mainReceiverId));
             }
+            
+            // Get commission settings for this receiver
+            List<PaymentCommissionSetting> commissionSettings = paymentCommissionSettingRepository.findByReceiverIdAndIsActiveTrue(transaction.getReceiver().getId());
+            List<com.pocketmoney.pocketmoney.dto.CommissionInfo> commissionInfoList = commissionSettings.stream()
+                    .map(setting -> new com.pocketmoney.pocketmoney.dto.CommissionInfo(
+                            setting.getPhoneNumber(),
+                            setting.getCommissionPercentage()
+                    ))
+                    .collect(Collectors.toList());
+            response.setCommissionSettings(commissionInfoList);
         }
         
         // Add payment method information

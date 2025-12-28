@@ -21,6 +21,8 @@ import com.pocketmoney.pocketmoney.entity.ReceiverStatus;
 import com.pocketmoney.pocketmoney.repository.BalanceAssignmentHistoryRepository;
 import com.pocketmoney.pocketmoney.repository.ReceiverRepository;
 import com.pocketmoney.pocketmoney.repository.TransactionRepository;
+import com.pocketmoney.pocketmoney.repository.PaymentCommissionSettingRepository;
+import com.pocketmoney.pocketmoney.entity.PaymentCommissionSetting;
 import com.pocketmoney.pocketmoney.util.JwtUtil;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.Query;
@@ -48,6 +50,7 @@ public class ReceiverService {
     private final ReceiverRepository receiverRepository;
     private final TransactionRepository transactionRepository;
     private final BalanceAssignmentHistoryRepository balanceAssignmentHistoryRepository;
+    private final PaymentCommissionSettingRepository paymentCommissionSettingRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtUtil jwtUtil;
     private final MoPayService moPayService;
@@ -57,11 +60,13 @@ public class ReceiverService {
 
     public ReceiverService(ReceiverRepository receiverRepository, TransactionRepository transactionRepository,
                           BalanceAssignmentHistoryRepository balanceAssignmentHistoryRepository,
+                          PaymentCommissionSettingRepository paymentCommissionSettingRepository,
                           PasswordEncoder passwordEncoder, JwtUtil jwtUtil, MoPayService moPayService,
                           EntityManager entityManager, MessagingService messagingService, WhatsAppService whatsAppService) {
         this.receiverRepository = receiverRepository;
         this.transactionRepository = transactionRepository;
         this.balanceAssignmentHistoryRepository = balanceAssignmentHistoryRepository;
+        this.paymentCommissionSettingRepository = paymentCommissionSettingRepository;
         this.passwordEncoder = passwordEncoder;
         this.jwtUtil = jwtUtil;
         this.moPayService = moPayService;
@@ -360,6 +365,51 @@ public class ReceiverService {
             receiver.setUserBonusPercentage(request.getUserBonusPercentage());
         }
 
+        // Handle commission percentage and phone number if provided (both must be provided together, or omit both)
+        if (request.getCommissionPercentage() != null || (request.getCommissionPhoneNumber() != null && !request.getCommissionPhoneNumber().trim().isEmpty())) {
+            // If one is provided, both must be provided
+            if (request.getCommissionPercentage() == null || request.getCommissionPhoneNumber() == null || request.getCommissionPhoneNumber().trim().isEmpty()) {
+                throw new RuntimeException("Both commission percentage and commission phone number must be provided together, or omit both");
+            }
+            if (request.getCommissionPercentage().compareTo(BigDecimal.ZERO) < 0 ||
+                request.getCommissionPercentage().compareTo(new BigDecimal("100")) > 0) {
+                throw new RuntimeException("Commission percentage must be between 0 and 100");
+            }
+            
+            // Validate that commission percentage doesn't exceed discount percentage
+            BigDecimal discountPercentage = receiver.getDiscountPercentage() != null 
+                ? receiver.getDiscountPercentage() 
+                : BigDecimal.ZERO;
+            if (request.getCommissionPercentage().compareTo(discountPercentage) > 0) {
+                throw new RuntimeException(String.format(
+                    "Commission percentage (%.2f%%) cannot exceed discount percentage (%.2f%%)",
+                    request.getCommissionPercentage(), discountPercentage));
+            }
+            
+            // Normalize commission phone number
+            String normalizedCommissionPhone = normalizePhoneTo12Digits(request.getCommissionPhoneNumber());
+            
+            // Check if commission setting already exists for this receiver and phone number
+            if (paymentCommissionSettingRepository.existsByReceiverIdAndPhoneNumber(receiver.getId(), normalizedCommissionPhone)) {
+                // Update existing commission setting
+                paymentCommissionSettingRepository.findByReceiverIdAndPhoneNumber(receiver.getId(), normalizedCommissionPhone)
+                    .ifPresent(existingSetting -> {
+                        existingSetting.setCommissionPercentage(request.getCommissionPercentage());
+                        existingSetting.setIsActive(true);
+                        paymentCommissionSettingRepository.save(existingSetting);
+                    });
+            } else {
+                // Create new commission setting
+                PaymentCommissionSetting commissionSetting = new PaymentCommissionSetting();
+                commissionSetting.setReceiver(receiver);
+                commissionSetting.setPhoneNumber(normalizedCommissionPhone);
+                commissionSetting.setCommissionPercentage(request.getCommissionPercentage());
+                commissionSetting.setIsActive(true);
+                commissionSetting.setDescription("Created via balance assignment");
+                paymentCommissionSettingRepository.save(commissionSetting);
+            }
+        }
+
         // Initiate MoPay payment from admin to receiver
         // Pay the full requested amount, not just the difference
         logger.info("=== PREPARING MOPAY REQUEST ===");
@@ -568,6 +618,15 @@ public class ReceiverService {
         // Use shared balance if submerchant (parent's balance)
         Receiver balanceOwner = receiver.getParentReceiver() != null ? receiver.getParentReceiver() : receiver;
 
+        // Get commission settings for this receiver
+        List<PaymentCommissionSetting> commissionSettings = paymentCommissionSettingRepository.findByReceiverIdAndIsActiveTrue(id);
+        List<com.pocketmoney.pocketmoney.dto.CommissionInfo> commissionInfoList = commissionSettings.stream()
+                .map(setting -> new com.pocketmoney.pocketmoney.dto.CommissionInfo(
+                        setting.getPhoneNumber(),
+                        setting.getCommissionPercentage()
+                ))
+                .collect(Collectors.toList());
+
         ReceiverWalletResponse response = new ReceiverWalletResponse();
         response.setReceiverId(receiver.getId());
         response.setCompanyName(receiver.getCompanyName());
@@ -578,6 +637,7 @@ public class ReceiverService {
         response.setRemainingBalance(balanceOwner.getRemainingBalance()); // Shared remaining balance
         response.setDiscountPercentage(balanceOwner.getDiscountPercentage()); // Use balance owner's percentages
         response.setUserBonusPercentage(balanceOwner.getUserBonusPercentage()); // Use balance owner's percentages
+        response.setCommissionSettings(commissionInfoList);
         response.setLastTransactionDate(receiver.getLastTransactionDate());
         return response;
     }

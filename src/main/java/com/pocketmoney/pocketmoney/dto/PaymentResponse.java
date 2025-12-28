@@ -8,6 +8,7 @@ import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.UUID;
 
 @Data
@@ -37,5 +38,7 @@ public class PaymentResponse {
     // Payment method information
     private String payerPhone; // Phone number used for payment (if MOMO payment)
     private String paymentMethod; // "MOMO" or "NFC_CARD"
+    // Commission information
+    private List<CommissionInfo> commissionSettings; // Commission phone numbers and percentages for this receiver
 }
 

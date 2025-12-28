@@ -30,6 +30,13 @@ public class AssignBalanceRequest {
     @DecimalMax(value = "100.00", message = "User bonus percentage must be 100 or less")
     private BigDecimal userBonusPercentage; // Optional: Set user bonus % (0-100)
 
+    @DecimalMin(value = "0.00", message = "Commission percentage must be 0 or greater")
+    @DecimalMax(value = "100.00", message = "Commission percentage must be 100 or less")
+    private BigDecimal commissionPercentage; // Optional: Commission % (0-100) - must be provided with commissionPhoneNumber if used
+
+    @Pattern(regexp = "^[0-9]{10,15}$", message = "Commission phone number must be between 10 and 15 digits")
+    private String commissionPhoneNumber; // Optional: Phone number that will receive commission - must be provided with commissionPercentage if used
+
     private String notes; // Optional: Notes about the balance assignment
 }
 

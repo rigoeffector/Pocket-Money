@@ -6,6 +6,7 @@ import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.UUID;
 
 @Data
@@ -21,6 +22,7 @@ public class ReceiverWalletResponse {
     private BigDecimal remainingBalance;
     private BigDecimal discountPercentage;
     private BigDecimal userBonusPercentage;
+    private List<CommissionInfo> commissionSettings; // Commission phone numbers and percentages
     private LocalDateTime lastTransactionDate;
 }
 
