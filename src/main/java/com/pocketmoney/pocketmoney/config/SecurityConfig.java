@@ -45,7 +45,8 @@ public class SecurityConfig {
                 "http://64.23.203.249",
                 "http://164.92.89.74:8383",
                 "http://164.92.89.74",
-                "http://64.23.137.36/"
+                "http://64.23.137.36/",
+                "https://pochi.info"
         ));
         configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"));
         configuration.setAllowedHeaders(List.of("*"));
