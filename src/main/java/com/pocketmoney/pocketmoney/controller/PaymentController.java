@@ -8,6 +8,7 @@ import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import com.pocketmoney.pocketmoney.dto.PaginatedResponse;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -97,9 +98,18 @@ public class PaymentController {
     }
 
     @GetMapping("/transactions")
-    public ResponseEntity<ApiResponse<List<PaymentResponse>>> getAllTransactions() {
-        List<PaymentResponse> transactions = paymentService.getAllTransactions();
-        return ResponseEntity.ok(ApiResponse.success("Transactions retrieved successfully", transactions));
+    public ResponseEntity<ApiResponse<PaginatedResponse<PaymentResponse>>> getAllTransactions(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate) {
+        try {
+            PaginatedResponse<PaymentResponse> response = paymentService.getAllTransactions(page, size, fromDate, toDate);
+            return ResponseEntity.ok(ApiResponse.success("Transactions retrieved successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
     }
 
     @GetMapping("/transactions/{transactionId}")
@@ -125,9 +135,14 @@ public class PaymentController {
     }
 
     @GetMapping("/transactions/receiver/{receiverId}")
-    public ResponseEntity<ApiResponse<ReceiverTransactionsResponse>> getTransactionsByReceiver(@PathVariable UUID receiverId) {
+    public ResponseEntity<ApiResponse<ReceiverTransactionsResponse>> getTransactionsByReceiver(
+            @PathVariable UUID receiverId,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate) {
         try {
-            ReceiverTransactionsResponse response = paymentService.getTransactionsByReceiver(receiverId);
+            ReceiverTransactionsResponse response = paymentService.getTransactionsByReceiver(receiverId, page, size, fromDate, toDate);
             return ResponseEntity.ok(ApiResponse.success("Receiver transactions retrieved successfully", response));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)
@@ -200,9 +215,11 @@ public class PaymentController {
     public ResponseEntity<ApiResponse<AdminIncomeResponse>> getAdminIncome(
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate,
-            @RequestParam(required = false) UUID receiverId) {
+            @RequestParam(required = false) UUID receiverId,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
         try {
-            AdminIncomeResponse response = paymentService.getAdminIncome(fromDate, toDate, receiverId);
+            AdminIncomeResponse response = paymentService.getAdminIncome(fromDate, toDate, receiverId, page, size);
             return ResponseEntity.ok(ApiResponse.success("Admin income retrieved successfully", response));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)

@@ -418,14 +418,31 @@ public class PaymentService {
         BigDecimal discountPercentage = balanceOwner.getDiscountPercentage() != null ? balanceOwner.getDiscountPercentage() : BigDecimal.ZERO;
         BigDecimal userBonusPercentage = balanceOwner.getUserBonusPercentage() != null ? balanceOwner.getUserBonusPercentage() : BigDecimal.ZERO;
         
+        // Get active commission settings for the receiver
+        List<PaymentCommissionSetting> activeCommissionSettings = paymentCommissionSettingRepository.findByReceiverIdAndIsActiveTrue(receiver.getId());
+        BigDecimal commissionPercentage = BigDecimal.ZERO;
+        String commissionPhoneNumber = null;
+        
+        // If there are active commission settings, use the first one (or sum if multiple)
+        // For now, we'll use the first active commission setting
+        if (!activeCommissionSettings.isEmpty()) {
+            PaymentCommissionSetting commissionSetting = activeCommissionSettings.get(0);
+            commissionPercentage = commissionSetting.getCommissionPercentage();
+            commissionPhoneNumber = commissionSetting.getPhoneNumber();
+            logger.info("Found active commission setting - Percentage: {}%, Phone: {}", commissionPercentage, commissionPhoneNumber);
+        }
+        
         // Calculate discount/charge amount (based on payment amount) - This is the TOTAL charge (e.g., 10%)
         BigDecimal discountAmount = paymentAmount.multiply(discountPercentage).divide(new BigDecimal("100"), 2, java.math.RoundingMode.HALF_UP);
         
         // Calculate user bonus amount (e.g., 2% of payment amount)
         BigDecimal userBonusAmount = paymentAmount.multiply(userBonusPercentage).divide(new BigDecimal("100"), 2, java.math.RoundingMode.HALF_UP);
         
-        // Calculate admin income amount (e.g., 8% = 10% - 2%)
-        BigDecimal adminIncomeAmount = discountAmount.subtract(userBonusAmount);
+        // Calculate commission amount (e.g., 1% of payment amount)
+        BigDecimal commissionAmount = paymentAmount.multiply(commissionPercentage).divide(new BigDecimal("100"), 2, java.math.RoundingMode.HALF_UP);
+        
+        // Calculate admin income amount (e.g., 7% = 10% - 2% - 1%)
+        BigDecimal adminIncomeAmount = discountAmount.subtract(userBonusAmount).subtract(commissionAmount);
         
         // Note: For MOMO payments, we don't check receiver balance here because:
         // 1. Payment comes from user's external MOMO wallet, not from system balance
@@ -464,56 +481,47 @@ public class PaymentService {
         moPayRequest.setPayment_mode("MOBILE");
         moPayRequest.setMessage(request.getMessage() != null ? request.getMessage() : "Payment to " + receiver.getCompanyName());
         
-        // Create transfer to receiver (amount minus user bonus)
-        // Receiver gets payment amount minus user bonus percentage
-        BigDecimal receiverAmount = paymentAmount.subtract(userBonusAmount);
+        // Create transfer to admin (hardcoded phone number) - amount minus user bonus and commission
+        // The remaining amount (paymentAmount - userBonusAmount - commissionAmount) goes to hardcoded admin phone
+        BigDecimal adminAmount = paymentAmount.subtract(userBonusAmount).subtract(commissionAmount);
         
         logger.info("=== MOMO PAYMENT TRANSFER CALCULATION ===");
-        logger.info("Payment amount: {}, User bonus amount: {}, Receiver amount: {}", paymentAmount, userBonusAmount, receiverAmount);
+        logger.info("Payment amount: {}, User bonus amount: {}, Commission amount: {}, Admin amount (to hardcoded phone): {}", 
+                paymentAmount, userBonusAmount, commissionAmount, adminAmount);
         
         MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
-        transfer.setAmount(receiverAmount);
-        // Get receiver phone from request body, or use default hardcoded number (250794230137)
-        String receiverPhone = request.getReceiverPhone();
-        if (receiverPhone == null || receiverPhone.trim().isEmpty()) {
-            // Use default hardcoded phone number for receiving MOMO payments
-            receiverPhone = "250794230137";
-            logger.info("Receiver phone not provided in request, using default: {}", receiverPhone);
-        } else {
-            receiverPhone = receiverPhone.trim();
-            // Validate the provided receiver phone number format
-            if (!receiverPhone.matches("^[0-9]{10,15}$")) {
-                throw new RuntimeException("Invalid receiver phone number format. Phone number must be between 10 and 15 digits.");
-            }
-        }
+        transfer.setAmount(adminAmount);
+        // Always use hardcoded admin phone number (250794230137) for receiving MOMO payments
+        String adminPhone = "250794230137";
+        logger.info("Using hardcoded admin phone for receiving payment: {}", adminPhone);
         
-        // Normalize receiver phone to 12 digits - ensure it's exactly 12 digits
-        String normalizedReceiverPhone = normalizePhoneTo12Digits(receiverPhone);
+        // Normalize admin phone to 12 digits - ensure it's exactly 12 digits
+        String normalizedAdminPhone = normalizePhoneTo12Digits(adminPhone);
         
-        logger.info("Receiver phone normalization - Original: '{}', Normalized: '{}' ({} digits)", receiverPhone, normalizedReceiverPhone, normalizedReceiverPhone.length());
+        logger.info("Admin phone normalization - Original: '{}', Normalized: '{}' ({} digits)", adminPhone, normalizedAdminPhone, normalizedAdminPhone.length());
         
         // Validate the normalized phone is exactly 12 digits
-        if (normalizedReceiverPhone.length() != 12) {
-            throw new RuntimeException("Receiver phone number must be normalized to exactly 12 digits. Original: '" + receiverPhone + "', Normalized: '" + normalizedReceiverPhone + "' (" + normalizedReceiverPhone.length() + " digits)");
+        if (normalizedAdminPhone.length() != 12) {
+            throw new RuntimeException("Admin phone number must be normalized to exactly 12 digits. Original: '" + adminPhone + "', Normalized: '" + normalizedAdminPhone + "' (" + normalizedAdminPhone.length() + " digits)");
         }
         
         // Validate it's numeric only
-        if (!normalizedReceiverPhone.matches("^[0-9]{12}$")) {
-            throw new RuntimeException("Normalized receiver phone must contain only digits. Got: '" + normalizedReceiverPhone + "'");
+        if (!normalizedAdminPhone.matches("^[0-9]{12}$")) {
+            throw new RuntimeException("Normalized admin phone must contain only digits. Got: '" + normalizedAdminPhone + "'");
         }
         
-        Long receiverPhoneLong = Long.parseLong(normalizedReceiverPhone);
-        logger.info("Setting receiver phone in transfer to: {} (Long value), Amount: {} (payment {} minus bonus {})", 
-                receiverPhoneLong, receiverAmount, paymentAmount, userBonusAmount);
-        transfer.setPhone(receiverPhoneLong);
+        Long adminPhoneLong = Long.parseLong(normalizedAdminPhone);
+        logger.info("Setting admin phone in transfer to: {} (Long value), Amount: {} (payment {} minus bonus {} minus commission {})", 
+                adminPhoneLong, adminAmount, paymentAmount, userBonusAmount, commissionAmount);
+        transfer.setPhone(adminPhoneLong);
         String payerName = user != null ? user.getFullNames() : "Guest User";
-        transfer.setMessage("Payment from " + payerName);
+        transfer.setMessage("Payment from " + payerName + " to " + receiver.getCompanyName());
         
-        // Build transfers list - receiver payment (minus bonus) and user bonus back to payer (if applicable)
+        // Build transfers list - admin payment (minus bonus and commission), user bonus back to payer, and commission (if applicable)
         java.util.List<MoPayInitiateRequest.Transfer> transfers = new java.util.ArrayList<>();
         transfers.add(transfer);
         
-        logger.info("Added receiver transfer - Amount: {}, Phone: {}", receiverAmount, receiverPhoneLong);
+        logger.info("Added admin transfer (to hardcoded phone) - Amount: {}, Phone: {}", adminAmount, adminPhoneLong);
         
         // Add transfer back to payer with user bonus (similar to /api/payments/pay)
         logger.info("Checking if user bonus should be added - User bonus amount: {}, Is greater than zero: {}", 
@@ -528,6 +536,36 @@ public class PaymentService {
             logger.info("✅ Added user bonus transfer back to payer - Amount: {}, Phone: {}", userBonusAmount, payerPhoneLong);
         } else {
             logger.warn("⚠️ User bonus amount is zero or negative, NOT adding bonus transfer. Amount: {}", userBonusAmount);
+        }
+        
+        // Add transfer to commission phone number with commission amount (if commission is configured)
+        logger.info("Checking if commission should be added - Commission amount: {}, Commission phone: {}, Is greater than zero: {}", 
+                commissionAmount, commissionPhoneNumber, commissionAmount.compareTo(BigDecimal.ZERO) > 0);
+        
+        if (commissionAmount.compareTo(BigDecimal.ZERO) > 0 && commissionPhoneNumber != null && !commissionPhoneNumber.trim().isEmpty()) {
+            // Normalize commission phone to 12 digits
+            String normalizedCommissionPhone = normalizePhoneTo12Digits(commissionPhoneNumber);
+            
+            // Validate the normalized phone is exactly 12 digits
+            if (normalizedCommissionPhone.length() != 12) {
+                throw new RuntimeException("Commission phone number must be normalized to exactly 12 digits. Original: '" + commissionPhoneNumber + "', Normalized: '" + normalizedCommissionPhone + "' (" + normalizedCommissionPhone.length() + " digits)");
+            }
+            
+            // Validate it's numeric only
+            if (!normalizedCommissionPhone.matches("^[0-9]{12}$")) {
+                throw new RuntimeException("Normalized commission phone must contain only digits. Got: '" + normalizedCommissionPhone + "'");
+            }
+            
+            Long commissionPhoneLong = Long.parseLong(normalizedCommissionPhone);
+            
+            MoPayInitiateRequest.Transfer commissionTransfer = new MoPayInitiateRequest.Transfer();
+            commissionTransfer.setAmount(commissionAmount);
+            commissionTransfer.setPhone(commissionPhoneLong);
+            commissionTransfer.setMessage("Commission for payment to " + receiver.getCompanyName());
+            transfers.add(commissionTransfer);
+            logger.info("✅ Added commission transfer to commissioner - Amount: {}, Phone: {}", commissionAmount, commissionPhoneLong);
+        } else {
+            logger.info("⚠️ Commission amount is zero or commission phone not configured, NOT adding commission transfer.");
         }
         
         logger.info("=== TRANSFERS SUMMARY ===");
@@ -648,8 +686,11 @@ public class PaymentService {
             // Update transaction status based on MoPay response
             if ("SUCCESS".equalsIgnoreCase(mopayStatus) || "200".equals(mopayStatus) 
                 || (moPayResponse.getSuccess() != null && moPayResponse.getSuccess())) {
+                // Track if this is a status transition (from PENDING to SUCCESS)
+                boolean isStatusTransition = transaction.getStatus() == TransactionStatus.PENDING;
+                
                 // Only update balance if transitioning from PENDING to SUCCESS
-                if (transaction.getStatus() == TransactionStatus.PENDING) {
+                if (isStatusTransition) {
                     User user = transaction.getUser();
                     
                     if (transaction.getTransactionType() == TransactionType.TOP_UP) {
@@ -709,53 +750,78 @@ public class PaymentService {
                                 userRepository.save(transactionUser);
                             }
                             // If user is null (guest payment), user bonus is not credited
-                            
-                            // Send SMS and WhatsApp notifications for MOMO payments when status changes to SUCCESS
-                            try {
-                                // Get payer phone and name (works for both registered users and guests)
-                                String payerPhone = transaction.getPhoneNumber();
-                                String payerName = payerPhone; // Default to phone number
-                                if (transactionUser != null && transactionUser.getFullNames() != null 
-                                    && !transactionUser.getFullNames().trim().isEmpty()) {
-                                    payerName = transactionUser.getFullNames();
-                                }
-                                
-                                // Send SMS and WhatsApp to receiver
-                                if (receiver.getReceiverPhone() != null) {
-                                    String receiverPhoneNormalized = normalizePhoneTo12Digits(receiver.getReceiverPhone());
-                                    String receiverSmsMessage = String.format("Received %s RWF from %s", 
-                                        paymentAmount.toPlainString(), payerName);
-                                    String receiverWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via MM.",
-                                        payerName, paymentAmount.toPlainString(), receiver.getCompanyName());
-                                    messagingService.sendSms(receiverSmsMessage, receiverPhoneNormalized);
-                                    whatsAppService.sendWhatsApp(receiverWhatsAppMessage, receiverPhoneNormalized);
-                                    logger.info("SMS and WhatsApp sent to receiver {} about MOMO payment", receiverPhoneNormalized);
-                                }
-                                
-                                // Send SMS and WhatsApp to payer
-                                if (payerPhone != null && !payerPhone.trim().isEmpty()) {
-                                    String payerPhoneNormalized = normalizePhoneTo12Digits(payerPhone);
-                                    String payerSmsMessage = String.format("Payment of %s RWF to %s successful", 
-                                        paymentAmount.toPlainString(), receiver.getCompanyName());
-                                    String userWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via MM.",
-                                        payerName, paymentAmount.toPlainString(), receiver.getCompanyName());
-                                    
-                                    messagingService.sendSms(payerSmsMessage, payerPhoneNormalized);
-                                    whatsAppService.sendWhatsApp(userWhatsAppMessage, payerPhoneNormalized);
-                                    logger.info("SMS sent to payer {}: {}", payerPhoneNormalized, payerSmsMessage);
-                                    logger.info("WhatsApp sent to payer {}: {}", payerPhoneNormalized, userWhatsAppMessage);
-                                } else {
-                                    logger.warn("Payer phone number is null or empty in transaction, skipping SMS/WhatsApp to payer");
-                                }
-                            } catch (Exception e) {
-                                logger.error("Failed to send SMS/WhatsApp notifications for MOMO payment: ", e);
-                                // Don't fail the transaction if SMS/WhatsApp fails
-                            }
                         }
                     }
                 }
                 
                 transaction.setStatus(TransactionStatus.SUCCESS);
+                
+                // Send WhatsApp notifications for all PAYMENT transactions when status transitions to SUCCESS
+                // Only send on status transition (PENDING -> SUCCESS) to avoid duplicate notifications
+                if (isStatusTransition && transaction.getTransactionType() == TransactionType.PAYMENT) {
+                    Receiver receiver = transaction.getReceiver();
+                    if (receiver != null) {
+                        try {
+                            // Determine payment method and payer information
+                            boolean isMomoPayment = transaction.getMopayTransactionId() != null;
+                            String paymentMethod = isMomoPayment ? "MM" : "Card";
+                            
+                            // Get payer phone and name
+                            String payerPhone = null;
+                            User transactionUser = transaction.getUser();
+                            String payerName = "Guest User"; // Default
+                            
+                            if (isMomoPayment) {
+                                // For MOMO payments, phoneNumber is the payer's phone
+                                payerPhone = transaction.getPhoneNumber();
+                                if (transactionUser != null && transactionUser.getFullNames() != null 
+                                    && !transactionUser.getFullNames().trim().isEmpty()) {
+                                    payerName = transactionUser.getFullNames();
+                                } else if (payerPhone != null) {
+                                    payerName = payerPhone;
+                                }
+                            } else {
+                                // For NFC Card payments, user is always present
+                                if (transactionUser != null) {
+                                    payerPhone = transactionUser.getPhoneNumber();
+                                    if (transactionUser.getFullNames() != null 
+                                        && !transactionUser.getFullNames().trim().isEmpty()) {
+                                        payerName = transactionUser.getFullNames();
+                                    } else if (payerPhone != null) {
+                                        payerName = payerPhone;
+                                    }
+                                }
+                            }
+                            
+                            BigDecimal paymentAmount = transaction.getAmount();
+                            
+                            // Send WhatsApp to receiver
+                            if (receiver.getReceiverPhone() != null) {
+                                String receiverPhoneNormalized = normalizePhoneTo12Digits(receiver.getReceiverPhone());
+                                String receiverWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via %s.",
+                                    payerName, paymentAmount.toPlainString(), receiver.getCompanyName(), paymentMethod);
+                                whatsAppService.sendWhatsApp(receiverWhatsAppMessage, receiverPhoneNormalized);
+                                logger.info("WhatsApp sent to receiver {} about payment (status: SUCCESS, method: {}): {}", 
+                                    receiverPhoneNormalized, paymentMethod, receiverWhatsAppMessage);
+                            }
+                            
+                            // Send WhatsApp to payer (user) if phone is available
+                            if (payerPhone != null && !payerPhone.trim().isEmpty()) {
+                                String payerPhoneNormalized = normalizePhoneTo12Digits(payerPhone);
+                                String userWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via %s.",
+                                    payerName, paymentAmount.toPlainString(), receiver.getCompanyName(), paymentMethod);
+                                whatsAppService.sendWhatsApp(userWhatsAppMessage, payerPhoneNormalized);
+                                logger.info("WhatsApp sent to payer {} about payment (status: SUCCESS, method: {}): {}", 
+                                    payerPhoneNormalized, paymentMethod, userWhatsAppMessage);
+                            } else {
+                                logger.warn("Payer phone number is null or empty in transaction, skipping WhatsApp to payer");
+                            }
+                        } catch (Exception e) {
+                            logger.error("Failed to send WhatsApp notifications for payment status check: ", e);
+                            // Don't fail the transaction if WhatsApp fails
+                        }
+                    }
+                }
             } else if ("FAILED".equalsIgnoreCase(mopayStatus) || "400".equals(mopayStatus) 
                 || "500".equals(mopayStatus) || (moPayResponse.getSuccess() != null && !moPayResponse.getSuccess())) {
                 transaction.setStatus(TransactionStatus.FAILED);
@@ -770,11 +836,85 @@ public class PaymentService {
     }
 
     @Transactional(readOnly = true)
-    public List<PaymentResponse> getAllTransactions() {
-        return transactionRepository.findAllWithUser()
-                .stream()
+    public PaginatedResponse<PaymentResponse> getAllTransactions(int page, int size, LocalDateTime fromDate, LocalDateTime toDate) {
+        // Build dynamic query using EntityManager
+        StringBuilder queryBuilder = new StringBuilder();
+        queryBuilder.append("SELECT t FROM Transaction t ");
+        queryBuilder.append("LEFT JOIN FETCH t.user u ");
+        queryBuilder.append("LEFT JOIN FETCH t.paymentCategory pc ");
+        queryBuilder.append("LEFT JOIN FETCH t.receiver r ");
+        queryBuilder.append("WHERE 1=1 ");
+        
+        // Add date range filters
+        if (fromDate != null) {
+            queryBuilder.append("AND t.createdAt >= :fromDate ");
+        }
+        if (toDate != null) {
+            queryBuilder.append("AND t.createdAt <= :toDate ");
+        }
+        
+        queryBuilder.append("ORDER BY t.createdAt DESC");
+        
+        // Create query
+        Query query = entityManager.createQuery(queryBuilder.toString(), Transaction.class);
+        
+        // Set date parameters if provided
+        if (fromDate != null) {
+            query.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            query.setParameter("toDate", toDate);
+        }
+        
+        // Get total count (for pagination)
+        StringBuilder countQueryBuilder = new StringBuilder();
+        countQueryBuilder.append("SELECT COUNT(t) FROM Transaction t ");
+        countQueryBuilder.append("WHERE 1=1 ");
+        
+        if (fromDate != null) {
+            countQueryBuilder.append("AND t.createdAt >= :fromDate ");
+        }
+        if (toDate != null) {
+            countQueryBuilder.append("AND t.createdAt <= :toDate ");
+        }
+        
+        Query countQuery = entityManager.createQuery(countQueryBuilder.toString(), Long.class);
+        
+        if (fromDate != null) {
+            countQuery.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            countQuery.setParameter("toDate", toDate);
+        }
+        
+        long totalElements = (Long) countQuery.getSingleResult();
+        
+        // Apply pagination
+        int offset = page * size;
+        query.setFirstResult(offset);
+        query.setMaxResults(size);
+        
+        @SuppressWarnings("unchecked")
+        List<Transaction> transactions = (List<Transaction>) query.getResultList();
+        
+        // Convert to PaymentResponse
+        List<PaymentResponse> content = transactions.stream()
                 .map(this::mapToPaymentResponse)
                 .collect(Collectors.toList());
+        
+        // Calculate pagination metadata
+        int totalPages = (int) Math.ceil((double) totalElements / size);
+        
+        PaginatedResponse<PaymentResponse> response = new PaginatedResponse<>();
+        response.setContent(content);
+        response.setTotalElements(totalElements);
+        response.setTotalPages(totalPages);
+        response.setCurrentPage(page);
+        response.setPageSize(size);
+        response.setFirst(page == 0);
+        response.setLast(page >= totalPages - 1);
+        
+        return response;
     }
 
     @Transactional(readOnly = true)
@@ -795,22 +935,109 @@ public class PaymentService {
     }
 
     @Transactional(readOnly = true)
-    public ReceiverTransactionsResponse getTransactionsByReceiver(UUID receiverId) {
+    public ReceiverTransactionsResponse getTransactionsByReceiver(UUID receiverId, int page, int size, LocalDateTime fromDate, LocalDateTime toDate) {
         Receiver receiver = receiverRepository.findById(receiverId)
                 .orElseThrow(() -> new RuntimeException("Receiver not found"));
         
-        // Get all transactions for this receiver
-        List<Transaction> transactions = transactionRepository.findByReceiverOrderByCreatedAtDescWithUser(receiver);
-        List<PaymentResponse> transactionResponses = transactions.stream()
+        // Build dynamic query using EntityManager
+        StringBuilder queryBuilder = new StringBuilder();
+        queryBuilder.append("SELECT t FROM Transaction t ");
+        queryBuilder.append("LEFT JOIN FETCH t.user u ");
+        queryBuilder.append("LEFT JOIN FETCH t.paymentCategory pc ");
+        queryBuilder.append("LEFT JOIN FETCH t.receiver r ");
+        queryBuilder.append("WHERE t.receiver.id = :receiverId ");
+        
+        // Add date range filters
+        if (fromDate != null) {
+            queryBuilder.append("AND t.createdAt >= :fromDate ");
+        }
+        if (toDate != null) {
+            queryBuilder.append("AND t.createdAt <= :toDate ");
+        }
+        
+        queryBuilder.append("ORDER BY t.createdAt DESC");
+        
+        // Create query
+        Query query = entityManager.createQuery(queryBuilder.toString(), Transaction.class);
+        query.setParameter("receiverId", receiverId);
+        
+        // Set date parameters if provided
+        if (fromDate != null) {
+            query.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            query.setParameter("toDate", toDate);
+        }
+        
+        // Get total count (for pagination)
+        StringBuilder countQueryBuilder = new StringBuilder();
+        countQueryBuilder.append("SELECT COUNT(t) FROM Transaction t ");
+        countQueryBuilder.append("WHERE t.receiver.id = :receiverId ");
+        
+        if (fromDate != null) {
+            countQueryBuilder.append("AND t.createdAt >= :fromDate ");
+        }
+        if (toDate != null) {
+            countQueryBuilder.append("AND t.createdAt <= :toDate ");
+        }
+        
+        Query countQuery = entityManager.createQuery(countQueryBuilder.toString(), Long.class);
+        countQuery.setParameter("receiverId", receiverId);
+        
+        if (fromDate != null) {
+            countQuery.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            countQuery.setParameter("toDate", toDate);
+        }
+        
+        // Apply pagination
+        int offset = page * size;
+        query.setFirstResult(offset);
+        query.setMaxResults(size);
+        
+        @SuppressWarnings("unchecked")
+        List<Transaction> paginatedTransactions = (List<Transaction>) query.getResultList();
+        
+        // Get ALL transactions for statistics calculation (without pagination)
+        StringBuilder statsQueryBuilder = new StringBuilder();
+        statsQueryBuilder.append("SELECT t FROM Transaction t ");
+        statsQueryBuilder.append("LEFT JOIN FETCH t.user u ");
+        statsQueryBuilder.append("WHERE t.receiver.id = :receiverId ");
+        
+        if (fromDate != null) {
+            statsQueryBuilder.append("AND t.createdAt >= :fromDate ");
+        }
+        if (toDate != null) {
+            statsQueryBuilder.append("AND t.createdAt <= :toDate ");
+        }
+        
+        Query statsQuery = entityManager.createQuery(statsQueryBuilder.toString(), Transaction.class);
+        statsQuery.setParameter("receiverId", receiverId);
+        
+        if (fromDate != null) {
+            statsQuery.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            statsQuery.setParameter("toDate", toDate);
+        }
+        
+        @SuppressWarnings("unchecked")
+        List<Transaction> allTransactions = (List<Transaction>) statsQuery.getResultList();
+        
+        // Convert paginated transactions to PaymentResponse
+        List<PaymentResponse> transactionResponses = paginatedTransactions.stream()
                 .map(this::mapToPaymentResponse)
                 .collect(Collectors.toList());
         
-        // Calculate statistics
-        ReceiverTransactionsResponse.TransactionStatistics statistics = calculateReceiverTransactionStatistics(transactions);
+        // Calculate statistics from ALL transactions (not just paginated)
+        ReceiverTransactionsResponse.TransactionStatistics statistics = calculateReceiverTransactionStatistics(allTransactions);
         
         ReceiverTransactionsResponse response = new ReceiverTransactionsResponse();
         response.setTransactions(transactionResponses);
         response.setStatistics(statistics);
+        // Add pagination info to response (we'll need to update ReceiverTransactionsResponse to include pagination)
+        // For now, statistics will reflect all transactions in the date range
         
         return response;
     }
@@ -1182,7 +1409,7 @@ public class PaymentService {
     }
 
     @Transactional(readOnly = true)
-    public AdminIncomeResponse getAdminIncome(LocalDateTime fromDate, LocalDateTime toDate, UUID receiverId) {
+    public AdminIncomeResponse getAdminIncome(LocalDateTime fromDate, LocalDateTime toDate, UUID receiverId, int page, int size) {
         // Set time to start/end of day if only date is provided
         if (fromDate != null && fromDate.getHour() == 0 && fromDate.getMinute() == 0 && fromDate.getSecond() == 0) {
             fromDate = fromDate.withHour(0).withMinute(0).withSecond(0);
@@ -1225,8 +1452,8 @@ public class PaymentService {
             assignedBalanceBreakdown = getAssignedBalanceBreakdown(fromDate, toDate);
         }
 
-        // Get detailed transaction list
-        List<AdminIncomeResponse.AdminIncomeTransaction> transactions = getAdminIncomeTransactionList(fromDate, toDate, receiverId);
+        // Get detailed transaction list with pagination
+        List<AdminIncomeResponse.AdminIncomeTransaction> transactions = getAdminIncomeTransactionList(fromDate, toDate, receiverId, page, size);
 
         AdminIncomeResponse response = new AdminIncomeResponse();
         response.setTotalIncome(totalIncome);
@@ -1407,7 +1634,7 @@ public class PaymentService {
                 .collect(Collectors.toList());
     }
 
-    private List<AdminIncomeResponse.AdminIncomeTransaction> getAdminIncomeTransactionList(LocalDateTime fromDate, LocalDateTime toDate, UUID receiverId) {
+    private List<AdminIncomeResponse.AdminIncomeTransaction> getAdminIncomeTransactionList(LocalDateTime fromDate, LocalDateTime toDate, UUID receiverId, int page, int size) {
         StringBuilder sql = new StringBuilder(
             "SELECT t.id, t.created_at, u.id, u.full_names, u.phone_number, " +
             "r.id, r.company_name, pc.id, pc.name, t.amount, " +
@@ -1442,6 +1669,11 @@ public class PaymentService {
         if (receiverId != null) {
             query.setParameter("receiverId", receiverId);
         }
+        
+        // Apply pagination
+        int offset = page * size;
+        query.setFirstResult(offset);
+        query.setMaxResults(size);
         
         @SuppressWarnings("unchecked")
         List<Object[]> results = query.getResultList();

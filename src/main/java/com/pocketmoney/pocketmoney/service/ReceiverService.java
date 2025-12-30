@@ -141,26 +141,104 @@ public class ReceiverService {
 
     @Transactional(readOnly = true)
     public List<ReceiverResponse> getAllReceivers() {
-        return receiverRepository.findAll()
-                .stream()
-                .map(this::mapToResponse)
-                .collect(Collectors.toList());
+        // Get all receivers
+        List<Receiver> allReceivers = receiverRepository.findAll();
+        
+        // Group by main merchant: main merchants first, then their submerchants
+        return groupReceiversByMainMerchant(allReceivers);
     }
 
     @Transactional(readOnly = true)
     public List<ReceiverResponse> getActiveReceivers() {
-        return receiverRepository.findByStatus(ReceiverStatus.ACTIVE)
-                .stream()
-                .map(this::mapToResponse)
-                .collect(Collectors.toList());
+        // Get all active receivers
+        List<Receiver> activeReceivers = receiverRepository.findByStatus(ReceiverStatus.ACTIVE);
+        
+        // Group by main merchant: main merchants first, then their submerchants
+        return groupReceiversByMainMerchant(activeReceivers);
     }
 
     @Transactional(readOnly = true)
     public List<ReceiverResponse> getReceiversByStatus(ReceiverStatus status) {
-        return receiverRepository.findByStatus(status)
-                .stream()
-                .map(this::mapToResponse)
-                .collect(Collectors.toList());
+        // Get all receivers with the specified status
+        List<Receiver> receivers = receiverRepository.findByStatus(status);
+        
+        // Group by main merchant: main merchants first, then their submerchants
+        return groupReceiversByMainMerchant(receivers);
+    }
+    
+    /**
+     * Groups receivers by main merchant: main merchants first, followed by their submerchants.
+     * Receivers without a parent (main merchants) appear first, then their submerchants.
+     */
+    private List<ReceiverResponse> groupReceiversByMainMerchant(List<Receiver> receivers) {
+        List<ReceiverResponse> result = new java.util.ArrayList<>();
+        
+        // Separate main merchants and submerchants
+        List<Receiver> mainMerchants = new java.util.ArrayList<>();
+        java.util.Map<UUID, List<Receiver>> submerchantsByParent = new java.util.HashMap<>();
+        
+        for (Receiver receiver : receivers) {
+            if (receiver.getParentReceiver() == null) {
+                // Main merchant (no parent)
+                mainMerchants.add(receiver);
+            } else {
+                // Submerchant - group by parent ID
+                UUID parentId = receiver.getParentReceiver().getId();
+                submerchantsByParent.computeIfAbsent(parentId, k -> new java.util.ArrayList<>()).add(receiver);
+            }
+        }
+        
+        // Sort main merchants by company name
+        mainMerchants.sort((a, b) -> {
+            String nameA = a.getCompanyName() != null ? a.getCompanyName() : "";
+            String nameB = b.getCompanyName() != null ? b.getCompanyName() : "";
+            return nameA.compareToIgnoreCase(nameB);
+        });
+        
+        // For each main merchant, add it and its submerchants
+        for (Receiver mainMerchant : mainMerchants) {
+            // Add main merchant
+            result.add(mapToResponse(mainMerchant));
+            
+            // Add its submerchants (if any)
+            List<Receiver> submerchants = submerchantsByParent.get(mainMerchant.getId());
+            if (submerchants != null && !submerchants.isEmpty()) {
+                // Sort submerchants by company name
+                submerchants.sort((a, b) -> {
+                    String nameA = a.getCompanyName() != null ? a.getCompanyName() : "";
+                    String nameB = b.getCompanyName() != null ? b.getCompanyName() : "";
+                    return nameA.compareToIgnoreCase(nameB);
+                });
+                
+                // Add all submerchants
+                for (Receiver submerchant : submerchants) {
+                    result.add(mapToResponse(submerchant));
+                }
+            }
+        }
+        
+        // Handle orphaned submerchants (submerchants whose parent is not in the list)
+        // This can happen when filtering by status - parent might have different status
+        for (java.util.Map.Entry<UUID, List<Receiver>> entry : submerchantsByParent.entrySet()) {
+            UUID parentId = entry.getKey();
+            boolean parentInList = mainMerchants.stream().anyMatch(m -> m.getId().equals(parentId));
+            
+            if (!parentInList) {
+                // Parent not in list, add submerchants anyway (they'll appear at the end)
+                List<Receiver> orphanedSubmerchants = entry.getValue();
+                orphanedSubmerchants.sort((a, b) -> {
+                    String nameA = a.getCompanyName() != null ? a.getCompanyName() : "";
+                    String nameB = b.getCompanyName() != null ? b.getCompanyName() : "";
+                    return nameA.compareToIgnoreCase(nameB);
+                });
+                
+                for (Receiver submerchant : orphanedSubmerchants) {
+                    result.add(mapToResponse(submerchant));
+                }
+            }
+        }
+        
+        return result;
     }
 
     public ReceiverResponse updateReceiver(UUID id, UpdateReceiverRequest request) {
@@ -376,14 +454,22 @@ public class ReceiverService {
                 throw new RuntimeException("Commission percentage must be between 0 and 100");
             }
             
-            // Validate that commission percentage doesn't exceed discount percentage
-            BigDecimal discountPercentage = receiver.getDiscountPercentage() != null 
-                ? receiver.getDiscountPercentage() 
-                : BigDecimal.ZERO;
-            if (request.getCommissionPercentage().compareTo(discountPercentage) > 0) {
+            // Get discount and user bonus percentages (use request values if provided, otherwise use receiver's current values)
+            BigDecimal discountPercentage = request.getDiscountPercentage() != null 
+                ? request.getDiscountPercentage() 
+                : (receiver.getDiscountPercentage() != null ? receiver.getDiscountPercentage() : BigDecimal.ZERO);
+            BigDecimal userBonusPercentage = request.getUserBonusPercentage() != null 
+                ? request.getUserBonusPercentage() 
+                : (receiver.getUserBonusPercentage() != null ? receiver.getUserBonusPercentage() : BigDecimal.ZERO);
+            
+            // Validate that userBonusPercentage + commissionPercentage doesn't exceed discountPercentage
+            // This ensures admin gets at least some percentage: discountPercentage - userBonusPercentage - commissionPercentage >= 0
+            BigDecimal totalSplitPercentage = userBonusPercentage.add(request.getCommissionPercentage());
+            if (totalSplitPercentage.compareTo(discountPercentage) > 0) {
                 throw new RuntimeException(String.format(
-                    "Commission percentage (%.2f%%) cannot exceed discount percentage (%.2f%%)",
-                    request.getCommissionPercentage(), discountPercentage));
+                    "The sum of user bonus percentage (%.2f%%) and commission percentage (%.2f%%) cannot exceed discount percentage (%.2f%%). " +
+                    "At least some percentage must remain for admin. Current total: %.2f%%",
+                    userBonusPercentage, request.getCommissionPercentage(), discountPercentage, totalSplitPercentage));
             }
             
             // Normalize commission phone number
@@ -816,6 +902,16 @@ public class ReceiverService {
         response.setDiscountPercentage(balanceOwner.getDiscountPercentage()); // Use balance owner's percentages
         response.setUserBonusPercentage(balanceOwner.getUserBonusPercentage()); // Use balance owner's percentages
         
+        // Get commission settings for this receiver
+        List<PaymentCommissionSetting> commissionSettings = paymentCommissionSettingRepository.findByReceiverIdAndIsActiveTrue(receiver.getId());
+        List<com.pocketmoney.pocketmoney.dto.CommissionInfo> commissionInfoList = commissionSettings.stream()
+                .map(setting -> new com.pocketmoney.pocketmoney.dto.CommissionInfo(
+                        setting.getPhoneNumber(),
+                        setting.getCommissionPercentage()
+                ))
+                .collect(Collectors.toList());
+        response.setCommissionSettings(commissionInfoList);
+        
         response.setPendingBalanceAssignments(0); // Default, will be set in getReceiverById if needed
         
         // Submerchant relationship info
@@ -839,6 +935,19 @@ public class ReceiverService {
         }
         
         response.setLastTransactionDate(receiver.getLastTransactionDate());
+        
+        // Get last transaction ID for this receiver
+        // Query the most recent transaction for this receiver (limit to 1 for efficiency)
+        List<Transaction> lastTransactions = transactionRepository.findByReceiverOrderByCreatedAtDescWithUser(receiver)
+                .stream()
+                .limit(1)
+                .collect(Collectors.toList());
+        if (!lastTransactions.isEmpty()) {
+            response.setLastTransactionId(lastTransactions.get(0).getId());
+        } else {
+            response.setLastTransactionId(null);
+        }
+        
         response.setCreatedAt(receiver.getCreatedAt());
         response.setUpdatedAt(receiver.getUpdatedAt());
         return response;

@@ -7,6 +7,7 @@ import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.UUID;
 
 @Data
@@ -30,6 +31,7 @@ public class ReceiverResponse {
     private BigDecimal discountPercentage;
     private BigDecimal userBonusPercentage;
     private Integer pendingBalanceAssignments; // Count of pending balance assignment requests
+    private List<CommissionInfo> commissionSettings; // Commission phone numbers and percentages
     
     // Submerchant relationship info
     private UUID parentReceiverId; // null if main merchant, set if submerchant
@@ -38,6 +40,7 @@ public class ReceiverResponse {
     private Integer submerchantCount; // Number of submerchants (only for main merchants)
     
     private LocalDateTime lastTransactionDate;
+    private UUID lastTransactionId; // ID of the most recent transaction
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }
