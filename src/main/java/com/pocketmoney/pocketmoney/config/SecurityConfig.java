@@ -78,6 +78,7 @@ public class SecurityConfig {
                         .requestMatchers("/api/payments/bonus-history/**").hasAnyRole("USER", "ADMIN")
                         .requestMatchers("/api/payments/admin-income").hasRole("ADMIN")
                         .requestMatchers("/api/payments/admin/dashboard-statistics").hasRole("ADMIN")
+                        .requestMatchers("/api/payments/transactions/receiver/*/export").hasAnyRole("RECEIVER", "ADMIN")
                         .requestMatchers("/api/payments/transactions/receiver/**").hasAnyRole("RECEIVER", "ADMIN")
                         .requestMatchers("/api/receivers/*/assign-balance").hasRole("ADMIN")
                         .requestMatchers("/api/receivers/*/balance-history/*/approve").hasAnyRole("RECEIVER", "ADMIN")

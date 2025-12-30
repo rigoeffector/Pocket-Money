@@ -162,12 +162,18 @@ public class PaymentService {
         transaction.setMessage(moPayRequest.getMessage());
         transaction.setBalanceBefore(user.getAmountRemaining());
 
-        // Check MoPay response - API returns status 201 and transactionId on success
-        String transactionId = moPayResponse != null ? moPayResponse.getTransactionId() : null;
+        // Generate transaction ID starting with POCHI for top-up
+        String transactionId = generateTransactionId();
+        transaction.setMopayTransactionId(transactionId);
+        
+        // Check MoPay response - API returns status 201 on success
+        String mopayTransactionId = moPayResponse != null ? moPayResponse.getTransactionId() : null;
         if (moPayResponse != null && moPayResponse.getStatus() != null && moPayResponse.getStatus() == 201 
-            && transactionId != null) {
-            // Successfully initiated - store transaction ID and set as PENDING
-            transaction.setMopayTransactionId(transactionId);
+            && mopayTransactionId != null) {
+            // Successfully initiated - keep our POCHI transaction ID and set as PENDING
+            // Store MoPay transaction ID in message for status checking
+            String existingMessage = transaction.getMessage() != null ? transaction.getMessage() : "";
+            transaction.setMessage(existingMessage + " | MOPAY_ID:" + mopayTransactionId);
             transaction.setStatus(TransactionStatus.PENDING);
         } else {
             // Initiation failed - mark as FAILED with error message
@@ -175,7 +181,7 @@ public class PaymentService {
             String errorMessage = moPayResponse != null && moPayResponse.getMessage() != null 
                 ? moPayResponse.getMessage() 
                 : "Payment initiation failed - status: " + (moPayResponse != null ? moPayResponse.getStatus() : "null") 
-                    + ", transactionId: " + transactionId;
+                    + ", mopayTransactionId: " + mopayTransactionId;
             transaction.setMessage(errorMessage);
         }
 
@@ -326,6 +332,10 @@ public class PaymentService {
         transaction.setReceiverBalanceBefore(receiverBalanceBefore); // Balance owner's balance before
         transaction.setReceiverBalanceAfter(receiverBalanceAfter); // Balance owner's balance after
         transaction.setStatus(TransactionStatus.SUCCESS); // Immediate success for internal transfers
+        
+        // Generate transaction ID starting with POCHI for NFC card payments
+        String transactionId = generateTransactionId();
+        transaction.setMopayTransactionId(transactionId);
 
         Transaction savedTransaction = transactionRepository.save(transaction);
         
@@ -617,12 +627,18 @@ public class PaymentService {
         transaction.setReceiverBalanceBefore(receiverBalanceBefore); // Balance owner's balance before
         transaction.setReceiverBalanceAfter(receiverBalanceAfter); // Balance owner's balance after (to be applied on SUCCESS)
 
-        // Check MoPay response - API returns status 201 and transactionId on success
-        String transactionId = moPayResponse != null ? moPayResponse.getTransactionId() : null;
+        // Generate transaction ID starting with POCHI for MOMO payments
+        String transactionId = generateTransactionId();
+        transaction.setMopayTransactionId(transactionId);
+        
+        // Check MoPay response - API returns status 201 on success
+        String mopayTransactionId = moPayResponse != null ? moPayResponse.getTransactionId() : null;
         if (moPayResponse != null && moPayResponse.getStatus() != null && moPayResponse.getStatus() == 201 
-            && transactionId != null) {
-            // Successfully initiated - store transaction ID and set as PENDING
-            transaction.setMopayTransactionId(transactionId);
+            && mopayTransactionId != null) {
+            // Successfully initiated - keep our POCHI transaction ID and set as PENDING
+            // Store MoPay transaction ID in message for status checking
+            String existingMessage = transaction.getMessage() != null ? transaction.getMessage() : "";
+            transaction.setMessage(existingMessage + " | MOPAY_ID:" + mopayTransactionId);
             transaction.setStatus(TransactionStatus.PENDING);
             
             // Note: SMS and WhatsApp notifications will be sent only when payment is confirmed (SUCCESS)
@@ -633,7 +649,7 @@ public class PaymentService {
             String errorMessage = moPayResponse != null && moPayResponse.getMessage() != null 
                 ? moPayResponse.getMessage() 
                 : "Payment initiation failed - status: " + (moPayResponse != null ? moPayResponse.getStatus() : "null") 
-                    + ", transactionId: " + transactionId;
+                    + ", mopayTransactionId: " + mopayTransactionId;
             transaction.setMessage(errorMessage);
         }
 
@@ -680,8 +696,32 @@ public class PaymentService {
         Transaction transaction = transactionRepository.findByMopayTransactionIdWithUser(mopayTransactionId)
                 .orElseThrow(() -> new RuntimeException("Transaction not found"));
 
-        // Check status with MoPay
-        MoPayResponse moPayResponse = moPayService.checkTransactionStatus(mopayTransactionId);
+        // CRITICAL: Transaction ID must NEVER change - it's immutable after creation
+        String originalTransactionId = transaction.getMopayTransactionId();
+        logger.info("Checking transaction status - Transaction ID: {}, Current Status: {}, Requested ID: {}", 
+            originalTransactionId, transaction.getStatus(), mopayTransactionId);
+
+        // For NFC card payments (POCHI transaction IDs), transaction is already SUCCESS
+        // No need to check with MoPay API
+        if (mopayTransactionId != null && mopayTransactionId.startsWith("POCHI") 
+            && transaction.getTransactionType() == TransactionType.PAYMENT 
+            && transaction.getStatus() == TransactionStatus.SUCCESS) {
+            // NFC card payment - already successful, return current status
+            return mapToPaymentResponse(transaction);
+        }
+
+        // For MOMO and Top-up transactions, extract actual MoPay transaction ID from message
+        String actualMoPayTransactionId = mopayTransactionId;
+        if (transaction.getMessage() != null && transaction.getMessage().contains("MOPAY_ID:")) {
+            // Extract MoPay transaction ID from message
+            String[] parts = transaction.getMessage().split("MOPAY_ID:");
+            if (parts.length > 1) {
+                actualMoPayTransactionId = parts[1].trim();
+            }
+        }
+        
+        // Check status with MoPay using the actual MoPay transaction ID
+        MoPayResponse moPayResponse = moPayService.checkTransactionStatus(actualMoPayTransactionId);
 
         if (moPayResponse != null) {
             // Check-status endpoint might return status in different formats
@@ -766,7 +806,16 @@ public class PaymentService {
                     }
                 }
                 
+                // CRITICAL: Transaction ID must NEVER change - preserve the original POCHI transaction ID
+                // Verify transaction ID hasn't changed (should never happen, but safety check)
+                if (!originalTransactionId.equals(transaction.getMopayTransactionId())) {
+                    logger.error("CRITICAL ERROR: Transaction ID changed from {} to {} - RESTORING ORIGINAL", 
+                        originalTransactionId, transaction.getMopayTransactionId());
+                    transaction.setMopayTransactionId(originalTransactionId);
+                }
+                
                 transaction.setStatus(TransactionStatus.SUCCESS);
+                logger.info("Transaction status updated to SUCCESS - Transaction ID remains: {}", transaction.getMopayTransactionId());
                 
                 // Send WhatsApp notifications for all PAYMENT transactions when status transitions to SUCCESS
                 // Only send on status transition (PENDING -> SUCCESS) to avoid duplicate notifications
@@ -846,15 +895,48 @@ public class PaymentService {
                 }
             } else if ("FAILED".equalsIgnoreCase(mopayStatus) || "400".equals(mopayStatus) 
                 || "500".equals(mopayStatus) || (moPayResponse.getSuccess() != null && !moPayResponse.getSuccess())) {
+                // CRITICAL: Transaction ID must NEVER change - preserve the original POCHI transaction ID
+                if (!originalTransactionId.equals(transaction.getMopayTransactionId())) {
+                    logger.error("CRITICAL ERROR: Transaction ID changed from {} to {} - RESTORING ORIGINAL", 
+                        originalTransactionId, transaction.getMopayTransactionId());
+                    transaction.setMopayTransactionId(originalTransactionId);
+                }
+                
                 transaction.setStatus(TransactionStatus.FAILED);
                 if (moPayResponse.getMessage() != null) {
-                    transaction.setMessage(moPayResponse.getMessage());
+                    // Preserve MOPAY_ID in message if it exists, append new message
+                    String existingMessage = transaction.getMessage();
+                    if (existingMessage != null && existingMessage.contains("MOPAY_ID:")) {
+                        // Extract and preserve MOPAY_ID
+                        String[] parts = existingMessage.split("MOPAY_ID:");
+                        String mopayIdPart = parts.length > 1 ? " | MOPAY_ID:" + parts[1].trim() : "";
+                        transaction.setMessage(moPayResponse.getMessage() + mopayIdPart);
+                    } else {
+                        transaction.setMessage(moPayResponse.getMessage());
+                    }
                 }
+                logger.info("Transaction status updated to FAILED - Transaction ID remains: {}", transaction.getMopayTransactionId());
             }
+            
+            // Final safety check before saving - ensure transaction ID never changed
+            if (!originalTransactionId.equals(transaction.getMopayTransactionId())) {
+                logger.error("CRITICAL ERROR: Transaction ID changed before save from {} to {} - RESTORING ORIGINAL", 
+                    originalTransactionId, transaction.getMopayTransactionId());
+                transaction.setMopayTransactionId(originalTransactionId);
+            }
+            
             transactionRepository.save(transaction);
         }
 
-        return mapToPaymentResponse(transaction);
+        // Final verification in response
+        PaymentResponse response = mapToPaymentResponse(transaction);
+        if (!originalTransactionId.equals(response.getMopayTransactionId())) {
+            logger.error("CRITICAL ERROR: Response transaction ID mismatch! Original: {}, Response: {}", 
+                originalTransactionId, response.getMopayTransactionId());
+            response.setMopayTransactionId(originalTransactionId);
+        }
+        
+        return response;
     }
 
     @Transactional(readOnly = true)
@@ -954,6 +1036,12 @@ public class PaymentService {
         Transaction transaction = transactionRepository.findByIdWithUser(transactionId)
                 .orElseThrow(() -> new RuntimeException("Transaction not found"));
         return mapToPaymentResponse(transaction);
+    }
+
+    @Transactional(readOnly = true)
+    public Receiver getReceiverEntityById(UUID receiverId) {
+        return receiverRepository.findById(receiverId)
+                .orElseThrow(() -> new RuntimeException("Receiver not found"));
     }
 
     @Transactional(readOnly = true)
@@ -1411,6 +1499,23 @@ public class PaymentService {
         response.setCreatedAt(paymentCategory.getCreatedAt());
         response.setUpdatedAt(paymentCategory.getUpdatedAt());
         return response;
+    }
+
+    /**
+     * Generates a unique transaction ID starting with "POCHI"
+     * Format: POCHI + timestamp (milliseconds) + random alphanumeric string
+     * Example: POCHI1769123456789A3B2C1D
+     */
+    private String generateTransactionId() {
+        long timestamp = System.currentTimeMillis();
+        // Generate a random alphanumeric string (6 characters)
+        String chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        StringBuilder randomPart = new StringBuilder();
+        java.util.Random random = new java.util.Random();
+        for (int i = 0; i < 6; i++) {
+            randomPart.append(chars.charAt(random.nextInt(chars.length())));
+        }
+        return "POCHI" + timestamp + randomPart.toString();
     }
 
     private UserResponse mapToUserResponse(User user) {

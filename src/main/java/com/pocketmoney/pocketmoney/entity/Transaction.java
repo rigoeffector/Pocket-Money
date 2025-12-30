@@ -43,6 +43,9 @@ public class Transaction {
     private BigDecimal amount;
 
     @Column(name = "mopay_transaction_id", length = 500)
+    // CRITICAL: This field is IMMUTABLE after transaction creation. 
+    // The transaction ID (POCHI format) must NEVER change throughout the transaction lifecycle.
+    // It is set once during transaction creation and must remain constant for PENDING, SUCCESS, and FAILED statuses.
     private String mopayTransactionId;
 
     @Column(name = "status", nullable = false)

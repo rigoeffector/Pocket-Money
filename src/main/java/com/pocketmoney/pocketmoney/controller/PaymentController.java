@@ -3,6 +3,7 @@ package com.pocketmoney.pocketmoney.controller;
 import com.pocketmoney.pocketmoney.dto.*;
 import com.pocketmoney.pocketmoney.service.PaymentService;
 import com.pocketmoney.pocketmoney.service.UserService;
+import com.pocketmoney.pocketmoney.service.PdfExportService;
 import jakarta.validation.Valid;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
@@ -20,10 +21,12 @@ public class PaymentController {
 
     private final PaymentService paymentService;
     private final UserService userService;
+    private final PdfExportService pdfExportService;
 
-    public PaymentController(PaymentService paymentService, UserService userService) {
+    public PaymentController(PaymentService paymentService, UserService userService, PdfExportService pdfExportService) {
         this.paymentService = paymentService;
         this.userService = userService;
+        this.pdfExportService = pdfExportService;
     }
 
     @PostMapping("/top-up")
@@ -147,6 +150,36 @@ public class PaymentController {
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)
                     .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @GetMapping(value = "/transactions/receiver/{receiverId}/export", produces = "application/pdf")
+    public ResponseEntity<byte[]> exportTransactionsToPdf(
+            @PathVariable UUID receiverId,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate) {
+        try {
+            // Get all transactions (no pagination for PDF export)
+            ReceiverTransactionsResponse response = paymentService.getTransactionsByReceiver(receiverId, 0, Integer.MAX_VALUE, fromDate, toDate);
+            
+            // Get receiver information
+            com.pocketmoney.pocketmoney.entity.Receiver receiver = paymentService.getReceiverEntityById(receiverId);
+            
+            // Generate PDF
+            byte[] pdfBytes = pdfExportService.generateTransactionHistoryPdf(receiver, response, fromDate, toDate);
+            
+            // Set response headers
+            org.springframework.http.HttpHeaders headers = new org.springframework.http.HttpHeaders();
+            headers.setContentType(org.springframework.http.MediaType.APPLICATION_PDF);
+            headers.setContentDispositionFormData("attachment", 
+                "transaction_history_" + receiverId + "_" + java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")) + ".pdf");
+            headers.setContentLength(pdfBytes.length);
+            
+            return ResponseEntity.ok()
+                    .headers(headers)
+                    .body(pdfBytes);
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }
 
