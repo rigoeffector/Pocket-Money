@@ -333,15 +333,27 @@ public class PaymentService {
         try {
             // Send SMS and WhatsApp to user (NFC Card payment)
             String userPhoneNormalized = normalizePhoneTo12Digits(user.getPhoneNumber());
-            String userSmsMessage = String.format("Payment of %s RWF to %s successful. New balance: %s RWF", 
-                paymentAmount.toPlainString(), receiver.getCompanyName(), userNewBalance.toPlainString());
             
-            // Build WhatsApp message format: [Payer Name]: Paid X RWF to [Company Name] via Card.
+            // Build message with bonus information if applicable
+            String userSmsMessage;
+            String userWhatsAppMessage;
             String userPayerName = (user.getFullNames() != null && !user.getFullNames().trim().isEmpty()) 
                 ? user.getFullNames() 
                 : user.getPhoneNumber();
-            String userWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via Card.",
-                userPayerName, paymentAmount.toPlainString(), receiver.getCompanyName());
+            
+            if (userBonusAmount.compareTo(BigDecimal.ZERO) > 0) {
+                // Include bonus amount in message
+                userSmsMessage = String.format("Payment of %s RWF to %s successful. Bonus: %s RWF returned. New balance: %s RWF", 
+                    paymentAmount.toPlainString(), receiver.getCompanyName(), userBonusAmount.toPlainString(), userNewBalance.toPlainString());
+                userWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via Card. Bonus: %s RWF returned.",
+                    userPayerName, paymentAmount.toPlainString(), receiver.getCompanyName(), userBonusAmount.toPlainString());
+            } else {
+                // No bonus
+                userSmsMessage = String.format("Payment of %s RWF to %s successful. New balance: %s RWF", 
+                    paymentAmount.toPlainString(), receiver.getCompanyName(), userNewBalance.toPlainString());
+                userWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via Card.",
+                    userPayerName, paymentAmount.toPlainString(), receiver.getCompanyName());
+            }
             
             messagingService.sendSms(userSmsMessage, userPhoneNormalized);
             whatsAppService.sendWhatsApp(userWhatsAppMessage, userPhoneNormalized);
@@ -794,6 +806,7 @@ public class PaymentService {
                             }
                             
                             BigDecimal paymentAmount = transaction.getAmount();
+                            BigDecimal userBonusAmount = transaction.getUserBonusAmount() != null ? transaction.getUserBonusAmount() : BigDecimal.ZERO;
                             
                             // Send WhatsApp to receiver
                             if (receiver.getReceiverPhone() != null) {
@@ -808,8 +821,17 @@ public class PaymentService {
                             // Send WhatsApp to payer (user) if phone is available
                             if (payerPhone != null && !payerPhone.trim().isEmpty()) {
                                 String payerPhoneNormalized = normalizePhoneTo12Digits(payerPhone);
-                                String userWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via %s.",
-                                    payerName, paymentAmount.toPlainString(), receiver.getCompanyName(), paymentMethod);
+                                String userWhatsAppMessage;
+                                
+                                // Include bonus amount in message if applicable
+                                if (userBonusAmount.compareTo(BigDecimal.ZERO) > 0) {
+                                    userWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via %s. Bonus: %s RWF returned.",
+                                        payerName, paymentAmount.toPlainString(), receiver.getCompanyName(), paymentMethod, userBonusAmount.toPlainString());
+                                } else {
+                                    userWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via %s.",
+                                        payerName, paymentAmount.toPlainString(), receiver.getCompanyName(), paymentMethod);
+                                }
+                                
                                 whatsAppService.sendWhatsApp(userWhatsAppMessage, payerPhoneNormalized);
                                 logger.info("WhatsApp sent to payer {} about payment (status: SUCCESS, method: {}): {}", 
                                     payerPhoneNormalized, paymentMethod, userWhatsAppMessage);
