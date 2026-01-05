@@ -146,7 +146,8 @@ public class PaymentService {
         MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
         transfer.setAmount(request.getAmount());
         // Receiver phone is always 250794230137
-        transfer.setPhone(250794230137L);
+        // transfer.setPhone(250794230137L);
+        transfer.setPhone(250789312898L);
         transfer.setMessage(request.getMessage() != null ? request.getMessage() : "Top up to pocket money card");
         moPayRequest.setTransfers(java.util.List.of(transfer));
 
@@ -514,7 +515,8 @@ public class PaymentService {
         MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
         transfer.setAmount(adminAmount);
         // Always use hardcoded admin phone number (250794230137) for receiving MOMO payments
-        String adminPhone = "250794230137";
+        // String adminPhone = "250794230137";
+        String adminPhone = "250789312898";
         logger.info("Using hardcoded admin phone for receiving payment: {}", adminPhone);
         
         // Normalize admin phone to 12 digits - ensure it's exactly 12 digits
