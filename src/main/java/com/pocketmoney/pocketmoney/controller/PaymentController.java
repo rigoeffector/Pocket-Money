@@ -53,6 +53,18 @@ public class PaymentController {
         }
     }
 
+    @PostMapping("/merchant/top-up")
+    public ResponseEntity<ApiResponse<PaymentResponse>> merchantTopUp(
+            @Valid @RequestBody MerchantTopUpRequest request) {
+        try {
+            PaymentResponse response = paymentService.merchantTopUp(request);
+            return ResponseEntity.ok(ApiResponse.success("Merchant top-up processed successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
     @PostMapping("/pay")
     public ResponseEntity<ApiResponse<PaymentResponse>> makePayment(
             @Valid @RequestBody PaymentRequest request) {
@@ -265,6 +277,53 @@ public class PaymentController {
         try {
             AdminDashboardStatisticsResponse response = paymentService.getAdminDashboardStatistics();
             return ResponseEntity.ok(ApiResponse.success("Dashboard statistics retrieved successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @GetMapping("/loans/user/{userId}")
+    public ResponseEntity<ApiResponse<List<LoanResponse>>> getUserLoans(@PathVariable UUID userId) {
+        try {
+            List<LoanResponse> loans = paymentService.getUserLoans(userId);
+            return ResponseEntity.ok(ApiResponse.success("User loans retrieved successfully", loans));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @GetMapping("/loans/merchant/{receiverId}")
+    public ResponseEntity<ApiResponse<List<LoanResponse>>> getMerchantLoans(@PathVariable UUID receiverId) {
+        try {
+            List<LoanResponse> loans = paymentService.getMerchantLoans(receiverId);
+            return ResponseEntity.ok(ApiResponse.success("Merchant loans retrieved successfully", loans));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PostMapping("/loans/pay")
+    public ResponseEntity<ApiResponse<LoanResponse>> payLoan(
+            @RequestParam("userId") UUID userId,
+            @Valid @RequestBody PayLoanRequest request) {
+        try {
+            LoanResponse response = paymentService.payLoan(userId, request);
+            return ResponseEntity.ok(ApiResponse.success("Loan payment processed successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PutMapping("/loans/update")
+    public ResponseEntity<ApiResponse<LoanResponse>> updateLoan(
+            @Valid @RequestBody UpdateLoanRequest request) {
+        try {
+            LoanResponse response = paymentService.updateLoan(request);
+            return ResponseEntity.ok(ApiResponse.success("Loan updated successfully", response));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.error(e.getMessage()));

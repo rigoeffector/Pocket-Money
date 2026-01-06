@@ -2,6 +2,7 @@ package com.pocketmoney.pocketmoney.dto;
 
 import com.pocketmoney.pocketmoney.entity.TransactionStatus;
 import com.pocketmoney.pocketmoney.entity.TransactionType;
+import com.pocketmoney.pocketmoney.entity.TopUpType;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -20,6 +21,7 @@ public class PaymentResponse {
     private UserResponse user; // Full user information
     private PaymentCategoryResponse paymentCategory; // Category information
     private TransactionType transactionType;
+    private TopUpType topUpType; // LOAN, MOMO, or CASH (only for TOP_UP transactions)
     private BigDecimal amount;
     private String mopayTransactionId;
     private TransactionStatus status;
@@ -40,5 +42,9 @@ public class PaymentResponse {
     private String paymentMethod; // "MOMO" or "NFC_CARD"
     // Commission information
     private List<CommissionInfo> commissionSettings; // Commission phone numbers and percentages for this receiver
+    
+    // Loan information (only for LOAN top-up transactions)
+    private UUID loanId; // Loan ID if this is a LOAN transaction
+    private LoanInfo loanInfo; // Loan details if this is a LOAN transaction
 }
 

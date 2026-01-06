@@ -15,8 +15,11 @@ public class MessagingService {
 
     private static final Logger logger = LoggerFactory.getLogger(MessagingService.class);
 
-    @Value("${whatsapp.api.url:https://server.yunotify.com/api}")
-    private String whatsappApiUrl;
+    @Value("${sms.api.url:https://swiftqom.io/api/prod}")
+    private String smsApiUrl;
+
+    @Value("${sms.api.key:}")
+    private String smsApiKey;
 
     private final RestTemplate restTemplate;
 
@@ -35,8 +38,8 @@ public class MessagingService {
         }
 
         try {
-            // Use WhatsApp API endpoint for SMS as well
-            String url = whatsappApiUrl + "/sms/bulk-json";
+            // Use SwiftQOM API endpoint for SMS
+            String url = smsApiUrl + "/sms/bulk-json";
             
             SmsRequest request = new SmsRequest();
             request.setMessage(message);
@@ -44,11 +47,17 @@ public class MessagingService {
 
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
+            // Add API key to headers
+            if (smsApiKey != null && !smsApiKey.trim().isEmpty()) {
+                headers.set("X-API-Key", smsApiKey);
+                // Also try Authorization header as alternative
+                headers.set("Authorization", "Bearer " + smsApiKey);
+            }
 
             HttpEntity<SmsRequest> entity = new HttpEntity<>(request, headers);
 
-            logger.info("Sending SMS to {} recipient(s) via WhatsApp API", phoneNumbers.size());
-            logger.debug("SMS URL: {}, Message length: {}", url, message.length());
+            logger.info("Sending SMS to {} recipient(s) via SwiftQOM API", phoneNumbers.size());
+            logger.debug("SMS URL: {}, Message length: {}, PhoneNumbers: {}", url, message.length(), phoneNumbers);
             
             ResponseEntity<String> response = restTemplate.exchange(
                     url,
@@ -57,10 +66,10 @@ public class MessagingService {
                     String.class
             );
             
-            logger.info("SMS sent successfully. Response status: {}", response.getStatusCode());
+            logger.info("SMS sent successfully via SwiftQOM. Response status: {}", response.getStatusCode());
             logger.debug("SMS response body: {}", response.getBody());
         } catch (Exception e) {
-            logger.error("Error sending SMS via WhatsApp API: ", e);
+            logger.error("Error sending SMS via SwiftQOM API: ", e);
             // Don't throw exception - SMS failure shouldn't break the main flow
         }
     }

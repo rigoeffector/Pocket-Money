@@ -1,6 +1,8 @@
 package com.pocketmoney.pocketmoney.config;
 
-import com.pocketmoney.pocketmoney.security.JwtAuthenticationFilter;
+import java.util.Arrays;
+import java.util.List;
+
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -15,8 +17,7 @@ import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
-import java.util.Arrays;
-import java.util.List;
+import com.pocketmoney.pocketmoney.security.JwtAuthenticationFilter;
 
 @Configuration
 @EnableWebSecurity
@@ -74,6 +75,11 @@ public class SecurityConfig {
                         .requestMatchers("/api/public/**").permitAll()
                         .requestMatchers("/api/payments/top-up").hasAnyRole("USER", "ADMIN")
                         .requestMatchers("/api/payments/top-up-by-phone").hasAnyRole("USER", "RECEIVER", "ADMIN")
+                        .requestMatchers("/api/payments/merchant/top-up").hasAnyRole("RECEIVER", "ADMIN")
+                        .requestMatchers("/api/payments/loans/user/**").hasAnyRole("USER", "ADMIN")
+                        .requestMatchers("/api/payments/loans/merchant/**").hasAnyRole("RECEIVER", "ADMIN")
+                        .requestMatchers("/api/payments/loans/pay").hasAnyRole("USER", "ADMIN")
+                        .requestMatchers("/api/payments/loans/update").hasAnyRole("RECEIVER", "ADMIN")
                         .requestMatchers("/api/payments/cards/*").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .requestMatchers("/api/payments/bonus-history/**").hasAnyRole("USER", "ADMIN")
                         .requestMatchers("/api/payments/admin-income").hasRole("ADMIN")
@@ -85,7 +91,8 @@ public class SecurityConfig {
                         .requestMatchers("/api/receivers/*/balance-history").hasAnyRole("RECEIVER", "ADMIN")
                         .requestMatchers("/api/receivers/*/wallet").hasAnyRole("RECEIVER", "ADMIN")
                         .requestMatchers("/api/receivers/**").hasAnyRole("RECEIVER", "ADMIN")
-                        .requestMatchers("/api/users/*/nfc-card/**").hasAnyRole("USER", "ADMIN")
+                        .requestMatchers("/api/users/phone/*/nfc-card/**").hasAnyRole("RECEIVER", "ADMIN")
+                        .requestMatchers("/api/users/*/nfc-card/**").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .anyRequest().authenticated()
                 )
                 .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);

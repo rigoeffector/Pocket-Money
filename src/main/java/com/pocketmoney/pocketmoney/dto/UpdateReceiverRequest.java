@@ -39,5 +39,10 @@ public class UpdateReceiverRequest {
 
     @Pattern(regexp = "^[0-9]{10,15}$", message = "Admin phone number must be between 10 and 15 digits")
     private String adminPhone; // Admin phone number for MoPay payment (DEBIT)
+
+    @Pattern(regexp = "^[0-9]{10,15}$", message = "MoMo account phone number must be between 10 and 15 digits")
+    private String momoAccountPhone; // MoMo account phone for receiving top-up payments
+
+    private Boolean isFlexible; // If true, users can pay without checking receiver's remaining balance
 }
 

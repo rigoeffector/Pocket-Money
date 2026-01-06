@@ -28,6 +28,8 @@ public class ReceiverLoginResponse {
     private String description;
     private BigDecimal walletBalance;
     private BigDecimal totalReceived;
+    private Boolean isMainMerchant; // true if main merchant (no parent), false if submerchant
+    private Boolean isFlexible; // true if receiver is in flexible mode (users can pay without checking receiver balance)
     private LocalDateTime lastTransactionDate;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;

@@ -40,6 +40,7 @@ public class AuthResponse {
     private BigDecimal remainingBalance;
     private BigDecimal discountPercentage;
     private BigDecimal userBonusPercentage;
+    private Boolean isFlexible; // If true, receiver is in flexible mode
     private LocalDateTime lastTransactionDate;
     
     // Submerchant relationship info (for RECEIVER role)

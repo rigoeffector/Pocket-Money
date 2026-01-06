@@ -19,6 +19,7 @@ public class ReceiverResponse {
     private String managerName;
     private String username;
     private String receiverPhone;
+    private String momoAccountPhone; // MoMo account phone for receiving top-up payments (if configured)
     private String accountNumber;
     private ReceiverStatus status;
     private String email;
@@ -30,6 +31,7 @@ public class ReceiverResponse {
     private BigDecimal remainingBalance;
     private BigDecimal discountPercentage;
     private BigDecimal userBonusPercentage;
+    private Boolean isFlexible; // true if receiver is in flexible mode (users can pay without checking receiver balance)
     private Integer pendingBalanceAssignments; // Count of pending balance assignment requests
     private List<CommissionInfo> commissionSettings; // Commission phone numbers and percentages
     

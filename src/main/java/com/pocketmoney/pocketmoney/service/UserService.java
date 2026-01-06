@@ -5,12 +5,22 @@ import com.pocketmoney.pocketmoney.dto.CardDetailsResponse;
 import com.pocketmoney.pocketmoney.dto.CreateUserRequest;
 import com.pocketmoney.pocketmoney.dto.NfcCardResponse;
 import com.pocketmoney.pocketmoney.dto.UpdateUserRequest;
+import com.pocketmoney.pocketmoney.dto.MerchantBalanceInfo;
 import com.pocketmoney.pocketmoney.dto.UserLoginResponse;
 import com.pocketmoney.pocketmoney.dto.UserResponse;
+import com.pocketmoney.pocketmoney.entity.MerchantUserBalance;
+import com.pocketmoney.pocketmoney.entity.Receiver;
+import com.pocketmoney.pocketmoney.entity.ReceiverStatus;
 import com.pocketmoney.pocketmoney.entity.User;
 import com.pocketmoney.pocketmoney.entity.UserStatus;
+import com.pocketmoney.pocketmoney.repository.MerchantUserBalanceRepository;
+import com.pocketmoney.pocketmoney.repository.ReceiverRepository;
 import com.pocketmoney.pocketmoney.repository.UserRepository;
 import com.pocketmoney.pocketmoney.util.JwtUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -24,12 +34,19 @@ import java.util.stream.Collectors;
 @Transactional
 public class UserService {
 
+    private static final Logger logger = LoggerFactory.getLogger(UserService.class);
+
     private final UserRepository userRepository;
+    private final MerchantUserBalanceRepository merchantUserBalanceRepository;
+    private final ReceiverRepository receiverRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtUtil jwtUtil;
 
-    public UserService(UserRepository userRepository, PasswordEncoder passwordEncoder, JwtUtil jwtUtil) {
+    public UserService(UserRepository userRepository, MerchantUserBalanceRepository merchantUserBalanceRepository,
+                      ReceiverRepository receiverRepository, PasswordEncoder passwordEncoder, JwtUtil jwtUtil) {
         this.userRepository = userRepository;
+        this.merchantUserBalanceRepository = merchantUserBalanceRepository;
+        this.receiverRepository = receiverRepository;
         this.passwordEncoder = passwordEncoder;
         this.jwtUtil = jwtUtil;
     }
@@ -344,6 +361,209 @@ public class UserService {
         return response;
     }
 
+    /**
+     * Assign NFC card to user by phone number (for flexible merchants only)
+     * This endpoint links the phone number with the card and creates/updates merchant balance
+     */
+    public NfcCardResponse assignNfcCardByPhoneNumber(String phoneNumber, AssignNfcCardRequest request) {
+        // Get current authenticated receiver from security context
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication == null || !authentication.isAuthenticated()) {
+            throw new RuntimeException("User not authenticated");
+        }
+        
+        String currentUsername = authentication.getName();
+        Receiver merchant = receiverRepository.findByUsername(currentUsername)
+                .orElseThrow(() -> new RuntimeException("Merchant not found with username: " + currentUsername));
+        
+        // Verify merchant is a main merchant (not a submerchant)
+        if (merchant.getParentReceiver() != null) {
+            throw new RuntimeException("Only main merchants can assign NFC cards. Your merchant account is a submerchant.");
+        }
+        
+        // Verify merchant is flexible (only flexible merchants can use this endpoint)
+        boolean isFlexible = merchant.getIsFlexible() != null && merchant.getIsFlexible();
+        if (!isFlexible) {
+            throw new RuntimeException(String.format(
+                "Only flexible merchants can assign NFC cards by phone number. Please contact admin to enable flexible mode for your merchant account. Merchant ID: %s, Merchant Name: %s", 
+                merchant.getId(), merchant.getCompanyName()));
+        }
+        
+        // Verify merchant is active
+        if (merchant.getStatus() != ReceiverStatus.ACTIVE) {
+            throw new RuntimeException("Merchant account is not active. Status: " + merchant.getStatus());
+        }
+        
+        // Normalize phone number
+        String normalizedPhone = normalizePhoneTo12Digits(phoneNumber);
+        
+        // Find user by phone number - try multiple formats
+        User user = userRepository.findByPhoneNumber(normalizedPhone).orElse(null);
+        
+        // If not found with 12-digit format, try with just digits
+        if (user == null) {
+            String phoneDigitsOnly = phoneNumber.replaceAll("[^0-9]", "");
+            user = userRepository.findByPhoneNumber(phoneDigitsOnly).orElse(null);
+        }
+        
+        // If still not found, try with 0-prefixed format
+        if (user == null) {
+            String phoneDigitsOnly = phoneNumber.replaceAll("[^0-9]", "");
+            if (!phoneDigitsOnly.startsWith("0") && phoneDigitsOnly.length() == 9) {
+                user = userRepository.findByPhoneNumber("0" + phoneDigitsOnly).orElse(null);
+            }
+        }
+        
+        // If still not found, try extracting last 9 digits and adding 0 prefix
+        if (user == null) {
+            String phoneDigitsOnly = phoneNumber.replaceAll("[^0-9]", "");
+            if (phoneDigitsOnly.length() >= 9) {
+                String last9 = phoneDigitsOnly.substring(phoneDigitsOnly.length() - 9);
+                user = userRepository.findByPhoneNumber("0" + last9).orElse(null);
+            }
+        }
+        
+        // If user doesn't exist, create a new user with minimal information
+        if (user == null) {
+            logger.info("User not found with phone number: {}. Creating new user automatically.", phoneNumber);
+            String phoneDigitsOnly = phoneNumber.replaceAll("[^0-9]", "");
+            User newUser = new User();
+            newUser.setFullNames("User " + phoneDigitsOnly);
+            newUser.setPhoneNumber(normalizedPhone);
+            newUser.setPin(passwordEncoder.encode("0000")); // Default PIN, will be updated below
+            newUser.setIsAssignedNfcCard(false);
+            newUser.setAmountOnCard(BigDecimal.ZERO);
+            newUser.setAmountRemaining(BigDecimal.ZERO);
+            newUser.setStatus(UserStatus.ACTIVE);
+            user = userRepository.save(newUser);
+            logger.info("Created new user with ID: {}, Phone: {}", user.getId(), normalizedPhone);
+        }
+        
+        // Check if user is active
+        if (user.getStatus() != UserStatus.ACTIVE) {
+            throw new RuntimeException("User account is not active. Status: " + user.getStatus());
+        }
+        
+        // Check if the NFC card ID is already assigned to a different user (different phone number)
+        if (userRepository.existsByNfcCardId(request.getNfcCardId())) {
+            User existingUser = userRepository.findByNfcCardId(request.getNfcCardId())
+                .orElse(null);
+            
+            if (existingUser != null) {
+                // Check if it's already assigned to this user (same user, just updating PIN)
+                if (existingUser.getId().equals(user.getId())) {
+                    // Same user, same card - just updating PIN, this is allowed
+                    logger.info("User {} already has NFC card {} assigned. Updating PIN only.", 
+                        user.getPhoneNumber(), request.getNfcCardId());
+                } else {
+                    // Card is assigned to a different user - throw error
+                    throw new RuntimeException(String.format(
+                        "NFC card ID '%s' is already assigned to another user with phone number '%s'. " +
+                        "Each NFC card can only be assigned to one phone number. " +
+                        "Please use a different card or contact the user with phone number '%s' to unassign the card first.",
+                        request.getNfcCardId(), existingUser.getPhoneNumber(), existingUser.getPhoneNumber()));
+                }
+            }
+        }
+        
+        // Handle NFC card replacement logic
+        // If user already has a different NFC card assigned, unassign it first (only if new card is not assigned to someone else)
+        if (user.getNfcCardId() != null && !user.getNfcCardId().equals(request.getNfcCardId())) {
+            logger.info("User {} already has NFC card {} assigned. Replacing with new card {}.", 
+                user.getPhoneNumber(), user.getNfcCardId(), request.getNfcCardId());
+            // The old card will be automatically unassigned when we set the new one
+        }
+        
+        // Assign NFC card (or replace existing one)
+        user.setNfcCardId(request.getNfcCardId());
+        user.setIsAssignedNfcCard(true);
+        
+        // Create/Update PIN
+        user.setPin(passwordEncoder.encode(request.getPin()));
+        
+        User savedUser = userRepository.save(user);
+        
+        // Create/Update MerchantUserBalance to link the balance
+        MerchantUserBalance merchantBalance = merchantUserBalanceRepository
+                .findByUserIdAndReceiverId(user.getId(), merchant.getId())
+                .orElse(null);
+        
+        if (merchantBalance == null) {
+            // Create new merchant balance record
+            merchantBalance = new MerchantUserBalance();
+            merchantBalance.setUser(user);
+            merchantBalance.setReceiver(merchant);
+            merchantBalance.setBalance(BigDecimal.ZERO);
+            merchantBalance.setTotalToppedUp(BigDecimal.ZERO);
+            merchantUserBalanceRepository.save(merchantBalance);
+        }
+        // If merchant balance already exists, we keep it as is (don't reset it)
+        
+        NfcCardResponse response = new NfcCardResponse();
+        response.setUserId(savedUser.getId());
+        response.setFullNames(savedUser.getFullNames());
+        response.setPhoneNumber(savedUser.getPhoneNumber());
+        response.setIsAssignedNfcCard(savedUser.getIsAssignedNfcCard());
+        response.setNfcCardId(savedUser.getNfcCardId());
+        return response;
+    }
+    
+    /**
+     * Normalize phone number to 12 digits (250XXXXXXXXX format)
+     */
+    private String normalizePhoneTo12Digits(String phone) {
+        if (phone == null || phone.trim().isEmpty()) {
+            throw new RuntimeException("Phone number cannot be null or empty");
+        }
+        
+        String cleaned = phone.replaceAll("[^0-9]", "");
+        
+        // If exactly 12 digits and starts with 250, return as is
+        if (cleaned.length() == 12 && cleaned.startsWith("250")) {
+            return cleaned;
+        }
+        
+        // If starts with 250, extract the 9-digit number part
+        if (cleaned.startsWith("250")) {
+            String without250 = cleaned.substring(3);
+            // If we have exactly 9 digits after 250, we're good
+            if (without250.length() == 9) {
+                return "250" + without250;
+            }
+            // If more than 9 digits, take the last 9
+            if (without250.length() > 9) {
+                return "250" + without250.substring(without250.length() - 9);
+            }
+        }
+        
+        // If 9 digits and starts with 0, remove 0 and add 250
+        if (cleaned.length() == 9 && cleaned.startsWith("0")) {
+            return "250" + cleaned.substring(1);
+        }
+        
+        // If 9 digits and doesn't start with 0, add 250
+        if (cleaned.length() == 9) {
+            return "250" + cleaned;
+        }
+        
+        // If 10 digits and starts with 0, remove 0 and add 250
+        if (cleaned.length() == 10 && cleaned.startsWith("0")) {
+            return "250" + cleaned.substring(1);
+        }
+        
+        // If 10 digits and doesn't start with 0, take last 9 and add 250
+        if (cleaned.length() == 10) {
+            return "250" + cleaned.substring(1);
+        }
+        
+        // If 12 digits but doesn't start with 250, take last 9 and add 250
+        if (cleaned.length() >= 12) {
+            return "250" + cleaned.substring(cleaned.length() - 9);
+        }
+        
+        throw new RuntimeException("Invalid phone number format: " + phone);
+    }
+
     private UserResponse mapToResponse(User user) {
         UserResponse response = new UserResponse();
         response.setId(user.getId());
@@ -354,6 +574,21 @@ public class UserService {
         response.setNfcCardId(user.getNfcCardId());
         response.setAmountOnCard(user.getAmountOnCard());
         response.setAmountRemaining(user.getAmountRemaining());
+        
+        // Get merchant-specific balances
+        List<MerchantUserBalance> merchantBalances = merchantUserBalanceRepository.findByUserId(user.getId());
+        List<MerchantBalanceInfo> merchantBalanceInfos = merchantBalances.stream()
+                .map(mb -> {
+                    MerchantBalanceInfo info = new MerchantBalanceInfo();
+                    info.setReceiverId(mb.getReceiver().getId());
+                    info.setReceiverCompanyName(mb.getReceiver().getCompanyName());
+                    info.setBalance(mb.getBalance());
+                    info.setTotalToppedUp(mb.getTotalToppedUp());
+                    return info;
+                })
+                .collect(Collectors.toList());
+        response.setMerchantBalances(merchantBalanceInfos);
+        
         response.setStatus(user.getStatus());
         response.setLastTransactionDate(user.getLastTransactionDate());
         response.setCreatedAt(user.getCreatedAt());

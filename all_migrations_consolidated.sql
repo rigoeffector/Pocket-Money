@@ -1,0 +1,227 @@
+-- ===================================================================
+-- Consolidated Database Migration Script for Remote Server
+-- This script includes ALL migrations in the correct order
+-- Run this script on the production PostgreSQL database
+-- ===================================================================
+-- Database: pocketmoney_db
+-- Run as: postgres user or database owner
+-- ===================================================================
+
+BEGIN;
+
+-- ===================================================================
+-- 1. Add balance and discount columns to receivers table
+-- ===================================================================
+ALTER TABLE receivers 
+    ADD COLUMN IF NOT EXISTS assigned_balance NUMERIC(19, 2) NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS remaining_balance NUMERIC(19, 2) NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS discount_percentage NUMERIC(5, 2) DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS user_bonus_percentage NUMERIC(5, 2) DEFAULT 0;
+
+COMMENT ON COLUMN receivers.assigned_balance IS 'Total balance assigned to receiver by admin';
+COMMENT ON COLUMN receivers.remaining_balance IS 'Balance remaining after payments and discounts';
+COMMENT ON COLUMN receivers.discount_percentage IS 'Discount percentage (0-100) applied to payments';
+COMMENT ON COLUMN receivers.user_bonus_percentage IS 'User bonus percentage (0-100) credited back to users';
+
+-- ===================================================================
+-- 2. Add discount, bonus, and balance tracking columns to transactions table
+-- ===================================================================
+ALTER TABLE transactions
+    ADD COLUMN IF NOT EXISTS discount_amount NUMERIC(19, 2),
+    ADD COLUMN IF NOT EXISTS user_bonus_amount NUMERIC(19, 2),
+    ADD COLUMN IF NOT EXISTS receiver_balance_before NUMERIC(19, 2),
+    ADD COLUMN IF NOT EXISTS receiver_balance_after NUMERIC(19, 2),
+    ADD COLUMN IF NOT EXISTS admin_income_amount NUMERIC(19, 2);
+
+COMMENT ON COLUMN transactions.discount_amount IS 'Discount amount applied to this transaction';
+COMMENT ON COLUMN transactions.user_bonus_amount IS 'Bonus amount credited back to user for this transaction';
+COMMENT ON COLUMN transactions.receiver_balance_before IS 'Receiver remaining balance before this transaction';
+COMMENT ON COLUMN transactions.receiver_balance_after IS 'Receiver remaining balance after this transaction';
+COMMENT ON COLUMN transactions.admin_income_amount IS 'Amount that goes to admin as sales/income (e.g., 8% when total charge is 10% and user bonus is 2%)';
+
+-- Create index for faster queries by admin income
+CREATE INDEX IF NOT EXISTS idx_transactions_admin_income ON transactions(admin_income_amount) WHERE admin_income_amount IS NOT NULL;
+
+-- ===================================================================
+-- 3. Create balance_assignment_history table
+-- ===================================================================
+CREATE TABLE IF NOT EXISTS balance_assignment_history (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    receiver_id UUID NOT NULL REFERENCES receivers(id) ON DELETE CASCADE,
+    assigned_balance NUMERIC(19, 2) NOT NULL,
+    previous_assigned_balance NUMERIC(19, 2),
+    balance_difference NUMERIC(19, 2),
+    assigned_by VARCHAR(255),
+    notes VARCHAR(1000),
+    status VARCHAR(50) NOT NULL DEFAULT 'PENDING',
+    approved_by VARCHAR(255),
+    approved_at TIMESTAMP,
+    mopay_transaction_id VARCHAR(500),
+    admin_phone VARCHAR(20),
+    receiver_phone VARCHAR(20),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create indexes for faster queries
+CREATE INDEX IF NOT EXISTS idx_balance_assignment_history_receiver_id ON balance_assignment_history(receiver_id);
+CREATE INDEX IF NOT EXISTS idx_balance_assignment_history_created_at ON balance_assignment_history(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_balance_assignment_history_status ON balance_assignment_history(status);
+
+COMMENT ON TABLE balance_assignment_history IS 'Tracks history of balance assignments to receivers';
+COMMENT ON COLUMN balance_assignment_history.receiver_id IS 'Reference to receiver who received the balance';
+COMMENT ON COLUMN balance_assignment_history.assigned_balance IS 'New assigned balance amount';
+COMMENT ON COLUMN balance_assignment_history.previous_assigned_balance IS 'Previous assigned balance before this assignment';
+COMMENT ON COLUMN balance_assignment_history.balance_difference IS 'Difference between new and previous balance';
+COMMENT ON COLUMN balance_assignment_history.assigned_by IS 'Username or identifier of who assigned the balance';
+COMMENT ON COLUMN balance_assignment_history.notes IS 'Optional notes about the balance assignment';
+COMMENT ON COLUMN balance_assignment_history.status IS 'Status of balance assignment: PENDING, APPROVED, or REJECTED';
+COMMENT ON COLUMN balance_assignment_history.approved_by IS 'Username or identifier of who approved/rejected the balance assignment';
+COMMENT ON COLUMN balance_assignment_history.approved_at IS 'Timestamp when the balance assignment was approved or rejected';
+COMMENT ON COLUMN balance_assignment_history.mopay_transaction_id IS 'MoPay transaction ID for balance assignment payment';
+
+-- ===================================================================
+-- 4. Add parent_receiver_id column to receivers table for submerchant relationships
+-- ===================================================================
+ALTER TABLE receivers ADD COLUMN IF NOT EXISTS parent_receiver_id UUID;
+
+-- Add foreign key constraint (drop first if exists to avoid errors)
+DO $$ 
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_receivers_parent_receiver') THEN
+        ALTER TABLE receivers DROP CONSTRAINT fk_receivers_parent_receiver;
+    END IF;
+END $$;
+
+ALTER TABLE receivers 
+ADD CONSTRAINT fk_receivers_parent_receiver 
+FOREIGN KEY (parent_receiver_id) 
+REFERENCES receivers(id) 
+ON DELETE SET NULL;
+
+-- Add index for better query performance
+CREATE INDEX IF NOT EXISTS idx_receivers_parent_receiver_id ON receivers(parent_receiver_id);
+
+COMMENT ON COLUMN receivers.parent_receiver_id IS 'Reference to parent receiver for submerchant relationships. NULL if main merchant.';
+
+-- ===================================================================
+-- 5. Make user_id nullable in transactions table for guest MOMO payments
+-- ===================================================================
+DO $$ 
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'transactions' 
+        AND column_name = 'user_id' 
+        AND is_nullable = 'NO'
+    ) THEN
+        ALTER TABLE transactions ALTER COLUMN user_id DROP NOT NULL;
+    END IF;
+END $$;
+
+COMMENT ON COLUMN transactions.user_id IS 'Reference to user who made the payment. NULL for guest MOMO payments.';
+
+-- ===================================================================
+-- 6. Add merchant-specific top-up balance support
+-- ===================================================================
+-- Add momo_account_phone column to receivers table
+ALTER TABLE receivers 
+ADD COLUMN IF NOT EXISTS momo_account_phone VARCHAR(20);
+
+-- Create merchant_user_balances table to track merchant-specific balances for users
+CREATE TABLE IF NOT EXISTS merchant_user_balances (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    receiver_id UUID NOT NULL REFERENCES receivers(id) ON DELETE CASCADE,
+    balance DECIMAL(19, 2) NOT NULL DEFAULT 0.00,
+    total_topped_up DECIMAL(19, 2) NOT NULL DEFAULT 0.00,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, receiver_id)
+);
+
+-- Create indexes for faster lookups
+CREATE INDEX IF NOT EXISTS idx_merchant_user_balances_user_id ON merchant_user_balances(user_id);
+CREATE INDEX IF NOT EXISTS idx_merchant_user_balances_receiver_id ON merchant_user_balances(receiver_id);
+CREATE INDEX IF NOT EXISTS idx_merchant_user_balances_user_receiver ON merchant_user_balances(user_id, receiver_id);
+
+COMMENT ON TABLE merchant_user_balances IS 'Stores merchant-specific balances for users. When a user tops up from a specific merchant, the balance is stored here and can only be used for payments to that merchant.';
+
+-- Add top_up_type column to transactions table
+ALTER TABLE transactions 
+ADD COLUMN IF NOT EXISTS top_up_type VARCHAR(20);
+
+COMMENT ON COLUMN transactions.top_up_type IS 'Type of top-up: MOMO, CASH, or LOAN (only for TOP_UP transactions)';
+
+-- ===================================================================
+-- 7. Add loans table for tracking loan transactions
+-- ===================================================================
+CREATE TABLE IF NOT EXISTS loans (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    receiver_id UUID NOT NULL REFERENCES receivers(id) ON DELETE CASCADE,
+    transaction_id UUID NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+    loan_amount DECIMAL(19, 2) NOT NULL,
+    paid_amount DECIMAL(19, 2) NOT NULL DEFAULT 0.00,
+    remaining_amount DECIMAL(19, 2) NOT NULL,
+    status VARCHAR(50) NOT NULL DEFAULT 'PENDING',
+    paid_at TIMESTAMP,
+    last_payment_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Fix loans status constraint if needed
+DO $$ 
+BEGIN
+    -- Drop existing constraint if it exists
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'loans_status_check') THEN
+        ALTER TABLE loans DROP CONSTRAINT loans_status_check;
+    END IF;
+    
+    -- Add new constraint with correct values
+    ALTER TABLE loans 
+    ADD CONSTRAINT loans_status_check 
+    CHECK (status IN ('PENDING', 'PARTIALLY_PAID', 'COMPLETED'));
+END $$;
+
+-- Create indexes for faster lookups
+CREATE INDEX IF NOT EXISTS idx_loans_user_id ON loans(user_id);
+CREATE INDEX IF NOT EXISTS idx_loans_receiver_id ON loans(receiver_id);
+CREATE INDEX IF NOT EXISTS idx_loans_transaction_id ON loans(transaction_id);
+CREATE INDEX IF NOT EXISTS idx_loans_status ON loans(status);
+CREATE INDEX IF NOT EXISTS idx_loans_user_receiver ON loans(user_id, receiver_id);
+
+COMMENT ON TABLE loans IS 'Tracks loans given to users by merchants. Loans are created when a merchant does a LOAN top-up for a user.';
+COMMENT ON COLUMN loans.loan_amount IS 'Total loan amount given to the user';
+COMMENT ON COLUMN loans.paid_amount IS 'Amount paid back so far';
+COMMENT ON COLUMN loans.remaining_amount IS 'Remaining amount to be paid back';
+COMMENT ON COLUMN loans.status IS 'Loan status: PENDING, PARTIALLY_PAID, or COMPLETED';
+COMMENT ON COLUMN loans.paid_at IS 'Timestamp when the loan was fully paid';
+COMMENT ON COLUMN loans.last_payment_at IS 'Timestamp when the last payment was made';
+
+-- ===================================================================
+-- 8. Add is_flexible field to receivers table
+-- ===================================================================
+ALTER TABLE receivers
+ADD COLUMN IF NOT EXISTS is_flexible BOOLEAN NOT NULL DEFAULT false;
+
+COMMENT ON COLUMN receivers.is_flexible IS 'If true, users can pay without checking receiver remaining balance. If false, both user balance and receiver balance are checked.';
+
+-- Set all existing receivers to NON-FLEXIBLE mode (false)
+UPDATE receivers
+SET is_flexible = false
+WHERE is_flexible IS NULL;
+
+COMMIT;
+
+-- ===================================================================
+-- Migration Complete!
+-- ===================================================================
+-- Verify the changes by running:
+--   \d receivers
+--   \d transactions  
+--   \d balance_assignment_history
+--   \d merchant_user_balances
+--   \d loans
+-- ===================================================================
+

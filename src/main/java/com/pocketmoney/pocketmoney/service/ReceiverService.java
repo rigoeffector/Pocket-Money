@@ -22,6 +22,8 @@ import com.pocketmoney.pocketmoney.repository.BalanceAssignmentHistoryRepository
 import com.pocketmoney.pocketmoney.repository.ReceiverRepository;
 import com.pocketmoney.pocketmoney.repository.TransactionRepository;
 import com.pocketmoney.pocketmoney.repository.PaymentCommissionSettingRepository;
+import com.pocketmoney.pocketmoney.repository.MerchantUserBalanceRepository;
+import com.pocketmoney.pocketmoney.entity.MerchantUserBalance;
 import com.pocketmoney.pocketmoney.entity.PaymentCommissionSetting;
 import com.pocketmoney.pocketmoney.util.JwtUtil;
 import jakarta.persistence.EntityManager;
@@ -51,6 +53,7 @@ public class ReceiverService {
     private final TransactionRepository transactionRepository;
     private final BalanceAssignmentHistoryRepository balanceAssignmentHistoryRepository;
     private final PaymentCommissionSettingRepository paymentCommissionSettingRepository;
+    private final MerchantUserBalanceRepository merchantUserBalanceRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtUtil jwtUtil;
     private final MoPayService moPayService;
@@ -61,12 +64,14 @@ public class ReceiverService {
     public ReceiverService(ReceiverRepository receiverRepository, TransactionRepository transactionRepository,
                           BalanceAssignmentHistoryRepository balanceAssignmentHistoryRepository,
                           PaymentCommissionSettingRepository paymentCommissionSettingRepository,
+                          MerchantUserBalanceRepository merchantUserBalanceRepository,
                           PasswordEncoder passwordEncoder, JwtUtil jwtUtil, MoPayService moPayService,
                           EntityManager entityManager, MessagingService messagingService, WhatsAppService whatsAppService) {
         this.receiverRepository = receiverRepository;
         this.transactionRepository = transactionRepository;
         this.balanceAssignmentHistoryRepository = balanceAssignmentHistoryRepository;
         this.paymentCommissionSettingRepository = paymentCommissionSettingRepository;
+        this.merchantUserBalanceRepository = merchantUserBalanceRepository;
         this.passwordEncoder = passwordEncoder;
         this.jwtUtil = jwtUtil;
         this.moPayService = moPayService;
@@ -114,6 +119,7 @@ public class ReceiverService {
         receiver.setEmail(email);
         receiver.setAddress(request.getAddress());
         receiver.setDescription(request.getDescription());
+        receiver.setIsFlexible(request.getIsFlexible() != null ? request.getIsFlexible() : false);
 
         Receiver savedReceiver = receiverRepository.save(receiver);
         return mapToResponse(savedReceiver);
@@ -287,6 +293,33 @@ public class ReceiverService {
         }
         if (request.getDescription() != null) {
             receiver.setDescription(request.getDescription());
+        }
+        
+        // Update MoMo account phone if provided
+        if (request.getMomoAccountPhone() != null) {
+            // Normalize phone number: remove non-digit characters
+            String normalizedMomoPhone = request.getMomoAccountPhone().replaceAll("[^0-9]", "");
+            receiver.setMomoAccountPhone(normalizedMomoPhone);
+        }
+        
+        // Update flexible mode if provided
+        if (request.getIsFlexible() != null) {
+            receiver.setIsFlexible(request.getIsFlexible());
+            
+            // If main merchant is being set to flexible, automatically set all submerchants to flexible as well
+            if (request.getIsFlexible() && receiver.getParentReceiver() == null) {
+                // This is a main merchant being set to flexible
+                List<Receiver> submerchants = receiverRepository.findByParentReceiverId(receiver.getId());
+                logger.info("Main merchant '{}' (ID: {}) is being set to flexible. Updating {} submerchants to flexible as well.", 
+                    receiver.getCompanyName(), receiver.getId(), submerchants.size());
+                
+                for (Receiver submerchant : submerchants) {
+                    submerchant.setIsFlexible(true);
+                    receiverRepository.save(submerchant);
+                    logger.info("Submerchant '{}' (ID: {}) set to flexible", 
+                        submerchant.getCompanyName(), submerchant.getId());
+                }
+            }
         }
 
         // Update balance and discount settings
@@ -565,10 +598,12 @@ public class ReceiverService {
         logger.info("Transaction ID present: {}", transactionId != null);
         
         if (paymentInitiated && transactionId != null) {
-            // Successfully initiated - store transaction ID
-            history.setMopayTransactionId(transactionId);
+            // Successfully initiated - generate custom transaction ID starting with MOPAY
+            String customTransactionId = generateMopayTransactionId();
+            history.setMopayTransactionId(customTransactionId);
             logger.info("✅ MoPay payment initiated successfully!");
-            logger.info("   Transaction ID: {}", transactionId);
+            logger.info("   MoPay Transaction ID: {}", transactionId);
+            logger.info("   Custom Transaction ID: {}", customTransactionId);
             logger.info("   Payment amount: {}", newAssignedBalance);
             logger.info("   Balance difference: {}", balanceDifference);
         } else {
@@ -689,6 +724,9 @@ public class ReceiverService {
         response.setDescription(receiver.getDescription());
         response.setWalletBalance(receiver.getWalletBalance());
         response.setTotalReceived(receiver.getTotalReceived());
+        // Check if main merchant (no parent receiver)
+        response.setIsMainMerchant(receiver.getParentReceiver() == null);
+        response.setIsFlexible(receiver.getIsFlexible() != null ? receiver.getIsFlexible() : false);
         response.setLastTransactionDate(receiver.getLastTransactionDate());
         response.setCreatedAt(receiver.getCreatedAt());
         response.setUpdatedAt(receiver.getUpdatedAt());
@@ -839,6 +877,7 @@ public class ReceiverService {
     private ReceiverAnalyticsResponse.RecentTransaction mapToAnalyticsRecentTransaction(Transaction transaction, UUID receiverId) {
         ReceiverAnalyticsResponse.RecentTransaction recent = new ReceiverAnalyticsResponse.RecentTransaction();
         recent.setTransactionId(transaction.getId());
+        recent.setMopayTransactionId(transaction.getMopayTransactionId()); // POCHI transaction ID
         
         // Handle null user for guest MOMO payments
         if (transaction.getUser() != null) {
@@ -883,6 +922,7 @@ public class ReceiverService {
         response.setManagerName(receiver.getManagerName());
         response.setUsername(receiver.getUsername());
         response.setReceiverPhone(receiver.getReceiverPhone());
+        response.setMomoAccountPhone(receiver.getMomoAccountPhone()); // MoMo account phone (if configured)
         response.setAccountNumber(receiver.getAccountNumber());
         response.setStatus(receiver.getStatus());
         response.setEmail(receiver.getEmail());
@@ -901,6 +941,7 @@ public class ReceiverService {
         response.setRemainingBalance(balanceOwner.getRemainingBalance()); // Shared remaining balance
         response.setDiscountPercentage(balanceOwner.getDiscountPercentage()); // Use balance owner's percentages
         response.setUserBonusPercentage(balanceOwner.getUserBonusPercentage()); // Use balance owner's percentages
+        response.setIsFlexible(receiver.getIsFlexible() != null ? receiver.getIsFlexible() : false); // Flexible mode flag
         
         // Get commission settings for this receiver
         List<PaymentCommissionSetting> commissionSettings = paymentCommissionSettingRepository.findByReceiverIdAndIsActiveTrue(receiver.getId());
@@ -1314,8 +1355,39 @@ public class ReceiverService {
         
         // Wallet information - use shared balance if submerchant (parent's balance)
         Receiver balanceOwner = receiver.getParentReceiver() != null ? receiver.getParentReceiver() : receiver;
-        response.setWalletBalance(balanceOwner.getWalletBalance()); // Shared wallet balance
-        response.setTotalReceived(balanceOwner.getTotalReceived()); // Shared total received
+        
+        // Check if balance owner is in flexible mode
+        boolean isFlexible = balanceOwner.getIsFlexible() != null && balanceOwner.getIsFlexible();
+        
+        if (isFlexible) {
+            // FLEXIBLE MODE: Calculate walletBalance as total topped up amount
+            // Sum all totalToppedUp from MerchantUserBalance for this receiver (and submerchants if main merchant)
+            BigDecimal totalToppedUp = BigDecimal.ZERO;
+            
+            // Get all MerchantUserBalance records for this receiver
+            List<MerchantUserBalance> merchantBalances = merchantUserBalanceRepository.findByReceiverId(balanceOwner.getId());
+            for (MerchantUserBalance mb : merchantBalances) {
+                totalToppedUp = totalToppedUp.add(mb.getTotalToppedUp() != null ? mb.getTotalToppedUp() : BigDecimal.ZERO);
+            }
+            
+            // If main merchant, also include submerchants' topped up amounts
+            if (receiver.getParentReceiver() == null) {
+                List<Receiver> submerchants = receiverRepository.findByParentReceiverId(receiverId);
+                for (Receiver submerchant : submerchants) {
+                    List<MerchantUserBalance> submerchantBalances = merchantUserBalanceRepository.findByReceiverId(submerchant.getId());
+                    for (MerchantUserBalance mb : submerchantBalances) {
+                        totalToppedUp = totalToppedUp.add(mb.getTotalToppedUp() != null ? mb.getTotalToppedUp() : BigDecimal.ZERO);
+                    }
+                }
+            }
+            
+            response.setWalletBalance(totalToppedUp);
+            logger.info("Flexible mode: walletBalance set to total topped up: {}", totalToppedUp);
+        } else {
+            // NON-FLEXIBLE MODE: Use existing wallet balance
+            response.setWalletBalance(balanceOwner.getWalletBalance());
+        }
+        
         response.setAssignedBalance(balanceOwner.getAssignedBalance()); // Shared assigned balance
         response.setRemainingBalance(balanceOwner.getRemainingBalance()); // Shared remaining balance
         response.setDiscountPercentage(balanceOwner.getDiscountPercentage()); // Use balance owner's percentages
@@ -1375,7 +1447,17 @@ public class ReceiverService {
             }
             
             response.setTotalTransactions(totalTransactions != null ? totalTransactions : 0L);
-            response.setTotalRevenue(totalRevenue != null ? totalRevenue : BigDecimal.ZERO);
+            
+            // In flexible mode, totalReceived and totalRevenue are the same (sum of payments)
+            if (isFlexible) {
+                response.setTotalReceived(totalRevenue != null ? totalRevenue : BigDecimal.ZERO);
+                response.setTotalRevenue(totalRevenue != null ? totalRevenue : BigDecimal.ZERO);
+                logger.info("Flexible mode (main merchant): totalReceived and totalRevenue set to sum of payments: {}", totalRevenue);
+            } else {
+                response.setTotalReceived(balanceOwner.getTotalReceived());
+                response.setTotalRevenue(totalRevenue != null ? totalRevenue : BigDecimal.ZERO);
+            }
+            
             response.setTotalCustomers(totalCustomers != null ? totalCustomers : 0L);
             
             // Get all transactions (main + all submerchants) for recent transactions
@@ -1405,7 +1487,17 @@ public class ReceiverService {
             Long totalCustomers = transactionRepository.countDistinctUsersByReceiver(receiverId);
             
             response.setTotalTransactions(totalTransactions != null ? totalTransactions : 0L);
-            response.setTotalRevenue(totalRevenue != null ? totalRevenue : BigDecimal.ZERO);
+            
+            // In flexible mode, totalReceived and totalRevenue are the same (sum of payments)
+            if (isFlexible) {
+                response.setTotalReceived(totalRevenue != null ? totalRevenue : BigDecimal.ZERO);
+                response.setTotalRevenue(totalRevenue != null ? totalRevenue : BigDecimal.ZERO);
+                logger.info("Flexible mode (submerchant): totalReceived and totalRevenue set to sum of payments: {}", totalRevenue);
+            } else {
+                response.setTotalReceived(balanceOwner.getTotalReceived());
+                response.setTotalRevenue(totalRevenue != null ? totalRevenue : BigDecimal.ZERO);
+            }
+            
             response.setTotalCustomers(totalCustomers != null ? totalCustomers : 0L);
             
             // Get only this submerchant's recent transactions
@@ -1461,8 +1553,22 @@ public class ReceiverService {
         Long mainCustomers = transactionRepository.countDistinctUsersByReceiver(mainReceiverId);
         
         Receiver mainReceiver = receiverRepository.findById(mainReceiverId).orElseThrow();
-        BigDecimal mainWalletBalance = mainReceiver.getWalletBalance();
+        boolean isFlexible = mainReceiver.getIsFlexible() != null && mainReceiver.getIsFlexible();
+        
+        BigDecimal mainWalletBalance;
         BigDecimal mainRemainingBalance = mainReceiver.getRemainingBalance();
+        
+        if (isFlexible) {
+            // FLEXIBLE MODE: Calculate walletBalance as total topped up amount
+            BigDecimal totalToppedUp = BigDecimal.ZERO;
+            List<MerchantUserBalance> merchantBalances = merchantUserBalanceRepository.findByReceiverId(mainReceiverId);
+            for (MerchantUserBalance mb : merchantBalances) {
+                totalToppedUp = totalToppedUp.add(mb.getTotalToppedUp() != null ? mb.getTotalToppedUp() : BigDecimal.ZERO);
+            }
+            mainWalletBalance = totalToppedUp;
+        } else {
+            mainWalletBalance = mainReceiver.getWalletBalance();
+        }
         
         // Aggregate submerchant stats
         long totalTransactions = mainTransactions != null ? mainTransactions : 0L;
@@ -1478,7 +1584,21 @@ public class ReceiverService {
             
             totalTransactions += (subTransactions != null ? subTransactions : 0L);
             totalRevenue = totalRevenue.add(subRevenue != null ? subRevenue : BigDecimal.ZERO);
-            combinedWalletBalance = combinedWalletBalance.add(submerchant.getWalletBalance());
+            
+            // For flexible mode, calculate submerchant wallet balance as total topped up
+            BigDecimal subWalletBalance;
+            if (isFlexible) {
+                BigDecimal subTotalToppedUp = BigDecimal.ZERO;
+                List<MerchantUserBalance> subMerchantBalances = merchantUserBalanceRepository.findByReceiverId(submerchant.getId());
+                for (MerchantUserBalance mb : subMerchantBalances) {
+                    subTotalToppedUp = subTotalToppedUp.add(mb.getTotalToppedUp() != null ? mb.getTotalToppedUp() : BigDecimal.ZERO);
+                }
+                subWalletBalance = subTotalToppedUp;
+            } else {
+                subWalletBalance = submerchant.getWalletBalance();
+            }
+            
+            combinedWalletBalance = combinedWalletBalance.add(subWalletBalance);
             combinedRemainingBalance = combinedRemainingBalance.add(submerchant.getRemainingBalance());
             
             // For customers, we need distinct count - this is approximate
@@ -1498,6 +1618,7 @@ public class ReceiverService {
     private ReceiverDashboardResponse.RecentTransaction mapToRecentTransaction(Transaction transaction, UUID mainReceiverId) {
         ReceiverDashboardResponse.RecentTransaction recent = new ReceiverDashboardResponse.RecentTransaction();
         recent.setTransactionId(transaction.getId());
+        recent.setMopayTransactionId(transaction.getMopayTransactionId()); // POCHI transaction ID
         
         // Handle null user for guest MOMO payments
         if (transaction.getUser() != null) {
@@ -1599,6 +1720,15 @@ public class ReceiverService {
         
         // Set parent receiver (link as submerchant) - use the already loaded mainReceiver
         submerchant.setParentReceiver(mainReceiver);
+        
+        // Inherit flexible status from main merchant
+        // If main merchant is flexible, submerchant should also be flexible
+        boolean mainMerchantIsFlexible = mainReceiver.getIsFlexible() != null && mainReceiver.getIsFlexible();
+        submerchant.setIsFlexible(mainMerchantIsFlexible);
+        if (mainMerchantIsFlexible) {
+            logger.info("New submerchant '{}' inheriting flexible status from main merchant '{}'", 
+                submerchant.getCompanyName(), mainReceiver.getCompanyName());
+        }
 
         // Save submerchant
         Receiver savedSubmerchant = receiverRepository.save(submerchant);
@@ -1639,6 +1769,16 @@ public class ReceiverService {
         
         // Link submerchant to main receiver
         submerchant.setParentReceiver(mainReceiver);
+        
+        // Inherit flexible status from main merchant
+        // If main merchant is flexible, submerchant should also be flexible
+        boolean mainMerchantIsFlexible = mainReceiver.getIsFlexible() != null && mainReceiver.getIsFlexible();
+        if (mainMerchantIsFlexible) {
+            submerchant.setIsFlexible(true);
+            logger.info("Linked submerchant '{}' inheriting flexible status from main merchant '{}'", 
+                submerchant.getCompanyName(), mainReceiver.getCompanyName());
+        }
+        
         receiverRepository.save(submerchant);
         
         return mapToResponse(submerchant);
@@ -1834,6 +1974,13 @@ public class ReceiverService {
             submerchant.setDescription(request.getDescription());
         }
         
+        // Update MoMo account phone if provided
+        if (request.getMomoAccountPhone() != null) {
+            // Normalize phone number: remove non-digit characters
+            String normalizedMomoPhone = request.getMomoAccountPhone().replaceAll("[^0-9]", "");
+            submerchant.setMomoAccountPhone(normalizedMomoPhone);
+        }
+        
         // Note: assignedBalance, discountPercentage, userBonusPercentage are typically managed 
         // through the balance assignment endpoint, but we can update them here if provided
         // For now, we'll leave these as they are managed separately
@@ -2024,6 +2171,23 @@ public class ReceiverService {
         @SuppressWarnings("unchecked")
         List<Object[]> results = query.getResultList();
         return results;
+    }
+
+    /**
+     * Generates a unique transaction ID starting with "MOPAY"
+     * Format: MOPAY + timestamp (milliseconds) + random alphanumeric string
+     * Example: MOPAY1769123456789A3B2C1D
+     */
+    private String generateMopayTransactionId() {
+        long timestamp = System.currentTimeMillis();
+        // Generate a random alphanumeric string (6 characters)
+        String chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        StringBuilder randomPart = new StringBuilder();
+        java.util.Random random = new java.util.Random();
+        for (int i = 0; i < 6; i++) {
+            randomPart.append(chars.charAt(random.nextInt(chars.length())));
+        }
+        return "MOPAY" + timestamp + randomPart.toString();
     }
 }
 

@@ -79,6 +79,10 @@ public class Transaction {
     @Column(name = "receiver_balance_after", precision = 19, scale = 2)
     private BigDecimal receiverBalanceAfter;
 
+    @Column(name = "top_up_type")
+    @Enumerated(EnumType.STRING)
+    private TopUpType topUpType; // Type of top-up: MOMO, CASH, or LOAN (only for TOP_UP transactions)
+
     @Column(nullable = false, updatable = false)
     @CreationTimestamp
     private LocalDateTime createdAt;

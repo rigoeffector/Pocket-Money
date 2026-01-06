@@ -161,6 +161,7 @@ public class AuthService {
             response.setRemainingBalance(balanceOwner.getRemainingBalance());
             response.setDiscountPercentage(balanceOwner.getDiscountPercentage());
             response.setUserBonusPercentage(balanceOwner.getUserBonusPercentage());
+            response.setIsFlexible(receiver.getIsFlexible() != null ? receiver.getIsFlexible() : false);
             response.setLastTransactionDate(receiver.getLastTransactionDate());
             
             // Submerchant relationship info
@@ -335,6 +336,7 @@ public class AuthService {
         response.setRemainingBalance(balanceOwner.getRemainingBalance());
         response.setDiscountPercentage(balanceOwner.getDiscountPercentage());
         response.setUserBonusPercentage(balanceOwner.getUserBonusPercentage());
+        response.setIsFlexible(targetReceiver.getIsFlexible() != null ? targetReceiver.getIsFlexible() : false);
         response.setLastTransactionDate(targetReceiver.getLastTransactionDate());
         
         // Submerchant relationship info (target receiver is a submerchant of main merchant)
@@ -414,6 +416,7 @@ public class AuthService {
         response.setRemainingBalance(balanceOwner.getRemainingBalance());
         response.setDiscountPercentage(balanceOwner.getDiscountPercentage());
         response.setUserBonusPercentage(balanceOwner.getUserBonusPercentage());
+        response.setIsFlexible(currentReceiver.getIsFlexible() != null ? currentReceiver.getIsFlexible() : false);
         response.setLastTransactionDate(currentReceiver.getLastTransactionDate());
         
         // Main merchant info (no parent)

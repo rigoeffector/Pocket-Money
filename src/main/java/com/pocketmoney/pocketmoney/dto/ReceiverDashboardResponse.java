@@ -87,6 +87,7 @@ public class ReceiverDashboardResponse {
     @AllArgsConstructor
     public static class RecentTransaction {
         private UUID transactionId;
+        private String mopayTransactionId; // POCHI transaction ID for tracking
         private UUID userId;
         private String userName;
         private String userPhone;

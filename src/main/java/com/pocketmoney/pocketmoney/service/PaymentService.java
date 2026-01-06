@@ -1,34 +1,65 @@
 package com.pocketmoney.pocketmoney.service;
 
-import com.pocketmoney.pocketmoney.dto.*;
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import com.pocketmoney.pocketmoney.dto.AdminDashboardStatisticsResponse;
+import com.pocketmoney.pocketmoney.dto.AdminIncomeResponse;
+import com.pocketmoney.pocketmoney.dto.BalanceResponse;
+import com.pocketmoney.pocketmoney.dto.LoanInfo;
+import com.pocketmoney.pocketmoney.dto.LoanResponse;
+import com.pocketmoney.pocketmoney.dto.MerchantBalanceInfo;
+import com.pocketmoney.pocketmoney.dto.MerchantTopUpRequest;
+import com.pocketmoney.pocketmoney.dto.MoPayInitiateRequest;
+import com.pocketmoney.pocketmoney.dto.MoPayResponse;
+import com.pocketmoney.pocketmoney.dto.MomoPaymentRequest;
+import com.pocketmoney.pocketmoney.dto.PaginatedResponse;
+import com.pocketmoney.pocketmoney.dto.PayLoanRequest;
+import com.pocketmoney.pocketmoney.dto.PaymentCategoryResponse;
+import com.pocketmoney.pocketmoney.dto.PaymentRequest;
+import com.pocketmoney.pocketmoney.dto.PaymentResponse;
+import com.pocketmoney.pocketmoney.dto.ReceiverTransactionsResponse;
+import com.pocketmoney.pocketmoney.dto.TopUpByPhoneRequest;
+import com.pocketmoney.pocketmoney.dto.TopUpRequest;
+import com.pocketmoney.pocketmoney.dto.UpdateLoanRequest;
+import com.pocketmoney.pocketmoney.dto.UserBonusHistoryResponse;
+import com.pocketmoney.pocketmoney.dto.UserResponse;
+import com.pocketmoney.pocketmoney.entity.Loan;
+import com.pocketmoney.pocketmoney.entity.LoanStatus;
+import com.pocketmoney.pocketmoney.entity.MerchantUserBalance;
 import com.pocketmoney.pocketmoney.entity.PaymentCategory;
+import com.pocketmoney.pocketmoney.entity.PaymentCommissionSetting;
 import com.pocketmoney.pocketmoney.entity.Receiver;
 import com.pocketmoney.pocketmoney.entity.ReceiverStatus;
+import com.pocketmoney.pocketmoney.entity.TopUpType;
 import com.pocketmoney.pocketmoney.entity.Transaction;
 import com.pocketmoney.pocketmoney.entity.TransactionStatus;
 import com.pocketmoney.pocketmoney.entity.TransactionType;
 import com.pocketmoney.pocketmoney.entity.User;
 import com.pocketmoney.pocketmoney.entity.UserStatus;
 import com.pocketmoney.pocketmoney.repository.BalanceAssignmentHistoryRepository;
+import com.pocketmoney.pocketmoney.repository.LoanRepository;
+import com.pocketmoney.pocketmoney.repository.MerchantUserBalanceRepository;
 import com.pocketmoney.pocketmoney.repository.PaymentCategoryRepository;
+import com.pocketmoney.pocketmoney.repository.PaymentCommissionSettingRepository;
 import com.pocketmoney.pocketmoney.repository.ReceiverRepository;
 import com.pocketmoney.pocketmoney.repository.TransactionRepository;
 import com.pocketmoney.pocketmoney.repository.UserRepository;
-import com.pocketmoney.pocketmoney.repository.PaymentCommissionSettingRepository;
-import com.pocketmoney.pocketmoney.entity.PaymentCommissionSetting;
+
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.Query;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.security.crypto.password.PasswordEncoder;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-
-import java.math.BigDecimal;
-import java.time.LocalDateTime;
-import java.util.List;
-import java.util.UUID;
-import java.util.stream.Collectors;
 
 @Service
 @Transactional
@@ -42,6 +73,8 @@ public class PaymentService {
     private final ReceiverRepository receiverRepository;
     private final BalanceAssignmentHistoryRepository balanceAssignmentHistoryRepository;
     private final PaymentCommissionSettingRepository paymentCommissionSettingRepository;
+    private final MerchantUserBalanceRepository merchantUserBalanceRepository;
+    private final LoanRepository loanRepository;
     private final MoPayService moPayService;
     private final PasswordEncoder passwordEncoder;
     private final EntityManager entityManager;
@@ -52,6 +85,8 @@ public class PaymentService {
                          PaymentCategoryRepository paymentCategoryRepository, ReceiverRepository receiverRepository,
                          BalanceAssignmentHistoryRepository balanceAssignmentHistoryRepository,
                          PaymentCommissionSettingRepository paymentCommissionSettingRepository,
+                         MerchantUserBalanceRepository merchantUserBalanceRepository,
+                         LoanRepository loanRepository,
                          MoPayService moPayService, PasswordEncoder passwordEncoder, EntityManager entityManager,
                          MessagingService messagingService, WhatsAppService whatsAppService) {
         this.userRepository = userRepository;
@@ -60,6 +95,8 @@ public class PaymentService {
         this.receiverRepository = receiverRepository;
         this.balanceAssignmentHistoryRepository = balanceAssignmentHistoryRepository;
         this.paymentCommissionSettingRepository = paymentCommissionSettingRepository;
+        this.merchantUserBalanceRepository = merchantUserBalanceRepository;
+        this.loanRepository = loanRepository;
         this.moPayService = moPayService;
         this.passwordEncoder = passwordEncoder;
         this.entityManager = entityManager;
@@ -132,6 +169,32 @@ public class PaymentService {
             throw new RuntimeException("User account is not active. Status: " + user.getStatus());
         }
 
+        // Check if this is a merchant-specific top-up
+        Receiver receiver = null;
+        Long transferPhone;
+        boolean isMerchantTopUp = false;
+        
+        if (request.getReceiverId() != null) {
+            receiver = receiverRepository.findById(request.getReceiverId())
+                    .orElseThrow(() -> new RuntimeException("Receiver not found with ID: " + request.getReceiverId()));
+            
+            if (receiver.getStatus() != ReceiverStatus.ACTIVE) {
+                throw new RuntimeException("Receiver is not active. Status: " + receiver.getStatus());
+            }
+            
+            if (receiver.getMomoAccountPhone() == null || receiver.getMomoAccountPhone().trim().isEmpty()) {
+                throw new RuntimeException("Receiver does not have a MoMo account configured for top-ups. Please go to Settings to add your MoMo account phone number.");
+            }
+            
+            // Use merchant's MoMo account
+            String normalizedMomoPhone = normalizePhoneTo12Digits(receiver.getMomoAccountPhone());
+            transferPhone = Long.parseLong(normalizedMomoPhone);
+            isMerchantTopUp = true;
+        } else {
+            // Use default admin phone for global top-up
+            transferPhone = 250794230137L;
+        }
+
         // Create MoPay initiate request
         MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
         moPayRequest.setAmount(request.getAmount());
@@ -140,15 +203,15 @@ public class PaymentService {
         String normalizedPayerPhone = normalizePhoneTo12Digits(request.getPhone());
         moPayRequest.setPhone(Long.parseLong(normalizedPayerPhone));
         moPayRequest.setPayment_mode("MOBILE");
-        moPayRequest.setMessage(request.getMessage() != null ? request.getMessage() : "Top up to pocket money card");
+        moPayRequest.setMessage(request.getMessage() != null ? request.getMessage() : 
+            (isMerchantTopUp ? "Top up to " + receiver.getCompanyName() : "Top up to pocket money card"));
 
-        // Create transfer to fixed receiver (always 250794230137)
+        // Create transfer to receiver (merchant's MoMo account or default admin)
         MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
         transfer.setAmount(request.getAmount());
-        // Receiver phone is always 250794230137
-        // transfer.setPhone(250794230137L);
-        transfer.setPhone(250789312898L);
-        transfer.setMessage(request.getMessage() != null ? request.getMessage() : "Top up to pocket money card");
+        transfer.setPhone(transferPhone);
+        transfer.setMessage(request.getMessage() != null ? request.getMessage() : 
+            (isMerchantTopUp ? "Top up to " + receiver.getCompanyName() : "Top up to pocket money card"));
         moPayRequest.setTransfers(java.util.List.of(transfer));
 
         // Initiate payment with MoPay
@@ -163,9 +226,15 @@ public class PaymentService {
         transaction.setMessage(moPayRequest.getMessage());
         transaction.setBalanceBefore(user.getAmountRemaining());
 
+        // Set receiver if this is a merchant-specific top-up
+        if (isMerchantTopUp && receiver != null) {
+            transaction.setReceiver(receiver);
+            transaction.setTopUpType(TopUpType.MOMO);
+        }
+
         // Generate transaction ID starting with POCHI for top-up
         String transactionId = generateTransactionId();
-        transaction.setMopayTransactionId(transactionId);
+            transaction.setMopayTransactionId(transactionId);
         
         // Check MoPay response - API returns status 201 on success
         String mopayTransactionId = moPayResponse != null ? moPayResponse.getTransactionId() : null;
@@ -218,6 +287,282 @@ public class PaymentService {
         return topUp(request.getNfcCardId(), topUpRequest);
     }
 
+    /**
+     * Merchant-initiated top-up (only main merchants can do this)
+     * Supports three types: MOMO, CASH, LOAN
+     */
+    public PaymentResponse merchantTopUp(MerchantTopUpRequest request) {
+        // Get current authenticated receiver from security context
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication == null || !authentication.isAuthenticated()) {
+            throw new RuntimeException("User not authenticated");
+        }
+        
+        String currentUsername = authentication.getName();
+        logger.info("=== MERCHANT TOP-UP REQUEST ===");
+        logger.info("Authenticated username: {}", currentUsername);
+        
+        Receiver merchant = receiverRepository.findByUsername(currentUsername)
+                .orElseThrow(() -> new RuntimeException("Merchant not found with username: " + currentUsername));
+        
+        logger.info("Found merchant: ID={}, Username={}, Company={}, isFlexible={}, hasParent={}", 
+            merchant.getId(), merchant.getUsername(), merchant.getCompanyName(), 
+            merchant.getIsFlexible(), merchant.getParentReceiver() != null);
+        
+        // Verify merchant is a main merchant (not a submerchant)
+        if (merchant.getParentReceiver() != null) {
+            throw new RuntimeException("Only main merchants can top up money for users. Your merchant account is a submerchant.");
+        }
+        
+        // Check if merchant is flexible
+        boolean isFlexible = merchant.getIsFlexible() != null && merchant.getIsFlexible();
+        logger.info("Merchant flexible check: isFlexible={}, getIsFlexible()={}", isFlexible, merchant.getIsFlexible());
+        
+        // Verify merchant is active
+        if (merchant.getStatus() != ReceiverStatus.ACTIVE) {
+            throw new RuntimeException("Merchant account is not active. Status: " + merchant.getStatus());
+        }
+        
+        // Find user by phone number (phone is linked to the card)
+        // Try multiple phone formats since users might be stored in different formats
+        String normalizedPhone = normalizePhoneTo12Digits(request.getPhone());
+        User user = userRepository.findByPhoneNumber(normalizedPhone).orElse(null);
+        
+        // If not found with 12-digit format, try with just digits (as stored in database)
+        if (user == null) {
+            String phoneDigitsOnly = request.getPhone().replaceAll("[^0-9]", "");
+            user = userRepository.findByPhoneNumber(phoneDigitsOnly).orElse(null);
+        }
+        
+        // If still not found, try with 0-prefixed format
+        if (user == null) {
+            String phoneDigitsOnly = request.getPhone().replaceAll("[^0-9]", "");
+            if (!phoneDigitsOnly.startsWith("0") && phoneDigitsOnly.length() == 9) {
+                user = userRepository.findByPhoneNumber("0" + phoneDigitsOnly).orElse(null);
+            }
+        }
+        
+        // If still not found, try extracting last 9 digits and adding 0 prefix
+        if (user == null) {
+            String phoneDigitsOnly = request.getPhone().replaceAll("[^0-9]", "");
+            if (phoneDigitsOnly.length() >= 9) {
+                String last9 = phoneDigitsOnly.substring(phoneDigitsOnly.length() - 9);
+                user = userRepository.findByPhoneNumber("0" + last9).orElse(null);
+            }
+        }
+        
+        // If user doesn't exist, create a new user with minimal information
+        if (user == null) {
+            logger.info("User not found with phone number: {}. Creating new user automatically.", request.getPhone());
+            
+            // Use the phone number as the full name temporarily (user can update later)
+            // normalizedPhone is already defined above, reuse it
+            String phoneDigitsOnly = request.getPhone().replaceAll("[^0-9]", "");
+            
+            // Create new user with minimal required information
+            User newUser = new User();
+            newUser.setFullNames("User " + phoneDigitsOnly); // Temporary name, can be updated later
+            newUser.setPhoneNumber(normalizedPhone);
+            newUser.setPin(passwordEncoder.encode("0000")); // Default PIN, user should change this
+            newUser.setIsAssignedNfcCard(false); // No NFC card assigned yet
+            newUser.setAmountOnCard(BigDecimal.ZERO);
+            newUser.setAmountRemaining(BigDecimal.ZERO);
+            newUser.setStatus(UserStatus.ACTIVE);
+            
+            user = userRepository.save(newUser);
+            logger.info("Created new user with ID: {}, Phone: {}", user.getId(), normalizedPhone);
+        }
+        
+        // For merchant top-ups, NFC card is optional (merchant can top up users without cards)
+        // Log a warning if no NFC card is assigned, but allow the top-up to proceed
+        if (user.getIsAssignedNfcCard() == null || !user.getIsAssignedNfcCard() 
+                || user.getNfcCardId() == null || user.getNfcCardId().trim().isEmpty()) {
+            logger.warn("User {} does not have an NFC card assigned, but allowing merchant top-up to proceed", user.getPhoneNumber());
+        }
+        
+        // Verify user is active
+        if (user.getStatus() != UserStatus.ACTIVE) {
+            throw new RuntimeException("User account is not active. Status: " + user.getStatus());
+        }
+        
+        // Check if user has a merchant balance record for this merchant
+        // If not, create it automatically
+        MerchantUserBalance existingMerchantBalance = merchantUserBalanceRepository
+                .findByUserIdAndReceiverId(user.getId(), merchant.getId())
+                .orElse(null);
+        
+        if (existingMerchantBalance == null) {
+            logger.info("User does not have a merchant balance record with merchant '{}' (ID: {}). Creating it automatically.", 
+                merchant.getCompanyName(), merchant.getId());
+            
+            // Create new merchant balance record
+            MerchantUserBalance newMerchantBalance = new MerchantUserBalance();
+            newMerchantBalance.setUser(user);
+            newMerchantBalance.setReceiver(merchant);
+            newMerchantBalance.setBalance(BigDecimal.ZERO);
+            newMerchantBalance.setTotalToppedUp(BigDecimal.ZERO);
+            
+            existingMerchantBalance = merchantUserBalanceRepository.save(newMerchantBalance);
+            logger.info("Created merchant balance record: User ID={}, Merchant ID={}, Balance={}", 
+                user.getId(), merchant.getId(), existingMerchantBalance.getBalance());
+        }
+        
+        logger.info("User has existing merchant balance: Balance={}, Total Topped Up={}", 
+            existingMerchantBalance.getBalance(), existingMerchantBalance.getTotalToppedUp());
+        
+        // Handle different top-up types
+        Transaction transaction = new Transaction();
+        transaction.setUser(user);
+        transaction.setReceiver(merchant);
+        transaction.setTransactionType(TransactionType.TOP_UP);
+        transaction.setAmount(request.getAmount());
+        transaction.setTopUpType(request.getTopUpType());
+        // Set balance before as user's amountRemaining before top-up
+        BigDecimal amountRemainingBefore = user.getAmountRemaining();
+        transaction.setBalanceBefore(amountRemainingBefore);
+        
+        // Generate transaction ID starting with POCHI
+        String transactionId = generateTransactionId();
+        transaction.setMopayTransactionId(transactionId);
+        
+        if (request.getTopUpType() == TopUpType.MOMO) {
+            // MOMO top-up - requires phone number and uses MoPay API
+            if (request.getPhone() == null || request.getPhone().trim().isEmpty()) {
+                throw new RuntimeException("Phone number is required for MOMO top-up");
+            }
+            
+            // Create MoPay initiate request
+            MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
+            moPayRequest.setAmount(request.getAmount());
+            moPayRequest.setCurrency("RWF");
+            String normalizedPayerPhone = normalizePhoneTo12Digits(request.getPhone());
+            moPayRequest.setPhone(Long.parseLong(normalizedPayerPhone));
+            moPayRequest.setPayment_mode("MOBILE");
+            moPayRequest.setMessage(request.getMessage() != null ? request.getMessage() : 
+                "Top up to " + merchant.getCompanyName());
+            
+            // Determine which phone number to use for receiving top-up money
+            // If merchant is flexible, use their MoMo account phone; otherwise use default admin phone
+            String receivingPhone;
+            if (isFlexible) {
+                // Flexible merchant: use their MoMo account phone
+                if (merchant.getMomoAccountPhone() == null || merchant.getMomoAccountPhone().trim().isEmpty()) {
+                    throw new RuntimeException("Flexible merchant must have a MoMo account configured for top-ups. Please go to Settings to add your MoMo account phone number.");
+                }
+                receivingPhone = merchant.getMomoAccountPhone();
+                logger.info("Merchant is flexible - using merchant's MoMo account phone: {}", receivingPhone);
+            } else {
+                // Non-flexible merchant: use default admin phone
+                receivingPhone = "250794230137";
+                logger.info("Merchant is not flexible - using default admin phone: {}", receivingPhone);
+            }
+            
+            // Create transfer to receiving phone (merchant's MoMo account if flexible, or default admin phone)
+            MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
+            transfer.setAmount(request.getAmount());
+            String normalizedReceivingPhone = normalizePhoneTo12Digits(receivingPhone);
+            transfer.setPhone(Long.parseLong(normalizedReceivingPhone));
+            transfer.setMessage(request.getMessage() != null ? request.getMessage() : 
+                "Top up to " + merchant.getCompanyName());
+            moPayRequest.setTransfers(java.util.List.of(transfer));
+            
+            // Initiate payment with MoPay
+            MoPayResponse moPayResponse = moPayService.initiatePayment(moPayRequest);
+            
+            transaction.setPhoneNumber(request.getPhone());
+            transaction.setMessage(moPayRequest.getMessage());
+            
+            // Check MoPay response
+            String mopayTransactionId = moPayResponse != null ? moPayResponse.getTransactionId() : null;
+            if (moPayResponse != null && moPayResponse.getStatus() != null && moPayResponse.getStatus() == 201 
+                && mopayTransactionId != null) {
+                // Successfully initiated - keep our POCHI transaction ID and set as PENDING
+                String existingMessage = transaction.getMessage() != null ? transaction.getMessage() : "";
+                transaction.setMessage(existingMessage + " | MOPAY_ID:" + mopayTransactionId);
+                transaction.setStatus(TransactionStatus.PENDING);
+            } else {
+                // Initiation failed
+                transaction.setStatus(TransactionStatus.FAILED);
+                String errorMessage = moPayResponse != null && moPayResponse.getMessage() != null 
+                    ? moPayResponse.getMessage() 
+                    : "Payment initiation failed - status: " + (moPayResponse != null ? moPayResponse.getStatus() : "null");
+                transaction.setMessage(errorMessage);
+            }
+        } else if (request.getTopUpType() == TopUpType.CASH) {
+            // CASH top-up - immediate success (no MoPay integration)
+            transaction.setStatus(TransactionStatus.SUCCESS);
+            transaction.setMessage(request.getMessage() != null ? request.getMessage() : 
+                "Cash top-up from " + merchant.getCompanyName());
+            transaction.setPhoneNumber(user.getPhoneNumber());
+            
+            // Immediately update merchant-specific balance
+            // merchantBalance already exists (validated above)
+            MerchantUserBalance merchantBalance = existingMerchantBalance;
+            
+            BigDecimal newMerchantBalance = merchantBalance.getBalance().add(request.getAmount());
+            merchantBalance.setBalance(newMerchantBalance);
+            merchantBalance.setTotalToppedUp(merchantBalance.getTotalToppedUp().add(request.getAmount()));
+            merchantUserBalanceRepository.save(merchantBalance);
+            
+            // Update user's amountRemaining and amountOnCard
+            BigDecimal newAmountRemaining = user.getAmountRemaining().add(request.getAmount());
+            user.setAmountRemaining(newAmountRemaining);
+            user.setAmountOnCard(user.getAmountOnCard().add(request.getAmount()));
+            user.setLastTransactionDate(LocalDateTime.now());
+            userRepository.save(user);
+            
+            // Set balance after as user's amountRemaining after top-up
+            transaction.setBalanceAfter(newAmountRemaining);
+        } else if (request.getTopUpType() == TopUpType.LOAN) {
+            // LOAN top-up - immediate success (no MoPay integration)
+            transaction.setStatus(TransactionStatus.SUCCESS);
+            transaction.setMessage(request.getMessage() != null ? request.getMessage() : 
+                "Loan top-up from " + merchant.getCompanyName());
+            transaction.setPhoneNumber(user.getPhoneNumber());
+            
+            // Save transaction first to get the ID
+            Transaction savedTransaction = transactionRepository.save(transaction);
+            
+            // Immediately update merchant-specific balance
+            // merchantBalance already exists (validated above)
+            MerchantUserBalance merchantBalance = existingMerchantBalance;
+            
+            BigDecimal newMerchantBalance = merchantBalance.getBalance().add(request.getAmount());
+            merchantBalance.setBalance(newMerchantBalance);
+            merchantBalance.setTotalToppedUp(merchantBalance.getTotalToppedUp().add(request.getAmount()));
+            merchantUserBalanceRepository.save(merchantBalance);
+            
+            // Update user's amountRemaining and amountOnCard
+            BigDecimal newAmountRemaining = user.getAmountRemaining().add(request.getAmount());
+            user.setAmountRemaining(newAmountRemaining);
+            user.setAmountOnCard(user.getAmountOnCard().add(request.getAmount()));
+            user.setLastTransactionDate(LocalDateTime.now());
+            userRepository.save(user);
+            
+            // Set balance after as user's amountRemaining after top-up
+            savedTransaction.setBalanceAfter(newAmountRemaining);
+            transactionRepository.save(savedTransaction);
+            
+            // Create loan record
+            Loan loan = new Loan();
+            loan.setUser(user);
+            loan.setReceiver(merchant);
+            loan.setTransaction(savedTransaction);
+            loan.setLoanAmount(request.getAmount());
+            loan.setPaidAmount(BigDecimal.ZERO);
+            loan.setRemainingAmount(request.getAmount());
+            loan.setStatus(LoanStatus.PENDING);
+            loanRepository.save(loan);
+            
+            return mapToPaymentResponse(savedTransaction);
+        } else {
+            throw new RuntimeException("Invalid top-up type: " + request.getTopUpType());
+        }
+        
+        Transaction savedTransaction = transactionRepository.save(transaction);
+        return mapToPaymentResponse(savedTransaction);
+    }
+
     public PaymentResponse makePayment(UUID userId, PaymentRequest request) {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new RuntimeException("User not found"));
@@ -241,18 +586,248 @@ public class PaymentService {
         // Determine the balance owner: if receiver is a submerchant, use parent's balance
         Receiver balanceOwner = receiver.getParentReceiver() != null ? receiver.getParentReceiver() : receiver;
 
+        // Log receiver and user balances for debugging
+        logger.info("=== RECEIVER AND USER BALANCE CHECK ===");
+        logger.info("Receiver ID: {}", receiver.getId());
+        logger.info("Receiver Company Name: {}", receiver.getCompanyName());
+        logger.info("Receiver Wallet Balance: {}", receiver.getWalletBalance());
+        logger.info("Receiver Total Received: {}", receiver.getTotalReceived());
+        logger.info("Receiver Assigned Balance: {}", receiver.getAssignedBalance());
+        logger.info("Receiver Remaining Balance: {}", receiver.getRemainingBalance());
+        logger.info("Balance Owner ID: {}", balanceOwner.getId());
+        logger.info("Balance Owner Company Name: {}", balanceOwner.getCompanyName());
+        logger.info("Balance Owner Remaining Balance: {}", balanceOwner.getRemainingBalance());
+        logger.info("User ID: {}", user.getId());
+        logger.info("User Full Names: {}", user.getFullNames());
+        logger.info("User Phone: {}", user.getPhoneNumber());
+        logger.info("User Amount On Card: {}", user.getAmountOnCard());
+        logger.info("User Amount Remaining: {}", user.getAmountRemaining());
+
         // Verify PIN
         if (!passwordEncoder.matches(request.getPin(), user.getPin())) {
             throw new RuntimeException("Invalid PIN");
         }
 
-        // Check balance
-        BigDecimal balanceBefore = user.getAmountRemaining();
-        if (balanceBefore.compareTo(request.getAmount()) < 0) {
-            throw new RuntimeException("Insufficient balance. Available: " + balanceBefore);
+        // Check balance - prioritize merchant-specific balance if available
+        BigDecimal merchantBalance = BigDecimal.ZERO;
+        MerchantUserBalance merchantUserBalance = merchantUserBalanceRepository
+                .findByUserIdAndReceiverId(userId, receiver.getId())
+                .orElse(null);
+        
+        logger.info("=== PAYMENT BALANCE CHECK ===");
+        logger.info("User ID: {}", userId);
+        logger.info("Receiver ID: {}", receiver.getId());
+        logger.info("MerchantUserBalance exists: {}", merchantUserBalance != null);
+        
+        // Check if receiver itself is flexible (needed for loan check)
+        boolean isReceiverFlexible = receiver.getIsFlexible() != null && receiver.getIsFlexible();
+        boolean hasMerchantBalance = merchantUserBalance != null;
+        
+        // Check main merchant flexible status early (needed for balance calculation)
+        Receiver mainMerchantForCheck = receiver;
+        if (receiver.getParentReceiver() != null) {
+            mainMerchantForCheck = receiver.getParentReceiver();
+        }
+        boolean isMainMerchantFlexibleForBalance = mainMerchantForCheck.getIsFlexible() != null && mainMerchantForCheck.getIsFlexible();
+        
+        logger.info("=== FLEXIBLE CHECK ===");
+        logger.info("hasMerchantBalance: {}", hasMerchantBalance);
+        logger.info("isReceiverFlexible: {}", isReceiverFlexible);
+        logger.info("isMainMerchantFlexibleForBalance: {}", isMainMerchantFlexibleForBalance);
+        
+        if (merchantUserBalance != null) {
+            merchantBalance = merchantUserBalance.getBalance();
+            logger.info("Initial merchant balance: {}", merchantBalance);
+            
+            // Get the merchant who did the top-up (from merchantUserBalance)
+            Receiver topUpMerchant = merchantUserBalance.getReceiver();
+            Receiver mainTopUpMerchant = topUpMerchant;
+            if (topUpMerchant.getParentReceiver() != null) {
+                mainTopUpMerchant = topUpMerchant.getParentReceiver();
+            }
+            boolean isTopUpMerchantFlexible = mainTopUpMerchant.getIsFlexible() != null && mainTopUpMerchant.getIsFlexible();
+            
+            logger.info("Top-up merchant: {} (ID: {}), Main merchant: {} (ID: {}), Is flexible: {}", 
+                topUpMerchant.getCompanyName(), topUpMerchant.getId(),
+                mainTopUpMerchant.getCompanyName(), mainTopUpMerchant.getId(), isTopUpMerchantFlexible);
+            
+            // In flexible mode, skip loan check - let topped up money go straight to balance
+            if (isTopUpMerchantFlexible) {
+                logger.info("Top-up merchant is in FLEXIBLE mode - skipping loan check, allowing full balance usage");
+                // Don't modify merchantBalance, allow full balance to be used
+            } else {
+                // NON-FLEXIBLE mode: Check loans if the balance came from a LOAN top-up
+                // Check if there's a loan for this user-receiver pair
+                List<Loan> userLoans = loanRepository.findByUserIdAndReceiverId(userId, topUpMerchant.getId());
+                logger.info("Found {} loans for user-topUpMerchant pair", userLoans.size());
+                
+                if (!userLoans.isEmpty()) {
+                    // There is a loan - this means the top-up was a LOAN
+                    // Check if the loan is still outstanding (remaining >= 1) and not completed
+                    Loan loan = userLoans.get(0);
+                    logger.info("Loan ID: {}, Status: {}, Remaining: {}", 
+                        loan.getId(), loan.getStatus(), loan.getRemainingAmount());
+                    
+                    if (loan.getStatus() != LoanStatus.COMPLETED) {
+                        // Loan is not completed - check if it's still outstanding
+                        if (loan.getRemainingAmount().compareTo(new BigDecimal("1")) >= 0) {
+                            // Loan remaining >= 1, don't allow using merchant balance
+                            logger.info("Loan remaining >= 1, blocking merchant balance (loan not paid)");
+                            merchantBalance = BigDecimal.ZERO;
+                        } else {
+                            // Loan remaining < 1, allow using merchant balance
+                            logger.info("Loan remaining < 1, allowing merchant balance");
+                        }
+                    } else {
+                        // Loan is completed, allow using merchant balance
+                        logger.info("Loan is completed, allowing merchant balance");
+                    }
+                } else {
+                    // No loan exists - this means the top-up was CASH or MOMO
+                    // Don't check loans, allow merchant balance usage
+                    logger.info("No loan found - top-up was CASH or MOMO, allowing merchant balance");
+                }
+            }
+            
+            logger.info("Final merchant balance after loan check: {}", merchantBalance);
+        } else {
+            logger.info("No MerchantUserBalance found for user-receiver pair");
+        }
+        
+        BigDecimal globalBalance = user.getAmountRemaining();
+        logger.info("User global balance (amountRemaining): {}", globalBalance);
+        
+        // Get ALL merchant balances for this user and sum them up
+        // All merchant balances should be added to amountRemaining for total available balance
+        List<MerchantUserBalance> allMerchantBalances = merchantUserBalanceRepository.findByUserId(userId);
+        BigDecimal totalAllMerchantBalances = BigDecimal.ZERO;
+        
+        logger.info("=== ALL MERCHANT BALANCES FOR USER ===");
+        for (MerchantUserBalance mb : allMerchantBalances) {
+            logger.info("Merchant: {} (ID: {}), Balance: {}, Total Topped Up: {}", 
+                mb.getReceiver().getCompanyName(), mb.getReceiver().getId(), 
+                mb.getBalance(), mb.getTotalToppedUp());
+            // Sum all merchant balances
+            totalAllMerchantBalances = totalAllMerchantBalances.add(mb.getBalance());
+        }
+        logger.info("Total of all merchant balances: {}", totalAllMerchantBalances);
+        
+        // Calculate total available balance
+        // Total available = global balance (amountRemaining) + all merchant balances
+        BigDecimal totalAvailableBalance = globalBalance.add(totalAllMerchantBalances);
+        
+        // If user has been topped up by the current merchant (LOAN, CASH, or MOMO), also add topped up amount
+        // This gives users access to the full topped-up amount (whether it's LOAN, CASH, or MOMO)
+        if (hasMerchantBalance) {
+            BigDecimal amountToAdd = merchantUserBalance.getTotalToppedUp();
+            
+            if (isMainMerchantFlexibleForBalance) {
+                logger.info("User topped up by flexible merchant - adding topped up amount {} to available balance", amountToAdd);
+            } else {
+                logger.info("User topped up by merchant - adding topped up amount {} to available balance", amountToAdd);
+            }
+            
+            // Add the topped up amount to total available balance
+            totalAvailableBalance = totalAvailableBalance.add(amountToAdd);
+            logger.info("Total available balance with topped up amount: {}", totalAvailableBalance);
+        }
+        
+        logger.info("Final total available balance: {} (Global: {} + All Merchant Balances: {})", 
+            totalAvailableBalance, globalBalance, totalAllMerchantBalances);
+        logger.info("Payment amount requested: {}", request.getAmount());
+        logger.info("=== ALL MERCHANT BALANCES FOR USER ===");
+        for (MerchantUserBalance mb : allMerchantBalances) {
+            logger.info("Merchant: {} (ID: {}), Balance: {}, Total Topped Up: {}", 
+                mb.getReceiver().getCompanyName(), mb.getReceiver().getId(), 
+                mb.getBalance(), mb.getTotalToppedUp());
+        }
+        
+        // Check if main merchant is in flexible mode (already calculated above as isMainMerchantFlexibleForBalance)
+        // Use the already calculated value
+        boolean isMainMerchantFlexible = isMainMerchantFlexibleForBalance;
+        logger.info("Main merchant is flexible mode: {} (Main merchant: {})", isMainMerchantFlexible, mainMerchantForCheck.getCompanyName());
+        
+        // If main merchant is flexible, skip all balance checks and allow payment
+        if (isMainMerchantFlexible) {
+            logger.info("Main merchant is in FLEXIBLE mode - allowing payment without balance checks");
+            // Skip all balance checks, allow payment to proceed
+            // Don't overwrite totalAvailableBalance if we've already calculated it with loan/topped up amount
+            // Only set to zero if we haven't added the loan/topped up amount
+            if (!(hasMerchantBalance && isMainMerchantFlexibleForBalance)) {
+                merchantBalance = BigDecimal.ZERO;
+                globalBalance = BigDecimal.ZERO;
+                totalAvailableBalance = BigDecimal.ZERO;
+            }
+        } else {
+            // Main merchant is NON-FLEXIBLE: Check balances as usual
+            // Check receiver's remaining balance - if user has no balance but receiver has balance, allow payment
+            BigDecimal receiverRemainingBalance = balanceOwner.getRemainingBalance() != null ? balanceOwner.getRemainingBalance() : BigDecimal.ZERO;
+            logger.info("Receiver remaining balance: {}", receiverRemainingBalance);
+            
+            // Payment logic based on flexible mode:
+            // - FLEXIBLE: Only check user balance, ignore receiver balance
+            // - NON-FLEXIBLE: Check both user balance AND receiver balance
+            boolean userHasBalance = totalAvailableBalance.compareTo(request.getAmount()) >= 0;
+            boolean receiverHasBalance = receiverRemainingBalance.compareTo(request.getAmount()) >= 0;
+            
+            logger.info("User has sufficient balance: {}", userHasBalance);
+            logger.info("Receiver has sufficient balance: {}", receiverHasBalance);
+            
+            // EXCEPTION: If user has been topped up by this merchant AND merchant is flexible, allow payment without balance checks
+            if (hasMerchantBalance && isReceiverFlexible) {
+                // User has been topped up by this merchant and merchant is flexible
+                // Allow payment without checking any balance (user balance or receiver balance)
+                logger.info("User has merchant balance and receiver is flexible - allowing payment without any balance checks");
+                // Payment will proceed, deducting from merchant balance or global balance if available
+            } else if (isReceiverFlexible) {
+                // RECEIVER FLEXIBLE MODE: Only check user balance, ignore receiver balance
+                logger.info("Receiver is in FLEXIBLE mode - only checking user balance");
+                if (!userHasBalance) {
+                    String errorMsg = String.format(
+                        "Insufficient balance. User balance: %s (Merchant: %s, Global: %s), Required: %s. " +
+                        "Please ensure you have sufficient balance in your account or top up from this merchant.",
+                        totalAvailableBalance, merchantBalance, globalBalance, request.getAmount());
+                    logger.error("=== INSUFFICIENT BALANCE ERROR (FLEXIBLE MODE) ===");
+                    logger.error(errorMsg);
+                    logger.error("User amountRemaining from DB: {}", user.getAmountRemaining());
+                    logger.error("Merchant balance from DB: {}", merchantBalance);
+                    throw new RuntimeException(errorMsg);
+                }
+            } else {
+                // NON-FLEXIBLE MODE: Check both user balance AND receiver balance
+                logger.info("Receiver is in NON-FLEXIBLE mode - checking both user and receiver balance");
+                // Allow payment if:
+                // 1. User has sufficient balance (merchant + global), OR
+                // 2. Receiver has sufficient remaining balance (even if user balance is 0)
+                if (!userHasBalance && !receiverHasBalance) {
+                    String errorMsg = String.format(
+                        "Insufficient balance. User balance: %s (Merchant: %s, Global: %s), Receiver remaining balance: %s, Required: %s. " +
+                        "Please ensure you have sufficient balance in your account or the receiver has sufficient remaining balance.",
+                        totalAvailableBalance, merchantBalance, globalBalance, receiverRemainingBalance, request.getAmount());
+                    logger.error("=== INSUFFICIENT BALANCE ERROR (NON-FLEXIBLE MODE) ===");
+                    logger.error(errorMsg);
+                    logger.error("User amountRemaining from DB: {}", user.getAmountRemaining());
+                    logger.error("Merchant balance from DB: {}", merchantBalance);
+                    throw new RuntimeException(errorMsg);
+                }
+                
+                // If user has no balance but receiver has balance, we'll proceed with payment
+                // The payment will deduct from receiver's remaining balance only (user balance stays 0)
+                if (!userHasBalance && receiverHasBalance) {
+                    logger.info("User has no balance, but receiver has sufficient balance. Proceeding with payment using receiver's balance.");
+                    // Set balances to 0 so no deduction happens from user
+                    merchantBalance = BigDecimal.ZERO;
+                    globalBalance = BigDecimal.ZERO;
+                    totalAvailableBalance = BigDecimal.ZERO;
+                }
+            }
         }
 
         BigDecimal paymentAmount = request.getAmount();
+        
+        // Track balance before deductions
+        BigDecimal merchantBalanceBefore = merchantBalance;
+        BigDecimal globalBalanceBefore = globalBalance;
         
         // Calculate discount and bonus amounts (use balance owner's percentages)
         BigDecimal discountPercentage = balanceOwner.getDiscountPercentage() != null ? balanceOwner.getDiscountPercentage() : BigDecimal.ZERO;
@@ -276,22 +851,81 @@ public class PaymentService {
         BigDecimal receiverBalanceAfter = receiverBalanceBefore.subtract(receiverBalanceReduction);
         
         // Check if remaining balance would be below 1 after this transaction
-        if (receiverBalanceAfter.compareTo(new BigDecimal("1")) < 0) {
-            throw new RuntimeException("Contact BeFosot to top up for your company. Your card has sufficient balance, but the company's selling balance is low.");
+        // Skip this check if main merchant is flexible
+        if (!isMainMerchantFlexible && receiverBalanceAfter.compareTo(new BigDecimal("1")) < 0) {
+            // Check if user has merchant-specific balance for this receiver
+            // If user doesn't have merchant balance, they need to top up with this merchant
+            // Note: hasMerchantBalance is already declared above
+            
+            if (!hasMerchantBalance) {
+                // User doesn't have merchant-specific balance - they are not working with this merchant
+                throw new RuntimeException("Please get a card from us and top up with us to be able to use our service otherwise");
+            } else {
+                // User has merchant balance but receiver balance is low - show BeFosot message
+                throw new RuntimeException("Contact BeFosot to top up for your company. Your card has sufficient balance, but the company's selling balance is low.");
+            }
         }
         
         // For PAYMENT: Direct internal transfer (no MoPay integration needed)
-        // Deduct from user's card balance (amountRemaining)
-        BigDecimal userNewBalance = balanceBefore.subtract(paymentAmount);
-        user.setAmountRemaining(userNewBalance);
-        
-        // Add user bonus back to user's wallet if applicable
-        if (userBonusAmount.compareTo(BigDecimal.ZERO) > 0) {
-            userNewBalance = userNewBalance.add(userBonusAmount);
-            user.setAmountRemaining(userNewBalance);
+        // First, validate that user has sufficient amountRemaining balance
+        if (globalBalance.compareTo(paymentAmount) < 0) {
+            String errorMsg = String.format(
+                "Insufficient remaining balance. Your remaining balance: %s, Required: %s. " +
+                "Please top up your account to have sufficient balance.",
+                globalBalance, paymentAmount);
+            logger.error("=== INSUFFICIENT AMOUNT REMAINING ERROR ===");
+            logger.error(errorMsg);
+            logger.error("User amountRemaining: {}, Payment amount: {}", globalBalance, paymentAmount);
+            throw new RuntimeException(errorMsg);
         }
-        user.setLastTransactionDate(LocalDateTime.now());
-        userRepository.save(user);
+        
+        // Deduct from merchant-specific balance first, then global balance
+        BigDecimal remainingPayment = paymentAmount;
+        BigDecimal userNewBalance = globalBalance; // Initialize for use in messages later
+        
+        // Only deduct from user balance if user has balance
+        if (totalAvailableBalance.compareTo(BigDecimal.ZERO) > 0) {
+            BigDecimal amountDeductedFromMerchant = BigDecimal.ZERO;
+            
+            // First, deduct from merchant-specific balance if available
+            if (merchantUserBalance != null && merchantBalance.compareTo(BigDecimal.ZERO) > 0) {
+                if (merchantBalance.compareTo(remainingPayment) >= 0) {
+                    // Merchant balance covers entire payment
+                    BigDecimal newMerchantBalance = merchantBalance.subtract(remainingPayment);
+                    merchantUserBalance.setBalance(newMerchantBalance);
+                    amountDeductedFromMerchant = remainingPayment;
+                    remainingPayment = BigDecimal.ZERO;
+                } else {
+                    // Merchant balance covers part of payment
+                    merchantUserBalance.setBalance(BigDecimal.ZERO);
+                    amountDeductedFromMerchant = merchantBalance;
+                    remainingPayment = remainingPayment.subtract(merchantBalance);
+                }
+                merchantUserBalanceRepository.save(merchantUserBalance);
+            }
+            
+            // Always deduct the full payment amount from user's amountRemaining
+            // This ensures both merchant balance AND amountRemaining are deducted when user pays
+            BigDecimal totalDeductionFromUser = paymentAmount; // Full payment amount
+            userNewBalance = globalBalance.subtract(totalDeductionFromUser);
+            user.setAmountRemaining(userNewBalance);
+            
+            // Add user bonus back to user's wallet if applicable
+            if (userBonusAmount.compareTo(BigDecimal.ZERO) > 0) {
+                userNewBalance = userNewBalance.add(userBonusAmount);
+                user.setAmountRemaining(userNewBalance);
+            }
+            
+            user.setLastTransactionDate(LocalDateTime.now());
+            userRepository.save(user);
+            
+            logger.info("Payment deduction: Merchant balance deducted: {}, User amountRemaining deducted: {}", 
+                amountDeductedFromMerchant, totalDeductionFromUser);
+        } else {
+            // User has no balance - payment is covered by receiver's remaining balance
+            logger.info("Payment covered by receiver's remaining balance. No deduction from user balance.");
+            // Keep userNewBalance as globalBalance (0) for message purposes
+        }
 
         // Credit receiver's wallet balance (full payment amount) - individual receiver's wallet
         BigDecimal receiverNewBalance = receiver.getWalletBalance().add(paymentAmount);
@@ -304,8 +938,16 @@ public class PaymentService {
         // Update balance owner's remaining balance (shared balance - main merchant's if submerchant)
         // Balance owner's remaining balance is reduced by ONLY the payment amount
         // The discount percentage was already added as a bonus when balance was assigned
-        // (Already calculated and validated above - receiverBalanceAfter is safe to use)
-        balanceOwner.setRemainingBalance(receiverBalanceAfter);
+        // For FLEXIBLE main merchants, we still deduct but allow negative/zero balance
+        // For NON-FLEXIBLE main merchants, balance was already validated above
+        if (isMainMerchantFlexible) {
+            // MAIN MERCHANT FLEXIBLE: Allow balance to go below 1 or even negative
+            balanceOwner.setRemainingBalance(receiverBalanceAfter);
+            logger.info("MAIN MERCHANT FLEXIBLE mode: Updated receiver balance to {} (may be below 1)", receiverBalanceAfter);
+        } else {
+            // NON-FLEXIBLE: Balance was validated above, safe to set
+            balanceOwner.setRemainingBalance(receiverBalanceAfter);
+        }
         balanceOwner.setLastTransactionDate(LocalDateTime.now());
         receiverRepository.save(balanceOwner);
         
@@ -325,8 +967,12 @@ public class PaymentService {
         transaction.setAmount(paymentAmount);
         transaction.setPhoneNumber(receiver.getReceiverPhone());
         transaction.setMessage(request.getMessage() != null ? request.getMessage() : "Payment from pocket money card");
-        transaction.setBalanceBefore(balanceBefore); // User balance before deduction
-        transaction.setBalanceAfter(userNewBalance); // User balance after deduction and bonus
+        // Set balance before as the user's amountRemaining (global balance) before payment
+        transaction.setBalanceBefore(globalBalanceBefore);
+        // Set balance after as the user's amountRemaining (global balance) after payment deduction and bonus
+        // Get the current value from user entity after all updates (includes deduction and bonus if any)
+        BigDecimal finalAmountRemaining = user.getAmountRemaining();
+        transaction.setBalanceAfter(finalAmountRemaining);
         transaction.setDiscountAmount(discountAmount);
         transaction.setUserBonusAmount(userBonusAmount);
         transaction.setAdminIncomeAmount(adminIncomeAmount);
@@ -334,9 +980,11 @@ public class PaymentService {
         transaction.setReceiverBalanceAfter(receiverBalanceAfter); // Balance owner's balance after
         transaction.setStatus(TransactionStatus.SUCCESS); // Immediate success for internal transfers
         
-        // Generate transaction ID starting with POCHI for NFC card payments
-        String transactionId = generateTransactionId();
-        transaction.setMopayTransactionId(transactionId);
+        // Generate transaction ID for NFC card payments (POCHI format)
+        // This ensures all payments have a transaction ID for tracking
+        String nfcTransactionId = generateTransactionId();
+        transaction.setMopayTransactionId(nfcTransactionId);
+        logger.info("Generated NFC card payment transaction ID: {}", nfcTransactionId);
 
         Transaction savedTransaction = transactionRepository.save(transaction);
         
@@ -504,40 +1152,54 @@ public class PaymentService {
         moPayRequest.setPayment_mode("MOBILE");
         moPayRequest.setMessage(request.getMessage() != null ? request.getMessage() : "Payment to " + receiver.getCompanyName());
         
-        // Create transfer to admin (hardcoded phone number) - amount minus user bonus and commission
-        // The remaining amount (paymentAmount - userBonusAmount - commissionAmount) goes to hardcoded admin phone
-        BigDecimal adminAmount = paymentAmount.subtract(userBonusAmount).subtract(commissionAmount);
+        // Create transfer to receiver - amount minus user bonus and commission
+        // The remaining amount (paymentAmount - userBonusAmount - commissionAmount) goes to receiver
+        BigDecimal receiverAmount = paymentAmount.subtract(userBonusAmount).subtract(commissionAmount);
         
         logger.info("=== MOMO PAYMENT TRANSFER CALCULATION ===");
-        logger.info("Payment amount: {}, User bonus amount: {}, Commission amount: {}, Admin amount (to hardcoded phone): {}", 
-                paymentAmount, userBonusAmount, commissionAmount, adminAmount);
+        logger.info("Payment amount: {}, User bonus amount: {}, Commission amount: {}, Receiver amount: {}", 
+                paymentAmount, userBonusAmount, commissionAmount, receiverAmount);
+        
+        // Determine which phone number to use for receiving payment money
+        // If receiver is flexible, use their MoMo account phone; otherwise use default admin phone
+        boolean isReceiverFlexible = receiver.getIsFlexible() != null && receiver.getIsFlexible();
+        String receivingPhone;
+        if (isReceiverFlexible) {
+            // Flexible receiver: use their MoMo account phone
+            if (receiver.getMomoAccountPhone() == null || receiver.getMomoAccountPhone().trim().isEmpty()) {
+                throw new RuntimeException("Flexible receiver must have a MoMo account configured to receive payments. Please go to Settings to add your MoMo account phone number.");
+            }
+            receivingPhone = receiver.getMomoAccountPhone();
+            logger.info("Receiver is flexible - using receiver's MoMo account phone: {}", receivingPhone);
+        } else {
+            // Non-flexible receiver: use default admin phone
+            receivingPhone = "250794230137";
+            logger.info("Receiver is not flexible - using default admin phone: {}", receivingPhone);
+        }
         
         MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
-        transfer.setAmount(adminAmount);
-        // Always use hardcoded admin phone number (250794230137) for receiving MOMO payments
-        // String adminPhone = "250794230137";
-        String adminPhone = "250789312898";
-        logger.info("Using hardcoded admin phone for receiving payment: {}", adminPhone);
+        transfer.setAmount(receiverAmount);
+        logger.info("Using receiving phone for payment: {}", receivingPhone);
         
-        // Normalize admin phone to 12 digits - ensure it's exactly 12 digits
-        String normalizedAdminPhone = normalizePhoneTo12Digits(adminPhone);
+        // Normalize receiving phone to 12 digits - ensure it's exactly 12 digits
+        String normalizedReceivingPhone = normalizePhoneTo12Digits(receivingPhone);
         
-        logger.info("Admin phone normalization - Original: '{}', Normalized: '{}' ({} digits)", adminPhone, normalizedAdminPhone, normalizedAdminPhone.length());
+        logger.info("Receiving phone normalization - Original: '{}', Normalized: '{}' ({} digits)", receivingPhone, normalizedReceivingPhone, normalizedReceivingPhone.length());
         
         // Validate the normalized phone is exactly 12 digits
-        if (normalizedAdminPhone.length() != 12) {
-            throw new RuntimeException("Admin phone number must be normalized to exactly 12 digits. Original: '" + adminPhone + "', Normalized: '" + normalizedAdminPhone + "' (" + normalizedAdminPhone.length() + " digits)");
+        if (normalizedReceivingPhone.length() != 12) {
+            throw new RuntimeException("Receiving phone number must be normalized to exactly 12 digits. Original: '" + receivingPhone + "', Normalized: '" + normalizedReceivingPhone + "' (" + normalizedReceivingPhone.length() + " digits)");
         }
         
         // Validate it's numeric only
-        if (!normalizedAdminPhone.matches("^[0-9]{12}$")) {
-            throw new RuntimeException("Normalized admin phone must contain only digits. Got: '" + normalizedAdminPhone + "'");
+        if (!normalizedReceivingPhone.matches("^[0-9]{12}$")) {
+            throw new RuntimeException("Normalized receiving phone must contain only digits. Got: '" + normalizedReceivingPhone + "'");
         }
         
-        Long adminPhoneLong = Long.parseLong(normalizedAdminPhone);
-        logger.info("Setting admin phone in transfer to: {} (Long value), Amount: {} (payment {} minus bonus {} minus commission {})", 
-                adminPhoneLong, adminAmount, paymentAmount, userBonusAmount, commissionAmount);
-        transfer.setPhone(adminPhoneLong);
+        Long receivingPhoneLong = Long.parseLong(normalizedReceivingPhone);
+        logger.info("Setting receiving phone in transfer to: {} (Long value), Amount: {} (payment {} minus bonus {} minus commission {})", 
+                receivingPhoneLong, receiverAmount, paymentAmount, userBonusAmount, commissionAmount);
+        transfer.setPhone(receivingPhoneLong);
         String payerName = user != null ? user.getFullNames() : "Guest User";
         transfer.setMessage("Payment from " + payerName + " to " + receiver.getCompanyName());
         
@@ -545,7 +1207,8 @@ public class PaymentService {
         java.util.List<MoPayInitiateRequest.Transfer> transfers = new java.util.ArrayList<>();
         transfers.add(transfer);
         
-        logger.info("Added admin transfer (to hardcoded phone) - Amount: {}, Phone: {}", adminAmount, adminPhoneLong);
+        logger.info("Added receiver transfer (to {} phone) - Amount: {}, Phone: {}", 
+                isReceiverFlexible ? "receiver's MoMo account" : "default admin", receiverAmount, receivingPhoneLong);
         
         // Add transfer back to payer with user bonus (similar to /api/payments/pay)
         logger.info("Checking if user bonus should be added - User bonus amount: {}, Is greater than zero: {}", 
@@ -631,7 +1294,7 @@ public class PaymentService {
 
         // Generate transaction ID starting with POCHI for MOMO payments
         String transactionId = generateTransactionId();
-        transaction.setMopayTransactionId(transactionId);
+            transaction.setMopayTransactionId(transactionId);
         
         // Check MoPay response - API returns status 201 on success
         String mopayTransactionId = moPayResponse != null ? moPayResponse.getTransactionId() : null;
@@ -676,6 +1339,19 @@ public class PaymentService {
         // We display totalBonusReceived separately for tracking purposes
         BigDecimal amountRemainingWithBonus = user.getAmountRemaining();
 
+        // Get merchant-specific balances
+        List<MerchantUserBalance> merchantBalances = merchantUserBalanceRepository.findByUserId(userId);
+        List<MerchantBalanceInfo> merchantBalanceInfos = merchantBalances.stream()
+                .map(mb -> {
+                    MerchantBalanceInfo info = new MerchantBalanceInfo();
+                    info.setReceiverId(mb.getReceiver().getId());
+                    info.setReceiverCompanyName(mb.getReceiver().getCompanyName());
+                    info.setBalance(mb.getBalance());
+                    info.setTotalToppedUp(mb.getTotalToppedUp());
+                    return info;
+                })
+                .collect(java.util.stream.Collectors.toList());
+
         BalanceResponse response = new BalanceResponse();
         response.setUserId(user.getId());
         response.setFullNames(user.getFullNames());
@@ -687,6 +1363,7 @@ public class PaymentService {
         response.setAmountRemaining(user.getAmountRemaining());
         response.setTotalBonusReceived(totalBonusReceived);
         response.setAmountRemainingWithBonus(amountRemainingWithBonus);
+        response.setMerchantBalances(merchantBalanceInfos);
         response.setStatus(user.getStatus());
         response.setLastTransactionDate(user.getLastTransactionDate());
         response.setCreatedAt(user.getCreatedAt());
@@ -748,11 +1425,47 @@ public class PaymentService {
                     User user = transaction.getUser();
                     
                     if (transaction.getTransactionType() == TransactionType.TOP_UP) {
-                        // Add to user balance for top-ups
+                        Receiver topUpReceiver = transaction.getReceiver();
+                        
+                        if (topUpReceiver != null) {
+                            // Merchant-specific top-up: add to merchant-specific balance
+                            MerchantUserBalance merchantBalance = merchantUserBalanceRepository
+                                    .findByUserIdAndReceiverId(user.getId(), topUpReceiver.getId())
+                                    .orElse(null);
+                            
+                            if (merchantBalance == null) {
+                                // Create new merchant-specific balance
+                                merchantBalance = new MerchantUserBalance();
+                                merchantBalance.setUser(user);
+                                merchantBalance.setReceiver(topUpReceiver);
+                                merchantBalance.setBalance(BigDecimal.ZERO);
+                                merchantBalance.setTotalToppedUp(BigDecimal.ZERO);
+                            }
+                            
+                            // Update merchant-specific balance
+                            BigDecimal newMerchantBalance = merchantBalance.getBalance().add(transaction.getAmount());
+                            merchantBalance.setBalance(newMerchantBalance);
+                            merchantBalance.setTotalToppedUp(merchantBalance.getTotalToppedUp().add(transaction.getAmount()));
+                            merchantUserBalanceRepository.save(merchantBalance);
+                            
+                            // Also update user's amountRemaining for merchant-specific top-ups
+                            BigDecimal newAmountRemaining = user.getAmountRemaining().add(transaction.getAmount());
+                            user.setAmountRemaining(newAmountRemaining);
+                            
+                            // Set balance after to user's amountRemaining (not merchant balance)
+                            transaction.setBalanceAfter(newAmountRemaining);
+                        } else {
+                            // Global top-up: add to user's global balance
                         BigDecimal newBalance = user.getAmountRemaining().add(transaction.getAmount());
                         user.setAmountRemaining(newBalance);
                         user.setAmountOnCard(user.getAmountOnCard().add(transaction.getAmount()));
                         transaction.setBalanceAfter(newBalance);
+                        }
+                        
+                        // Always update amountOnCard for tracking total topped up
+                        user.setAmountOnCard(user.getAmountOnCard().add(transaction.getAmount()));
+                        user.setLastTransactionDate(LocalDateTime.now());
+                        userRepository.save(user);
                     } else if (transaction.getTransactionType() == TransactionType.PAYMENT && transaction.getMopayTransactionId() != null) {
                         // This is a MOMO PAYMENT - update receiver balance and user bonus
                         Receiver receiver = transaction.getReceiver();
@@ -859,35 +1572,44 @@ public class PaymentService {
                             BigDecimal paymentAmount = transaction.getAmount();
                             BigDecimal userBonusAmount = transaction.getUserBonusAmount() != null ? transaction.getUserBonusAmount() : BigDecimal.ZERO;
                             
-                            // Send WhatsApp to receiver
+                            // Send SMS and WhatsApp to receiver
                             if (receiver.getReceiverPhone() != null) {
                                 String receiverPhoneNormalized = normalizePhoneTo12Digits(receiver.getReceiverPhone());
+                                String receiverSmsMessage = String.format("Received %s RWF from %s via %s.", 
+                                    paymentAmount.toPlainString(), payerName, paymentMethod);
                                 String receiverWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via %s.",
                                     payerName, paymentAmount.toPlainString(), receiver.getCompanyName(), paymentMethod);
+                                messagingService.sendSms(receiverSmsMessage, receiverPhoneNormalized);
                                 whatsAppService.sendWhatsApp(receiverWhatsAppMessage, receiverPhoneNormalized);
-                                logger.info("WhatsApp sent to receiver {} about payment (status: SUCCESS, method: {}): {}", 
+                                logger.info("SMS and WhatsApp sent to receiver {} about payment (status: SUCCESS, method: {}): {}", 
                                     receiverPhoneNormalized, paymentMethod, receiverWhatsAppMessage);
                             }
                             
-                            // Send WhatsApp to payer (user) if phone is available
+                            // Send SMS and WhatsApp to payer (user) if phone is available
                             if (payerPhone != null && !payerPhone.trim().isEmpty()) {
                                 String payerPhoneNormalized = normalizePhoneTo12Digits(payerPhone);
+                                String userSmsMessage;
                                 String userWhatsAppMessage;
                                 
                                 // Include bonus amount in message if applicable
                                 if (userBonusAmount.compareTo(BigDecimal.ZERO) > 0) {
+                                    userSmsMessage = String.format("Payment of %s RWF to %s successful via %s. Bonus: %s RWF returned.",
+                                        paymentAmount.toPlainString(), receiver.getCompanyName(), paymentMethod, userBonusAmount.toPlainString());
                                     userWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via %s. Bonus: %s RWF returned.",
                                         payerName, paymentAmount.toPlainString(), receiver.getCompanyName(), paymentMethod, userBonusAmount.toPlainString());
                                 } else {
+                                    userSmsMessage = String.format("Payment of %s RWF to %s successful via %s.",
+                                        paymentAmount.toPlainString(), receiver.getCompanyName(), paymentMethod);
                                     userWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via %s.",
                                         payerName, paymentAmount.toPlainString(), receiver.getCompanyName(), paymentMethod);
                                 }
                                 
+                                messagingService.sendSms(userSmsMessage, payerPhoneNormalized);
                                 whatsAppService.sendWhatsApp(userWhatsAppMessage, payerPhoneNormalized);
-                                logger.info("WhatsApp sent to payer {} about payment (status: SUCCESS, method: {}): {}", 
+                                logger.info("SMS and WhatsApp sent to payer {} about payment (status: SUCCESS, method: {}): {}", 
                                     payerPhoneNormalized, paymentMethod, userWhatsAppMessage);
                             } else {
-                                logger.warn("Payer phone number is null or empty in transaction, skipping WhatsApp to payer");
+                                logger.warn("Payer phone number is null or empty in transaction, skipping SMS/WhatsApp to payer");
                             }
                         } catch (Exception e) {
                             logger.error("Failed to send WhatsApp notifications for payment status check: ", e);
@@ -914,9 +1636,9 @@ public class PaymentService {
                         String mopayIdPart = parts.length > 1 ? " | MOPAY_ID:" + parts[1].trim() : "";
                         transaction.setMessage(moPayResponse.getMessage() + mopayIdPart);
                     } else {
-                        transaction.setMessage(moPayResponse.getMessage());
-                    }
+                    transaction.setMessage(moPayResponse.getMessage());
                 }
+            }
                 logger.info("Transaction status updated to FAILED - Transaction ID remains: {}", transaction.getMopayTransactionId());
             }
             
@@ -1433,6 +2155,7 @@ public class PaymentService {
             response.setPaymentCategory(mapToPaymentCategoryResponse(transaction.getPaymentCategory()));
         }
         response.setTransactionType(transaction.getTransactionType());
+        response.setTopUpType(transaction.getTopUpType()); // LOAN, MOMO, or CASH for TOP_UP transactions
         response.setAmount(transaction.getAmount());
         response.setMopayTransactionId(transaction.getMopayTransactionId());
         response.setStatus(transaction.getStatus());
@@ -1466,15 +2189,17 @@ public class PaymentService {
         }
         
         // Add payment method information
-        // MOMO payments have mopayTransactionId (go through MoPay API) and phoneNumber is the payer's phone
-        // NFC payments don't have mopayTransactionId (internal transfers) and phoneNumber is the receiver's phone
+        // MOMO payments: message contains "MOPAY_ID:" (MoPay transaction ID from MoPay API), phoneNumber is the payer's phone
+        // NFC payments: message does NOT contain "MOPAY_ID:", phoneNumber is the receiver's phone
+        // Both now have mopayTransactionId (POCHI format) for tracking purposes
         if (transaction.getTransactionType() == TransactionType.PAYMENT) {
-            if (transaction.getMopayTransactionId() != null && !transaction.getMopayTransactionId().trim().isEmpty()) {
-                // MOMO payment - has mopayTransactionId, phoneNumber is payer's phone
+            String message = transaction.getMessage() != null ? transaction.getMessage() : "";
+            if (message.contains("MOPAY_ID:")) {
+                // MOMO payment - message contains MoPay transaction ID from MoPay API
                 response.setPayerPhone(transaction.getPhoneNumber());
                 response.setPaymentMethod("MOMO");
             } else {
-                // NFC Card payment - no mopayTransactionId, internal transfer
+                // NFC Card payment - no MoPay transaction ID in message, internal transfer
                 response.setPaymentMethod("NFC_CARD");
                 // For NFC, phoneNumber field contains receiver phone (not payer), so we don't set payerPhone
             }
@@ -1484,6 +2209,25 @@ public class PaymentService {
                 response.setPayerPhone(transaction.getPhoneNumber());
             }
             response.setPaymentMethod("TOP_UP");
+            
+            // Add loan information if this is a LOAN top-up transaction
+            if (transaction.getTopUpType() == TopUpType.LOAN) {
+                Optional<Loan> loanOptional = loanRepository.findByTransactionId(transaction.getId());
+                if (loanOptional.isPresent()) {
+                    Loan loan = loanOptional.get();
+                    response.setLoanId(loan.getId());
+                    
+                    LoanInfo loanInfo = new LoanInfo();
+                    loanInfo.setLoanId(loan.getId());
+                    loanInfo.setLoanAmount(loan.getLoanAmount());
+                    loanInfo.setPaidAmount(loan.getPaidAmount());
+                    loanInfo.setRemainingAmount(loan.getRemainingAmount());
+                    loanInfo.setStatus(loan.getStatus());
+                    loanInfo.setPaidAt(loan.getPaidAt());
+                    loanInfo.setLastPaymentAt(loan.getLastPaymentAt());
+                    response.setLoanInfo(loanInfo);
+                }
+            }
         } else {
             // REFUND or other
             response.setPaymentMethod("UNKNOWN");
@@ -1530,10 +2274,245 @@ public class PaymentService {
         response.setNfcCardId(user.getNfcCardId());
         response.setAmountOnCard(user.getAmountOnCard());
         response.setAmountRemaining(user.getAmountRemaining());
+        
+        // Get merchant-specific balances
+        List<MerchantUserBalance> merchantBalances = merchantUserBalanceRepository.findByUserId(user.getId());
+        List<MerchantBalanceInfo> merchantBalanceInfos = merchantBalances.stream()
+                .map(mb -> {
+                    MerchantBalanceInfo info = new MerchantBalanceInfo();
+                    info.setReceiverId(mb.getReceiver().getId());
+                    info.setReceiverCompanyName(mb.getReceiver().getCompanyName());
+                    info.setBalance(mb.getBalance());
+                    info.setTotalToppedUp(mb.getTotalToppedUp());
+                    return info;
+                })
+                .collect(java.util.stream.Collectors.toList());
+        response.setMerchantBalances(merchantBalanceInfos);
+        
         response.setStatus(user.getStatus());
         response.setLastTransactionDate(user.getLastTransactionDate());
         response.setCreatedAt(user.getCreatedAt());
         response.setUpdatedAt(user.getUpdatedAt());
+        return response;
+    }
+
+    /**
+     * Get all loans for a user
+     */
+    @Transactional(readOnly = true)
+    public List<LoanResponse> getUserLoans(UUID userId) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        
+        List<Loan> loans = loanRepository.findByUserId(userId);
+        return loans.stream()
+                .map(this::mapToLoanResponse)
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Get all loans for a merchant/receiver
+     */
+    @Transactional(readOnly = true)
+    public List<LoanResponse> getMerchantLoans(UUID receiverId) {
+        Receiver receiver = receiverRepository.findById(receiverId)
+                .orElseThrow(() -> new RuntimeException("Receiver not found"));
+        
+        List<Loan> loans = loanRepository.findByReceiverId(receiverId);
+        return loans.stream()
+                .map(this::mapToLoanResponse)
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Pay back a loan
+     */
+    public LoanResponse payLoan(UUID userId, PayLoanRequest request) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        
+        Loan loan = loanRepository.findById(request.getLoanId())
+                .orElseThrow(() -> new RuntimeException("Loan not found"));
+        
+        // Verify the loan belongs to this user
+        if (!loan.getUser().getId().equals(userId)) {
+            throw new RuntimeException("This loan does not belong to the specified user");
+        }
+        
+        // Verify loan is not already fully paid
+        if (loan.getStatus() == LoanStatus.COMPLETED) {
+            throw new RuntimeException("This loan has already been fully paid");
+        }
+        
+        // Verify payment amount doesn't exceed remaining amount
+        if (request.getAmount().compareTo(loan.getRemainingAmount()) > 0) {
+            throw new RuntimeException("Payment amount (" + request.getAmount() + 
+                ") exceeds remaining loan amount (" + loan.getRemainingAmount() + ")");
+        }
+        
+        // Check if user has sufficient balance (global or merchant-specific)
+        BigDecimal merchantBalance = BigDecimal.ZERO;
+        MerchantUserBalance merchantUserBalance = merchantUserBalanceRepository
+                .findByUserIdAndReceiverId(userId, loan.getReceiver().getId())
+                .orElse(null);
+        
+        if (merchantUserBalance != null) {
+            merchantBalance = merchantUserBalance.getBalance();
+        }
+        
+        BigDecimal globalBalance = user.getAmountRemaining();
+        BigDecimal totalAvailableBalance = merchantBalance.add(globalBalance);
+        
+        if (totalAvailableBalance.compareTo(request.getAmount()) < 0) {
+            throw new RuntimeException("Insufficient balance to pay loan. Available: " + totalAvailableBalance);
+        }
+        
+        // Deduct payment from totalToppedUp (not from balance) in merchant-specific balance
+        BigDecimal remainingPayment = request.getAmount();
+        
+        // Deduct from totalToppedUp in merchant-specific balance
+        if (merchantUserBalance != null) {
+            BigDecimal currentTotalToppedUp = merchantUserBalance.getTotalToppedUp();
+            if (currentTotalToppedUp.compareTo(remainingPayment) >= 0) {
+                BigDecimal newTotalToppedUp = currentTotalToppedUp.subtract(remainingPayment);
+                merchantUserBalance.setTotalToppedUp(newTotalToppedUp);
+                remainingPayment = BigDecimal.ZERO;
+            } else {
+                // If totalToppedUp is less than payment, use what's available and deduct rest from global balance
+                merchantUserBalance.setTotalToppedUp(BigDecimal.ZERO);
+                remainingPayment = remainingPayment.subtract(currentTotalToppedUp);
+            }
+            merchantUserBalanceRepository.save(merchantUserBalance);
+        }
+        
+        // Then, deduct remaining amount from global balance
+        if (remainingPayment.compareTo(BigDecimal.ZERO) > 0) {
+            BigDecimal userNewBalance = globalBalance.subtract(remainingPayment);
+            user.setAmountRemaining(userNewBalance);
+            user.setLastTransactionDate(LocalDateTime.now());
+            userRepository.save(user);
+        }
+        
+        // Update loan
+        BigDecimal newPaidAmount = loan.getPaidAmount().add(request.getAmount());
+        BigDecimal newRemainingAmount = loan.getRemainingAmount().subtract(request.getAmount());
+        
+        loan.setPaidAmount(newPaidAmount);
+        loan.setRemainingAmount(newRemainingAmount);
+        loan.setLastPaymentAt(LocalDateTime.now());
+        
+        // Update loan status
+        if (newRemainingAmount.compareTo(BigDecimal.ZERO) <= 0) {
+            loan.setStatus(LoanStatus.COMPLETED);
+            loan.setPaidAt(LocalDateTime.now());
+        } else {
+            loan.setStatus(LoanStatus.PARTIALLY_PAID);
+        }
+        
+        Loan savedLoan = loanRepository.save(loan);
+        
+        // Create transaction record for loan payment
+        Transaction paymentTransaction = new Transaction();
+        paymentTransaction.setUser(user);
+        paymentTransaction.setReceiver(loan.getReceiver());
+        paymentTransaction.setTransactionType(TransactionType.PAYMENT);
+        paymentTransaction.setAmount(request.getAmount());
+        paymentTransaction.setPhoneNumber(user.getPhoneNumber());
+        paymentTransaction.setMessage(request.getMessage() != null ? request.getMessage() : 
+            "Loan repayment to " + loan.getReceiver().getCompanyName());
+        paymentTransaction.setStatus(TransactionStatus.SUCCESS);
+        paymentTransaction.setBalanceBefore(totalAvailableBalance);
+        paymentTransaction.setBalanceAfter(totalAvailableBalance.subtract(request.getAmount()));
+        
+        String transactionId = generateTransactionId();
+        paymentTransaction.setMopayTransactionId(transactionId);
+        transactionRepository.save(paymentTransaction);
+        
+        return mapToLoanResponse(savedLoan);
+    }
+
+    /**
+     * Update loan status and paid amount (admin/manual update)
+     * Can be called by ADMIN or by the main merchant who gave the loan
+     */
+    public LoanResponse updateLoan(UpdateLoanRequest request) {
+        Loan loan = loanRepository.findById(request.getLoanId())
+                .orElseThrow(() -> new RuntimeException("Loan not found"));
+        
+        // Get current authenticated user
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication == null || !authentication.isAuthenticated()) {
+            throw new RuntimeException("User not authenticated");
+        }
+        
+        String currentUsername = authentication.getName();
+        
+        // Check if user is ADMIN - admins can update any loan
+        boolean isAdmin = authentication.getAuthorities().stream()
+                .anyMatch(a -> a.getAuthority().equals("ROLE_ADMIN"));
+        
+        // If not admin, verify the merchant owns this loan
+        if (!isAdmin) {
+            // Get the receiver (merchant) who gave this loan
+            Receiver loanReceiver = loan.getReceiver();
+            
+            // Check if the loan receiver is a submerchant - if so, get the main merchant
+            Receiver mainMerchant = loanReceiver.getParentReceiver() != null 
+                    ? loanReceiver.getParentReceiver() 
+                    : loanReceiver;
+            
+            // Verify the authenticated user is the main merchant who owns this loan
+            if (!mainMerchant.getUsername().equals(currentUsername)) {
+                throw new RuntimeException("You can only update loans that you gave. This loan belongs to: " + 
+                    loanReceiver.getCompanyName());
+            }
+        }
+        
+        // Validate paid amount doesn't exceed loan amount
+        if (request.getPaidAmount().compareTo(loan.getLoanAmount()) > 0) {
+            throw new RuntimeException("Paid amount (" + request.getPaidAmount() + 
+                ") cannot exceed loan amount (" + loan.getLoanAmount() + ")");
+        }
+        
+        // Calculate remaining amount
+        BigDecimal newRemainingAmount = loan.getLoanAmount().subtract(request.getPaidAmount());
+        
+        // Update loan
+        loan.setPaidAmount(request.getPaidAmount());
+        loan.setRemainingAmount(newRemainingAmount);
+        loan.setStatus(request.getStatus());
+        
+        // Update timestamps based on status
+        if (request.getStatus() == LoanStatus.COMPLETED) {
+            if (loan.getPaidAt() == null) {
+                loan.setPaidAt(LocalDateTime.now());
+            }
+        }
+        if (request.getPaidAmount().compareTo(BigDecimal.ZERO) > 0) {
+            loan.setLastPaymentAt(LocalDateTime.now());
+        }
+        
+        Loan savedLoan = loanRepository.save(loan);
+        return mapToLoanResponse(savedLoan);
+    }
+
+    private LoanResponse mapToLoanResponse(Loan loan) {
+        LoanResponse response = new LoanResponse();
+        response.setId(loan.getId());
+        response.setUserId(loan.getUser().getId());
+        response.setUserFullNames(loan.getUser().getFullNames());
+        response.setUserPhoneNumber(loan.getUser().getPhoneNumber());
+        response.setReceiverId(loan.getReceiver().getId());
+        response.setReceiverCompanyName(loan.getReceiver().getCompanyName());
+        response.setTransactionId(loan.getTransaction().getId());
+        response.setLoanAmount(loan.getLoanAmount());
+        response.setPaidAmount(loan.getPaidAmount());
+        response.setRemainingAmount(loan.getRemainingAmount());
+        response.setStatus(loan.getStatus());
+        response.setPaidAt(loan.getPaidAt());
+        response.setLastPaymentAt(loan.getLastPaymentAt());
+        response.setCreatedAt(loan.getCreatedAt());
+        response.setUpdatedAt(loan.getUpdatedAt());
         return response;
     }
 

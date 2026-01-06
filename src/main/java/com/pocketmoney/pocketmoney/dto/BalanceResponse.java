@@ -7,6 +7,7 @@ import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.UUID;
 
 @Data
@@ -20,9 +21,10 @@ public class BalanceResponse {
     private Boolean isAssignedNfcCard;
     private String nfcCardId;
     private BigDecimal amountOnCard;
-    private BigDecimal amountRemaining;
+    private BigDecimal amountRemaining; // Global balance
     private BigDecimal totalBonusReceived;
     private BigDecimal amountRemainingWithBonus; // amountRemaining + totalBonusReceived
+    private List<MerchantBalanceInfo> merchantBalances; // Merchant-specific balances
     private UserStatus status;
     private LocalDateTime lastTransactionDate;
     private LocalDateTime createdAt;

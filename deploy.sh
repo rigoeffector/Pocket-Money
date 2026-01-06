@@ -202,16 +202,16 @@ setup_database() {
 apply_migrations() {
     print_status "Applying database migrations to remote server..."
     
-    # Check if migration file exists
-    if [ ! -f "migrate_remote_database.sql" ]; then
-        print_error "Migration file 'migrate_remote_database.sql' not found in current directory"
+    # Check if consolidated migration file exists
+    if [ ! -f "all_migrations_consolidated.sql" ]; then
+        print_error "Migration file 'all_migrations_consolidated.sql' not found in current directory"
         exit 1
     fi
     
-    # Copy migration script to remote server
-    print_status "Copying migration script to remote server..."
+    # Copy consolidated migration script to remote server
+    print_status "Copying consolidated migration script to remote server..."
     scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        migrate_remote_database.sql ${SERVER_USER}@${SERVER_HOST}:/tmp/migrate_remote_database.sql
+        all_migrations_consolidated.sql ${SERVER_USER}@${SERVER_HOST}:/tmp/all_migrations_consolidated.sql
     
     if [ $? -ne 0 ]; then
         print_error "Failed to copy migration script to remote server"
@@ -222,8 +222,8 @@ apply_migrations() {
     print_status "Running migration script on remote database..."
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${SERVER_USER}@${SERVER_HOST} "
         export PGPASSWORD='${DB_PASSWORD}'
-        echo 'Applying migrations to database ${DB_NAME}...'
-        psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -f /tmp/migrate_remote_database.sql
+        echo 'Applying all migrations to database ${DB_NAME}...'
+        psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -f /tmp/all_migrations_consolidated.sql
         
         if [ \$? -eq 0 ]; then
             echo '✅ Migrations applied successfully!'
@@ -232,18 +232,26 @@ apply_migrations() {
             echo ''
             echo 'Verifying changes...'
             echo 'Checking receivers table columns:'
-            psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c \"\\d receivers\" | grep -E '(assigned_balance|remaining_balance|discount_percentage|user_bonus_percentage|parent_receiver_id)' || echo 'Columns verification completed'
+            psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c \"\\d receivers\" | grep -E '(assigned_balance|remaining_balance|discount_percentage|user_bonus_percentage|parent_receiver_id|momo_account_phone|is_flexible)' || echo 'Columns verification completed'
             
             echo ''
             echo 'Checking transactions table columns:'
-            psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c \"\\d transactions\" | grep -E '(admin_income_amount|discount_amount|user_bonus_amount|receiver_balance_before|receiver_balance_after)' || echo 'Columns verification completed'
+            psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c \"\\d transactions\" | grep -E '(admin_income_amount|discount_amount|user_bonus_amount|receiver_balance_before|receiver_balance_after|top_up_type|mopay_transaction_id)' || echo 'Columns verification completed'
             
             echo ''
             echo 'Checking balance_assignment_history table:'
             psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c \"\\d balance_assignment_history\" > /dev/null 2>&1 && echo '✅ balance_assignment_history table exists' || echo '⚠️  balance_assignment_history table may not exist'
             
+            echo ''
+            echo 'Checking merchant_user_balances table:'
+            psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c \"\\d merchant_user_balances\" > /dev/null 2>&1 && echo '✅ merchant_user_balances table exists' || echo '⚠️  merchant_user_balances table may not exist'
+            
+            echo ''
+            echo 'Checking loans table:'
+            psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c \"\\d loans\" > /dev/null 2>&1 && echo '✅ loans table exists' || echo '⚠️  loans table may not exist'
+            
             # Clean up migration file
-            rm -f /tmp/migrate_remote_database.sql
+            rm -f /tmp/all_migrations_consolidated.sql
             echo ''
             echo 'Migration verification completed'
         else

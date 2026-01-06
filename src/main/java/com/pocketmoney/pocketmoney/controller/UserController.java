@@ -157,5 +157,18 @@ public class UserController {
                     .body(ApiResponse.error(e.getMessage()));
         }
     }
+
+    @PostMapping("/phone/{phoneNumber}/nfc-card/assign")
+    public ResponseEntity<ApiResponse<NfcCardResponse>> assignNfcCardByPhoneNumber(
+            @PathVariable String phoneNumber,
+            @Valid @RequestBody AssignNfcCardRequest request) {
+        try {
+            NfcCardResponse response = userService.assignNfcCardByPhoneNumber(phoneNumber, request);
+            return ResponseEntity.ok(ApiResponse.success("NFC card assigned successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
 }
 

@@ -38,6 +38,9 @@ public class Receiver {
     @Column(name = "receiver_phone", nullable = false, unique = true)
     private String receiverPhone;
 
+    @Column(name = "momo_account_phone")
+    private String momoAccountPhone; // MoMo account phone for receiving top-up payments
+
     @Column(name = "account_number")
     private String accountNumber;
 
@@ -71,6 +74,9 @@ public class Receiver {
 
     @Column(name = "user_bonus_percentage", precision = 5, scale = 2)
     private BigDecimal userBonusPercentage = BigDecimal.ZERO;
+
+    @Column(name = "is_flexible", nullable = false)
+    private Boolean isFlexible = false; // If true, users can pay without checking receiver's remaining balance
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "parent_receiver_id")
