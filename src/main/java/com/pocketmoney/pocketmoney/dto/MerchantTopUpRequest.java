@@ -13,6 +13,8 @@ public class MerchantTopUpRequest {
     @NotBlank(message = "Phone number is required")
     private String phone; // User's phone number (linked to their card)
 
+    private String fullNames; // Client's full names (optional, will be used when creating/updating user)
+
     @NotNull(message = "Amount is required")
     @DecimalMin(value = "0.01", message = "Amount must be greater than 0")
     private BigDecimal amount;

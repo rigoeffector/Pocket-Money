@@ -355,13 +355,15 @@ public class PaymentService {
         if (user == null) {
             logger.info("User not found with phone number: {}. Creating new user automatically.", request.getPhone());
             
-            // Use the phone number as the full name temporarily (user can update later)
-            // normalizedPhone is already defined above, reuse it
+            // Use provided fullNames or default to phone-based name
             String phoneDigitsOnly = request.getPhone().replaceAll("[^0-9]", "");
+            String userFullNames = (request.getFullNames() != null && !request.getFullNames().trim().isEmpty()) 
+                ? request.getFullNames().trim() 
+                : "User " + phoneDigitsOnly;
             
             // Create new user with minimal required information
             User newUser = new User();
-            newUser.setFullNames("User " + phoneDigitsOnly); // Temporary name, can be updated later
+            newUser.setFullNames(userFullNames);
             newUser.setPhoneNumber(normalizedPhone);
             newUser.setPin(passwordEncoder.encode("0000")); // Default PIN, user should change this
             newUser.setIsAssignedNfcCard(false); // No NFC card assigned yet
@@ -370,7 +372,18 @@ public class PaymentService {
             newUser.setStatus(UserStatus.ACTIVE);
             
             user = userRepository.save(newUser);
-            logger.info("Created new user with ID: {}, Phone: {}", user.getId(), normalizedPhone);
+            logger.info("Created new user with ID: {}, Phone: {}, FullNames: {}", user.getId(), normalizedPhone, userFullNames);
+        } else {
+            // If user exists and fullNames is provided, update the user's name
+            if (request.getFullNames() != null && !request.getFullNames().trim().isEmpty()) {
+                String newFullNames = request.getFullNames().trim();
+                if (!newFullNames.equals(user.getFullNames())) {
+                    logger.info("Updating user fullNames from '{}' to '{}' for user ID: {}", 
+                        user.getFullNames(), newFullNames, user.getId());
+                    user.setFullNames(newFullNames);
+                    user = userRepository.save(user);
+                }
+            }
         }
         
         // For merchant top-ups, NFC card is optional (merchant can top up users without cards)
@@ -927,14 +940,6 @@ public class PaymentService {
             // Keep userNewBalance as globalBalance (0) for message purposes
         }
 
-        // Credit receiver's wallet balance (full payment amount) - individual receiver's wallet
-        BigDecimal receiverNewBalance = receiver.getWalletBalance().add(paymentAmount);
-        BigDecimal receiverNewTotal = receiver.getTotalReceived().add(paymentAmount);
-        receiver.setWalletBalance(receiverNewBalance);
-        receiver.setTotalReceived(receiverNewTotal);
-        receiver.setLastTransactionDate(LocalDateTime.now());
-        receiverRepository.save(receiver);
-        
         // Update balance owner's remaining balance (shared balance - main merchant's if submerchant)
         // Balance owner's remaining balance is reduced by ONLY the payment amount
         // The discount percentage was already added as a bonus when balance was assigned
@@ -949,14 +954,31 @@ public class PaymentService {
             balanceOwner.setRemainingBalance(receiverBalanceAfter);
         }
         balanceOwner.setLastTransactionDate(LocalDateTime.now());
-        receiverRepository.save(balanceOwner);
         
-        // Also update balance owner's wallet balance and total received (shared)
+        // Update balance owner's wallet balance and total received (shared)
+        // This is the main balance that should be updated for all payments
         BigDecimal balanceOwnerNewWallet = balanceOwner.getWalletBalance().add(paymentAmount);
         BigDecimal balanceOwnerNewTotal = balanceOwner.getTotalReceived().add(paymentAmount);
         balanceOwner.setWalletBalance(balanceOwnerNewWallet);
         balanceOwner.setTotalReceived(balanceOwnerNewTotal);
         receiverRepository.save(balanceOwner);
+        
+        // Only update individual receiver's stats if it's a submerchant (different from balanceOwner)
+        // This prevents double counting for main merchants where receiver == balanceOwner
+        if (receiver.getId() != balanceOwner.getId()) {
+            // This is a submerchant - update individual stats for tracking
+            BigDecimal receiverNewBalance = receiver.getWalletBalance().add(paymentAmount);
+            BigDecimal receiverNewTotal = receiver.getTotalReceived().add(paymentAmount);
+            receiver.setWalletBalance(receiverNewBalance);
+            receiver.setTotalReceived(receiverNewTotal);
+            receiver.setLastTransactionDate(LocalDateTime.now());
+            receiverRepository.save(receiver);
+            logger.info("Updated submerchant '{}' individual stats: wallet={}, totalReceived={}", 
+                receiver.getCompanyName(), receiverNewBalance, receiverNewTotal);
+        } else {
+            // Main merchant - receiver and balanceOwner are the same, already updated above
+            logger.info("Main merchant payment - using shared balance (already updated)");
+        }
 
         // Create transaction record - PAYMENT is immediate (no MoPay, internal transfer)
         Transaction transaction = new Transaction();
