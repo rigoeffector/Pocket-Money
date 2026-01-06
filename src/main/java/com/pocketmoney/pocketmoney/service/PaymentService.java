@@ -1912,13 +1912,23 @@ public class PaymentService {
         java.util.Set<UUID> distinctUsers = new java.util.HashSet<>();
         
         for (Transaction transaction : transactions) {
+            // Count status for ALL transaction types (PAYMENT and TOP_UP)
+            if (transaction.getStatus() == TransactionStatus.SUCCESS) {
+                successfulTransactions++;
+            } else if (transaction.getStatus() == TransactionStatus.PENDING) {
+                pendingTransactions++;
+            } else if (transaction.getStatus() == TransactionStatus.FAILED || transaction.getStatus() == TransactionStatus.CANCELLED) {
+                failedTransactions++;
+            }
+            
+            // Only calculate revenue and amounts for PAYMENT transactions
             if (transaction.getTransactionType() == TransactionType.PAYMENT) {
                 // Count distinct users
                 if (transaction.getUser() != null) {
                     distinctUsers.add(transaction.getUser().getId());
                 }
                 
-                // Sum amounts for successful transactions
+                // Sum amounts for successful payment transactions only
                 if (transaction.getStatus() == TransactionStatus.SUCCESS) {
                     if (transaction.getAmount() != null) {
                         totalRevenue = totalRevenue.add(transaction.getAmount());
@@ -1932,11 +1942,6 @@ public class PaymentService {
                     if (transaction.getAdminIncomeAmount() != null) {
                         totalAdminIncomeAmount = totalAdminIncomeAmount.add(transaction.getAdminIncomeAmount());
                     }
-                    successfulTransactions++;
-                } else if (transaction.getStatus() == TransactionStatus.PENDING) {
-                    pendingTransactions++;
-                } else {
-                    failedTransactions++;
                 }
             }
         }

@@ -10,6 +10,7 @@ DELETE FROM loans;
 SELECT 'Deleted all loans' AS status;
 
 -- 2. Delete all Transactions (after loans are deleted)
+-- This deletes ALL transaction records from the transactions table
 DELETE FROM transactions;
 SELECT 'Deleted all transactions' AS status;
 
@@ -53,8 +54,9 @@ UPDATE receivers SET
     assigned_balance = 0.00,
     remaining_balance = 0.00,
     discount_percentage = 0.00,
-    user_bonus_percentage = 0.00;
-SELECT 'Reset all receiver balances and percentages to 0.0' AS status;
+    user_bonus_percentage = 0.00,
+    last_transaction_date = NULL;
+SELECT 'Reset all receiver balances, percentages, and last_transaction_date' AS status;
 
 -- 12. Users table is kept (with balances reset)
 -- 13. Receivers table is kept (with balances reset)
