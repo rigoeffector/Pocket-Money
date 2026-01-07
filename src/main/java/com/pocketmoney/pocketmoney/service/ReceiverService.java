@@ -1235,8 +1235,10 @@ public class ReceiverService {
             logger.info("New remaining balance: {} + {} + {} = {}", 
                 currentRemaining, sentAmount, discountAmount, newRemainingBalance);
             
+            // Ensure remaining balance never goes below 0
             if (newRemainingBalance.compareTo(BigDecimal.ZERO) < 0) {
                 newRemainingBalance = BigDecimal.ZERO;
+                logger.info("Remaining balance would have been negative, setting to 0");
             }
             
             // Wallet balance = Previous wallet balance + Sent amount + Discount amount

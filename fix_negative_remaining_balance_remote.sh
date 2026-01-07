@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# Script to reset submerchant balances on REMOTE database
+# Script to fix negative remaining balance on REMOTE database
 # This script connects to the remote server via SSH and runs the migration
-# Usage: ./reset_submerchant_balances_remote.sh
+# Usage: ./fix_negative_remaining_balance_remote.sh
 
 set -e  # Exit on error
 
@@ -18,11 +18,11 @@ DB_USER="postgres"
 DB_PASSWORD="amazimeza12QW!@"
 
 echo "=========================================="
-echo "Reset Submerchant Balances - REMOTE"
+echo "Fix Negative Remaining Balance - REMOTE"
 echo "=========================================="
 echo "Remote Server: $REMOTE_HOST"
 echo "Database: $DB_NAME"
-echo "WARNING: This will reset all submerchant balances to 0"
+echo "WARNING: This will fix all negative remaining balance values"
 echo "=========================================="
 echo ""
 read -p "Are you sure you want to proceed? (yes/no): " confirm
@@ -33,14 +33,14 @@ if [ "$confirm" != "yes" ]; then
 fi
 
 # Check if SQL file exists
-if [ ! -f "reset_submerchant_balances.sql" ]; then
-    echo "Error: reset_submerchant_balances.sql file not found in current directory."
+if [ ! -f "fix_negative_remaining_balance.sql" ]; then
+    echo "Error: fix_negative_remaining_balance.sql file not found in current directory."
     exit 1
 fi
 
 echo ""
 echo "Uploading migration script to remote server..."
-scp reset_submerchant_balances.sql $REMOTE_USER@$REMOTE_HOST:/tmp/reset_submerchant_balances.sql
+scp fix_negative_remaining_balance.sql $REMOTE_USER@$REMOTE_HOST:/tmp/fix_negative_remaining_balance.sql
 
 if [ $? -ne 0 ]; then
     echo "ERROR: Failed to upload script to remote server"
@@ -51,7 +51,7 @@ echo ""
 echo "Running migration on remote server..."
 ssh $REMOTE_USER@$REMOTE_HOST << EOF
     echo "Connecting to database on remote server..."
-    PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -f /tmp/reset_submerchant_balances.sql
+    PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -f /tmp/fix_negative_remaining_balance.sql
     
     if [ \$? -eq 0 ]; then
         echo ""
@@ -67,7 +67,7 @@ ssh $REMOTE_USER@$REMOTE_HOST << EOF
     fi
     
     # Clean up the uploaded file
-    rm -f /tmp/reset_submerchant_balances.sql
+    rm -f /tmp/fix_negative_remaining_balance.sql
 EOF
 
 if [ $? -eq 0 ]; then

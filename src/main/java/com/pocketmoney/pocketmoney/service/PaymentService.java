@@ -760,16 +760,12 @@ public class PaymentService {
         logger.info("Main merchant is flexible mode: {} (Main merchant: {})", isMainMerchantFlexible, mainMerchantForCheck.getCompanyName());
         
         // If main merchant is flexible, skip all balance checks and allow payment
+        // BUT still deduct from user balance if they have one
         if (isMainMerchantFlexible) {
             logger.info("Main merchant is in FLEXIBLE mode - allowing payment without balance checks");
-            // Skip all balance checks, allow payment to proceed
-            // Don't overwrite totalAvailableBalance if we've already calculated it with loan/topped up amount
-            // Only set to zero if we haven't added the loan/topped up amount
-            if (!(hasMerchantBalance && isMainMerchantFlexibleForBalance)) {
-                merchantBalance = BigDecimal.ZERO;
-                globalBalance = BigDecimal.ZERO;
-                totalAvailableBalance = BigDecimal.ZERO;
-            }
+            // Skip balance validation checks, but keep the balance values for deduction
+            // Don't overwrite balances - we need to deduct from user if they have balance
+            // The balances are already calculated above, keep them for deduction logic
         } else {
             // Main merchant is NON-FLEXIBLE: Check balances as usual
             // Check receiver's remaining balance - if user has no balance but receiver has balance, allow payment
@@ -860,7 +856,7 @@ public class PaymentService {
         // Receiver's remaining balance is deducted by ONLY the payment amount (discount was already added as bonus when balance was assigned)
         // Example: User pays 500, deduct only 500 from receiver balance (no discount deduction)
         // Check if receiver has sufficient remaining balance BEFORE processing payment
-        BigDecimal receiverBalanceBefore = balanceOwner.getRemainingBalance() != null ? balanceOwner.getRemainingBalance() : BigDecimal.ZERO;
+        BigDecimal receiverBalanceBefore = receiver.getRemainingBalance() != null ? receiver.getRemainingBalance() : BigDecimal.ZERO;
         BigDecimal receiverBalanceReduction = paymentAmount; // Only deduct payment amount, not payment + discount
         BigDecimal receiverBalanceAfter = receiverBalanceBefore.subtract(receiverBalanceReduction);
         
@@ -884,72 +880,143 @@ public class PaymentService {
         // Note: Balance validation already done above using totalAvailableBalance (global + merchant balances)
         // This allows users topped up by main merchant to pay at submerchants
         
+        // Get the actual user balance from database for deduction (don't use the modified totalAvailableBalance)
+        // We need to preserve the actual balance values for deduction even in flexible mode
+        BigDecimal actualGlobalBalance = user.getAmountRemaining() != null ? user.getAmountRemaining() : BigDecimal.ZERO;
+        BigDecimal actualMerchantBalance = merchantUserBalance != null && merchantUserBalance.getBalance() != null 
+            ? merchantUserBalance.getBalance() : BigDecimal.ZERO;
+        BigDecimal actualTotalAvailableBalance = actualGlobalBalance.add(actualMerchantBalance);
+        
+        // Check if user has sufficient balance to cover the full payment amount
+        // User must have enough balance - throw error if insufficient
+        if (actualTotalAvailableBalance.compareTo(paymentAmount) < 0) {
+            String errorMsg = String.format(
+                "Insufficient balance. You have %s (Merchant: %s, Global: %s), but payment requires %s. " +
+                "Please top up your account to have sufficient balance.",
+                actualTotalAvailableBalance, actualMerchantBalance, actualGlobalBalance, paymentAmount);
+            logger.error("=== INSUFFICIENT BALANCE ERROR ===");
+            logger.error(errorMsg);
+            logger.error("User amountRemaining from DB: {}", actualGlobalBalance);
+            logger.error("Merchant balance from DB: {}", actualMerchantBalance);
+            throw new RuntimeException(errorMsg);
+        }
+        
         // Deduct from merchant-specific balance first, then global balance
         BigDecimal remainingPayment = paymentAmount;
-        BigDecimal userNewBalance = globalBalance; // Initialize for use in messages later
+        BigDecimal userNewBalance = actualGlobalBalance; // Initialize with actual balance for deduction
         
-        // Only deduct from user balance if user has balance
-        if (totalAvailableBalance.compareTo(BigDecimal.ZERO) > 0) {
+        // Deduct from user balance - user has sufficient balance (already validated above)
+        if (actualTotalAvailableBalance.compareTo(BigDecimal.ZERO) > 0) {
             BigDecimal amountDeductedFromMerchant = BigDecimal.ZERO;
+            BigDecimal amountDeductedFromUserGlobal = BigDecimal.ZERO;
             
             // First, deduct from merchant-specific balance if available
-            if (merchantUserBalance != null && merchantBalance.compareTo(BigDecimal.ZERO) > 0) {
-                if (merchantBalance.compareTo(remainingPayment) >= 0) {
+            if (merchantUserBalance != null && actualMerchantBalance.compareTo(BigDecimal.ZERO) > 0) {
+                if (actualMerchantBalance.compareTo(remainingPayment) >= 0) {
                     // Merchant balance covers entire payment
-                    BigDecimal newMerchantBalance = merchantBalance.subtract(remainingPayment);
+                    BigDecimal newMerchantBalance = actualMerchantBalance.subtract(remainingPayment);
                     merchantUserBalance.setBalance(newMerchantBalance);
                     amountDeductedFromMerchant = remainingPayment;
                     remainingPayment = BigDecimal.ZERO;
                 } else {
                     // Merchant balance covers part of payment
                     merchantUserBalance.setBalance(BigDecimal.ZERO);
-                    amountDeductedFromMerchant = merchantBalance;
-                    remainingPayment = remainingPayment.subtract(merchantBalance);
+                    amountDeductedFromMerchant = actualMerchantBalance;
+                    remainingPayment = remainingPayment.subtract(actualMerchantBalance);
                 }
                 merchantUserBalanceRepository.save(merchantUserBalance);
             }
             
-            // Always deduct the full payment amount from user's amountRemaining
-            // This ensures both merchant balance AND amountRemaining are deducted when user pays
-            BigDecimal totalDeductionFromUser = paymentAmount; // Full payment amount
-            userNewBalance = globalBalance.subtract(totalDeductionFromUser);
-            user.setAmountRemaining(userNewBalance);
+            // Deduct from user's global balance (amountRemaining) - but only up to what they have
+            // Don't allow user balance to go negative, even in flexible mode
+            // User can only pay until their balance reaches 0
+            if (remainingPayment.compareTo(BigDecimal.ZERO) > 0 && actualGlobalBalance.compareTo(BigDecimal.ZERO) > 0) {
+                if (actualGlobalBalance.compareTo(remainingPayment) >= 0) {
+                    // User has enough balance to cover remaining payment
+                    amountDeductedFromUserGlobal = remainingPayment;
+                    userNewBalance = actualGlobalBalance.subtract(remainingPayment);
+                    remainingPayment = BigDecimal.ZERO;
+                } else {
+                    // User has some balance but not enough - deduct only what they have, stop at 0
+                    amountDeductedFromUserGlobal = actualGlobalBalance;
+                    userNewBalance = BigDecimal.ZERO; // User balance goes to 0, not negative
+                    remainingPayment = remainingPayment.subtract(actualGlobalBalance);
+                    logger.info("User balance ({}) is less than remaining payment. Deducted only what user has. Remaining payment: {} will NOT be covered - user can only pay what they have.", 
+                        actualGlobalBalance, remainingPayment);
+                }
+                user.setAmountRemaining(userNewBalance);
+            } else {
+                // No remaining payment or no user balance to deduct from
+                userNewBalance = actualGlobalBalance; // Keep balance as is
+            }
+            
+            // If there's still remaining payment after deducting from merchant and user balance,
+            // and we're in flexible mode, check if user has no balance left - payment should only use what user has
+            if (remainingPayment.compareTo(BigDecimal.ZERO) > 0) {
+                // User doesn't have enough balance to cover the full payment
+                // In this case, we only process payment for what the user can pay (merchant balance + user balance)
+                BigDecimal actualPaymentAmount = paymentAmount.subtract(remainingPayment);
+                logger.info("User can only pay {} out of {} requested. Payment processed for amount user has available.", actualPaymentAmount, paymentAmount);
+                // Note: remainingPayment amount will not be deducted from receiver, payment is only for what user has
+            }
             
             // Add user bonus back to user's wallet if applicable
             if (userBonusAmount.compareTo(BigDecimal.ZERO) > 0) {
                 userNewBalance = userNewBalance.add(userBonusAmount);
+                // Ensure amountRemaining never goes below 0 (though bonus should make it positive)
+                if (userNewBalance.compareTo(BigDecimal.ZERO) < 0) {
+                    userNewBalance = BigDecimal.ZERO;
+                }
                 user.setAmountRemaining(userNewBalance);
             }
             
             user.setLastTransactionDate(LocalDateTime.now());
             userRepository.save(user);
             
-            logger.info("Payment deduction: Merchant balance deducted: {}, User amountRemaining deducted: {}", 
-                amountDeductedFromMerchant, totalDeductionFromUser);
+            logger.info("Payment deduction: Merchant balance deducted: {}, User amountRemaining deducted: {}, Remaining payment: {}", 
+                amountDeductedFromMerchant, amountDeductedFromUserGlobal, remainingPayment);
         } else {
-            // User has no balance - payment is covered by receiver's remaining balance
-            logger.info("Payment covered by receiver's remaining balance. No deduction from user balance.");
-            // Keep userNewBalance as globalBalance (0) for message purposes
+            // User has no balance - they cannot pay anything
+            logger.info("User has no balance - cannot process payment. User can only pay what they have.");
+            // Keep userNewBalance as actualGlobalBalance (0) for message purposes
+            userNewBalance = actualGlobalBalance;
+            remainingPayment = paymentAmount; // Full payment amount - user has no balance to pay
+        }
+        
+        // Calculate actual amount paid by user (merchant balance + user global balance)
+        // User can only pay what they have - don't allow payment beyond their balance
+        BigDecimal actualAmountPaidByUser = paymentAmount.subtract(remainingPayment);
+        
+        // If there's remaining payment after deducting all user has, 
+        // user can only pay what they have - don't allow payment beyond their balance
+        if (remainingPayment.compareTo(BigDecimal.ZERO) > 0) {
+            logger.info("User does not have sufficient balance. Payment amount requested: {}, User can pay: {}", 
+                paymentAmount, actualAmountPaidByUser);
+            // Don't deduct remaining payment from receiver - user can only pay what they have
+            // The payment will be processed only for the amount the user could pay
         }
 
         // Update receiver's own remaining balance (each receiver has separate balance)
-        // Receiver's remaining balance is reduced by ONLY the payment amount
-        // The discount percentage was already added as a bonus when balance was assigned
-        // For FLEXIBLE merchants, we still deduct but allow negative/zero balance
-        // For NON-FLEXIBLE merchants, balance was already validated above
-        if (isMainMerchantFlexible) {
-            // MERCHANT FLEXIBLE: Allow balance to go below 1 or even negative
-            receiver.setRemainingBalance(receiverBalanceAfter);
-            logger.info("MERCHANT FLEXIBLE mode: Updated receiver balance to {} (may be below 1)", receiverBalanceAfter);
-        } else {
-            // NON-FLEXIBLE: Balance was validated above, safe to set
-            receiver.setRemainingBalance(receiverBalanceAfter);
+        // Receiver's remaining balance is reduced by the payment amount
+        // Note: receiverBalanceBefore, receiverBalanceReduction, and receiverBalanceAfter were already calculated earlier
+        // Update with the payment amount (user has sufficient balance, so full payment)
+        receiverBalanceReduction = paymentAmount; // Deduct full payment amount (user has sufficient balance)
+        receiverBalanceAfter = receiverBalanceBefore.subtract(receiverBalanceReduction);
+        
+        // Ensure remaining balance never goes below 0
+        if (receiverBalanceAfter.compareTo(BigDecimal.ZERO) < 0) {
+            receiverBalanceAfter = BigDecimal.ZERO;
+            logger.info("Receiver balance would have been negative, setting to 0");
         }
+        receiver.setRemainingBalance(receiverBalanceAfter);
+        logger.info("Updated receiver balance to {} (deducted {} from {})", 
+            receiverBalanceAfter, receiverBalanceReduction, receiverBalanceBefore);
         receiver.setLastTransactionDate(LocalDateTime.now());
         
         // Update receiver's wallet balance and total received (each receiver has separate balance)
-        BigDecimal receiverNewWallet = receiver.getWalletBalance().add(paymentAmount);
-        BigDecimal receiverNewTotal = receiver.getTotalReceived().add(paymentAmount);
+        BigDecimal actualPaymentReceived = paymentAmount;
+        BigDecimal receiverNewWallet = receiver.getWalletBalance().add(actualPaymentReceived);
+        BigDecimal receiverNewTotal = receiver.getTotalReceived().add(actualPaymentReceived);
         receiver.setWalletBalance(receiverNewWallet);
         receiver.setTotalReceived(receiverNewTotal);
         receiverRepository.save(receiver);
@@ -1479,6 +1546,11 @@ public class PaymentService {
                             BigDecimal receiverBalanceAfter = transaction.getReceiverBalanceAfter();
                             
                             // Update receiver's own remaining balance (each receiver has separate balance)
+                            // Ensure remaining balance never goes below 0
+                            if (receiverBalanceAfter.compareTo(BigDecimal.ZERO) < 0) {
+                                receiverBalanceAfter = BigDecimal.ZERO;
+                                logger.info("Receiver balance would have been negative, setting to 0");
+                            }
                             receiver.setRemainingBalance(receiverBalanceAfter);
                             receiver.setLastTransactionDate(LocalDateTime.now());
                             
@@ -1498,6 +1570,10 @@ public class PaymentService {
                                 if (userBonusAmount.compareTo(BigDecimal.ZERO) > 0) {
                                     BigDecimal userBalanceBefore = transactionUser.getAmountRemaining();
                                     BigDecimal userNewBalance = userBalanceBefore.add(userBonusAmount);
+                                    // Ensure amountRemaining never goes below 0 (though bonus should make it positive)
+                                    if (userNewBalance.compareTo(BigDecimal.ZERO) < 0) {
+                                        userNewBalance = BigDecimal.ZERO;
+                                    }
                                     transactionUser.setAmountRemaining(userNewBalance);
                                     transaction.setBalanceAfter(userNewBalance);
                                 } else {
@@ -2385,6 +2461,10 @@ public class PaymentService {
         // Then, deduct remaining amount from global balance
         if (remainingPayment.compareTo(BigDecimal.ZERO) > 0) {
             BigDecimal userNewBalance = globalBalance.subtract(remainingPayment);
+            // Ensure amountRemaining never goes below 0
+            if (userNewBalance.compareTo(BigDecimal.ZERO) < 0) {
+                userNewBalance = BigDecimal.ZERO;
+            }
             user.setAmountRemaining(userNewBalance);
             user.setLastTransactionDate(LocalDateTime.now());
             userRepository.save(user);
