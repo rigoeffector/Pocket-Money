@@ -354,16 +354,11 @@ public class PaymentService {
         // If user doesn't exist, create a new user with minimal information
         if (user == null) {
             logger.info("User not found with phone number: {}. Creating new user automatically.", request.getPhone());
-            
-            // Use provided fullNames or default to phone-based name
             String phoneDigitsOnly = request.getPhone().replaceAll("[^0-9]", "");
-            String userFullNames = (request.getFullNames() != null && !request.getFullNames().trim().isEmpty()) 
-                ? request.getFullNames().trim() 
-                : "User " + phoneDigitsOnly;
             
             // Create new user with minimal required information
             User newUser = new User();
-            newUser.setFullNames(userFullNames);
+            newUser.setFullNames("User " + phoneDigitsOnly);
             newUser.setPhoneNumber(normalizedPhone);
             newUser.setPin(passwordEncoder.encode("0000")); // Default PIN, user should change this
             newUser.setIsAssignedNfcCard(false); // No NFC card assigned yet
@@ -372,18 +367,7 @@ public class PaymentService {
             newUser.setStatus(UserStatus.ACTIVE);
             
             user = userRepository.save(newUser);
-            logger.info("Created new user with ID: {}, Phone: {}, FullNames: {}", user.getId(), normalizedPhone, userFullNames);
-        } else {
-            // If user exists and fullNames is provided, update the user's name
-            if (request.getFullNames() != null && !request.getFullNames().trim().isEmpty()) {
-                String newFullNames = request.getFullNames().trim();
-                if (!newFullNames.equals(user.getFullNames())) {
-                    logger.info("Updating user fullNames from '{}' to '{}' for user ID: {}", 
-                        user.getFullNames(), newFullNames, user.getId());
-                    user.setFullNames(newFullNames);
-                    user = userRepository.save(user);
-                }
-            }
+            logger.info("Created new user with ID: {}, Phone: {}", user.getId(), normalizedPhone);
         }
         
         // For merchant top-ups, NFC card is optional (merchant can top up users without cards)
@@ -596,8 +580,9 @@ public class PaymentService {
             throw new RuntimeException("Receiver is not active. Status: " + receiver.getStatus());
         }
         
-        // Determine the balance owner: if receiver is a submerchant, use parent's balance
-        Receiver balanceOwner = receiver.getParentReceiver() != null ? receiver.getParentReceiver() : receiver;
+        // Each receiver (main merchant or submerchant) has its own separate balance
+        // Submerchants do NOT share balances with main merchant - they have their own
+        Receiver balanceOwner = receiver; // Always use receiver's own balance, not parent's
 
         // Log receiver and user balances for debugging
         logger.info("=== RECEIVER AND USER BALANCE CHECK ===");
@@ -607,9 +592,9 @@ public class PaymentService {
         logger.info("Receiver Total Received: {}", receiver.getTotalReceived());
         logger.info("Receiver Assigned Balance: {}", receiver.getAssignedBalance());
         logger.info("Receiver Remaining Balance: {}", receiver.getRemainingBalance());
-        logger.info("Balance Owner ID: {}", balanceOwner.getId());
-        logger.info("Balance Owner Company Name: {}", balanceOwner.getCompanyName());
-        logger.info("Balance Owner Remaining Balance: {}", balanceOwner.getRemainingBalance());
+        logger.info("Receiver Balance Owner ID: {} (same as receiver)", balanceOwner.getId());
+        logger.info("Receiver Balance Owner Company Name: {}", balanceOwner.getCompanyName());
+        logger.info("Receiver Remaining Balance: {}", balanceOwner.getRemainingBalance());
         logger.info("User ID: {}", user.getId());
         logger.info("User Full Names: {}", user.getFullNames());
         logger.info("User Phone: {}", user.getPhoneNumber());
@@ -622,14 +607,28 @@ public class PaymentService {
         }
 
         // Check balance - prioritize merchant-specific balance if available
+        // If receiver is a submerchant, also check balance with parent (main merchant)
         BigDecimal merchantBalance = BigDecimal.ZERO;
         MerchantUserBalance merchantUserBalance = merchantUserBalanceRepository
                 .findByUserIdAndReceiverId(userId, receiver.getId())
                 .orElse(null);
         
+        // If no balance found and receiver is a submerchant, check with parent (main merchant)
+        if (merchantUserBalance == null && receiver.getParentReceiver() != null) {
+            logger.info("No balance found with submerchant {}, checking with parent merchant {}", 
+                receiver.getId(), receiver.getParentReceiver().getId());
+            merchantUserBalance = merchantUserBalanceRepository
+                    .findByUserIdAndReceiverId(userId, receiver.getParentReceiver().getId())
+                    .orElse(null);
+        }
+        
         logger.info("=== PAYMENT BALANCE CHECK ===");
         logger.info("User ID: {}", userId);
         logger.info("Receiver ID: {}", receiver.getId());
+        logger.info("Receiver is submerchant: {}", receiver.getParentReceiver() != null);
+        if (receiver.getParentReceiver() != null) {
+            logger.info("Parent merchant ID: {}", receiver.getParentReceiver().getId());
+        }
         logger.info("MerchantUserBalance exists: {}", merchantUserBalance != null);
         
         // Check if receiver itself is flexible (needed for loan check)
@@ -786,11 +785,13 @@ public class PaymentService {
             logger.info("User has sufficient balance: {}", userHasBalance);
             logger.info("Receiver has sufficient balance: {}", receiverHasBalance);
             
-            // EXCEPTION: If user has been topped up by this merchant AND merchant is flexible, allow payment without balance checks
-            if (hasMerchantBalance && isReceiverFlexible) {
-                // User has been topped up by this merchant and merchant is flexible
+            // EXCEPTION: If user has been topped up by this merchant (or parent merchant) AND merchant is flexible, allow payment without balance checks
+            // For submerchants, check main merchant flexible status since users can be topped up by main merchant
+            boolean merchantFlexibleToCheck = receiver.getParentReceiver() != null ? isMainMerchantFlexibleForBalance : isReceiverFlexible;
+            if (hasMerchantBalance && merchantFlexibleToCheck) {
+                // User has been topped up by this merchant (or parent merchant) and merchant is flexible
                 // Allow payment without checking any balance (user balance or receiver balance)
-                logger.info("User has merchant balance and receiver is flexible - allowing payment without any balance checks");
+                logger.info("User has merchant balance and merchant is flexible - allowing payment without any balance checks");
                 // Payment will proceed, deducting from merchant balance or global balance if available
             } else if (isReceiverFlexible) {
                 // RECEIVER FLEXIBLE MODE: Only check user balance, ignore receiver balance
@@ -855,10 +856,10 @@ public class PaymentService {
         // Calculate admin income amount (e.g., 8% = 10% - 2%)
         BigDecimal adminIncomeAmount = discountAmount.subtract(userBonusAmount);
         
-        // Use balance owner's remaining balance (main merchant if submerchant, otherwise receiver itself)
+        // Use receiver's own remaining balance (each receiver has separate balance)
         // Receiver's remaining balance is deducted by ONLY the payment amount (discount was already added as bonus when balance was assigned)
         // Example: User pays 500, deduct only 500 from receiver balance (no discount deduction)
-        // Check if balance owner has sufficient remaining balance BEFORE processing payment
+        // Check if receiver has sufficient remaining balance BEFORE processing payment
         BigDecimal receiverBalanceBefore = balanceOwner.getRemainingBalance() != null ? balanceOwner.getRemainingBalance() : BigDecimal.ZERO;
         BigDecimal receiverBalanceReduction = paymentAmount; // Only deduct payment amount, not payment + discount
         BigDecimal receiverBalanceAfter = receiverBalanceBefore.subtract(receiverBalanceReduction);
@@ -880,17 +881,8 @@ public class PaymentService {
         }
         
         // For PAYMENT: Direct internal transfer (no MoPay integration needed)
-        // First, validate that user has sufficient amountRemaining balance
-        if (globalBalance.compareTo(paymentAmount) < 0) {
-            String errorMsg = String.format(
-                "Insufficient remaining balance. Your remaining balance: %s, Required: %s. " +
-                "Please top up your account to have sufficient balance.",
-                globalBalance, paymentAmount);
-            logger.error("=== INSUFFICIENT AMOUNT REMAINING ERROR ===");
-            logger.error(errorMsg);
-            logger.error("User amountRemaining: {}, Payment amount: {}", globalBalance, paymentAmount);
-            throw new RuntimeException(errorMsg);
-        }
+        // Note: Balance validation already done above using totalAvailableBalance (global + merchant balances)
+        // This allows users topped up by main merchant to pay at submerchants
         
         // Deduct from merchant-specific balance first, then global balance
         BigDecimal remainingPayment = paymentAmount;
@@ -940,45 +932,30 @@ public class PaymentService {
             // Keep userNewBalance as globalBalance (0) for message purposes
         }
 
-        // Update balance owner's remaining balance (shared balance - main merchant's if submerchant)
-        // Balance owner's remaining balance is reduced by ONLY the payment amount
+        // Update receiver's own remaining balance (each receiver has separate balance)
+        // Receiver's remaining balance is reduced by ONLY the payment amount
         // The discount percentage was already added as a bonus when balance was assigned
-        // For FLEXIBLE main merchants, we still deduct but allow negative/zero balance
-        // For NON-FLEXIBLE main merchants, balance was already validated above
+        // For FLEXIBLE merchants, we still deduct but allow negative/zero balance
+        // For NON-FLEXIBLE merchants, balance was already validated above
         if (isMainMerchantFlexible) {
-            // MAIN MERCHANT FLEXIBLE: Allow balance to go below 1 or even negative
-            balanceOwner.setRemainingBalance(receiverBalanceAfter);
-            logger.info("MAIN MERCHANT FLEXIBLE mode: Updated receiver balance to {} (may be below 1)", receiverBalanceAfter);
+            // MERCHANT FLEXIBLE: Allow balance to go below 1 or even negative
+            receiver.setRemainingBalance(receiverBalanceAfter);
+            logger.info("MERCHANT FLEXIBLE mode: Updated receiver balance to {} (may be below 1)", receiverBalanceAfter);
         } else {
             // NON-FLEXIBLE: Balance was validated above, safe to set
-            balanceOwner.setRemainingBalance(receiverBalanceAfter);
+            receiver.setRemainingBalance(receiverBalanceAfter);
         }
-        balanceOwner.setLastTransactionDate(LocalDateTime.now());
+        receiver.setLastTransactionDate(LocalDateTime.now());
         
-        // Update balance owner's wallet balance and total received (shared)
-        // This is the main balance that should be updated for all payments
-        BigDecimal balanceOwnerNewWallet = balanceOwner.getWalletBalance().add(paymentAmount);
-        BigDecimal balanceOwnerNewTotal = balanceOwner.getTotalReceived().add(paymentAmount);
-        balanceOwner.setWalletBalance(balanceOwnerNewWallet);
-        balanceOwner.setTotalReceived(balanceOwnerNewTotal);
-        receiverRepository.save(balanceOwner);
+        // Update receiver's wallet balance and total received (each receiver has separate balance)
+        BigDecimal receiverNewWallet = receiver.getWalletBalance().add(paymentAmount);
+        BigDecimal receiverNewTotal = receiver.getTotalReceived().add(paymentAmount);
+        receiver.setWalletBalance(receiverNewWallet);
+        receiver.setTotalReceived(receiverNewTotal);
+        receiverRepository.save(receiver);
         
-        // Only update individual receiver's stats if it's a submerchant (different from balanceOwner)
-        // This prevents double counting for main merchants where receiver == balanceOwner
-        if (receiver.getId() != balanceOwner.getId()) {
-            // This is a submerchant - update individual stats for tracking
-            BigDecimal receiverNewBalance = receiver.getWalletBalance().add(paymentAmount);
-            BigDecimal receiverNewTotal = receiver.getTotalReceived().add(paymentAmount);
-            receiver.setWalletBalance(receiverNewBalance);
-            receiver.setTotalReceived(receiverNewTotal);
-            receiver.setLastTransactionDate(LocalDateTime.now());
-            receiverRepository.save(receiver);
-            logger.info("Updated submerchant '{}' individual stats: wallet={}, totalReceived={}", 
-                receiver.getCompanyName(), receiverNewBalance, receiverNewTotal);
-        } else {
-            // Main merchant - receiver and balanceOwner are the same, already updated above
-            logger.info("Main merchant payment - using shared balance (already updated)");
-        }
+        logger.info("Updated receiver '{}' balance: wallet={}, totalReceived={}, remainingBalance={}", 
+            receiver.getCompanyName(), receiverNewWallet, receiverNewTotal, receiverBalanceAfter);
 
         // Create transaction record - PAYMENT is immediate (no MoPay, internal transfer)
         Transaction transaction = new Transaction();
@@ -998,8 +975,8 @@ public class PaymentService {
         transaction.setDiscountAmount(discountAmount);
         transaction.setUserBonusAmount(userBonusAmount);
         transaction.setAdminIncomeAmount(adminIncomeAmount);
-        transaction.setReceiverBalanceBefore(receiverBalanceBefore); // Balance owner's balance before
-        transaction.setReceiverBalanceAfter(receiverBalanceAfter); // Balance owner's balance after
+        transaction.setReceiverBalanceBefore(receiverBalanceBefore); // Receiver's balance before
+        transaction.setReceiverBalanceAfter(receiverBalanceAfter); // Receiver's balance after
         transaction.setStatus(TransactionStatus.SUCCESS); // Immediate success for internal transfers
         
         // Generate transaction ID for NFC card payments (POCHI format)
@@ -1083,7 +1060,8 @@ public class PaymentService {
         }
         
         // Determine the balance owner: if receiver is a submerchant, use parent's balance
-        Receiver balanceOwner = receiver.getParentReceiver() != null ? receiver.getParentReceiver() : receiver;
+        // Each receiver (main merchant or submerchant) has its own separate balance
+        Receiver balanceOwner = receiver; // Always use receiver's own balance
 
         // Note: PIN is not required for MOMO payments as they are authenticated via MoPay
         // The payment is initiated from the payer's MOMO wallet which requires their own authentication
@@ -1311,8 +1289,8 @@ public class PaymentService {
         transaction.setDiscountAmount(discountAmount);
         transaction.setUserBonusAmount(userBonusAmount);
         transaction.setAdminIncomeAmount(adminIncomeAmount);
-        transaction.setReceiverBalanceBefore(receiverBalanceBefore); // Balance owner's balance before
-        transaction.setReceiverBalanceAfter(receiverBalanceAfter); // Balance owner's balance after (to be applied on SUCCESS)
+        transaction.setReceiverBalanceBefore(receiverBalanceBefore); // Receiver's balance before
+        transaction.setReceiverBalanceAfter(receiverBalanceAfter); // Receiver's balance after (to be applied on SUCCESS)
 
         // Generate transaction ID starting with POCHI for MOMO payments
         String transactionId = generateTransactionId();
@@ -1492,35 +1470,27 @@ public class PaymentService {
                         // This is a MOMO PAYMENT - update receiver balance and user bonus
                         Receiver receiver = transaction.getReceiver();
                         if (receiver != null) {
-                            // Determine the balance owner: if receiver is a submerchant, use parent's balance
-                            Receiver balanceOwner = receiver.getParentReceiver() != null ? receiver.getParentReceiver() : receiver;
+                            // Each receiver (main merchant or submerchant) has its own separate balance
+                            Receiver balanceOwner = receiver; // Always use receiver's own balance
                             
                             // Get the calculated values from transaction
                             BigDecimal paymentAmount = transaction.getAmount();
                             BigDecimal userBonusAmount = transaction.getUserBonusAmount() != null ? transaction.getUserBonusAmount() : BigDecimal.ZERO;
                             BigDecimal receiverBalanceAfter = transaction.getReceiverBalanceAfter();
                             
-                            // Update balance owner's remaining balance (shared balance)
-                            balanceOwner.setRemainingBalance(receiverBalanceAfter);
-                            balanceOwner.setLastTransactionDate(LocalDateTime.now());
+                            // Update receiver's own remaining balance (each receiver has separate balance)
+                            receiver.setRemainingBalance(receiverBalanceAfter);
+                            receiver.setLastTransactionDate(LocalDateTime.now());
                             
-                            // Update balance owner's wallet balance and total received (shared)
-                            BigDecimal balanceOwnerNewWallet = balanceOwner.getWalletBalance().add(paymentAmount);
-                            BigDecimal balanceOwnerNewTotal = balanceOwner.getTotalReceived().add(paymentAmount);
-                            balanceOwner.setWalletBalance(balanceOwnerNewWallet);
-                            balanceOwner.setTotalReceived(balanceOwnerNewTotal);
-                            receiverRepository.save(balanceOwner);
+                            // Update receiver's wallet balance and total received (each receiver has separate balance)
+                            BigDecimal receiverNewWallet = receiver.getWalletBalance().add(paymentAmount);
+                            BigDecimal receiverNewTotal = receiver.getTotalReceived().add(paymentAmount);
+                            receiver.setWalletBalance(receiverNewWallet);
+                            receiver.setTotalReceived(receiverNewTotal);
+                            receiverRepository.save(receiver);
                             
-                            // Also update individual receiver's wallet balance and total received
-                            if (receiver.getId() != balanceOwner.getId()) {
-                                // Only update if receiver is different from balance owner
-                                BigDecimal receiverNewBalance = receiver.getWalletBalance().add(paymentAmount);
-                                BigDecimal receiverNewTotal = receiver.getTotalReceived().add(paymentAmount);
-                                receiver.setWalletBalance(receiverNewBalance);
-                                receiver.setTotalReceived(receiverNewTotal);
-                                receiver.setLastTransactionDate(LocalDateTime.now());
-                                receiverRepository.save(receiver);
-                            }
+                            logger.info("Updated receiver '{}' balance from MoPay callback: wallet={}, totalReceived={}, remainingBalance={}", 
+                                receiver.getCompanyName(), receiverNewWallet, receiverNewTotal, receiverBalanceAfter);
                             
                             // Add user bonus to user's card balance if applicable (only if user exists)
                             User transactionUser = transaction.getUser();

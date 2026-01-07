@@ -12,5 +12,7 @@ public class AssignNfcCardRequest {
     @NotBlank(message = "PIN is required")
     @Pattern(regexp = "^[0-9]{4}$", message = "PIN must be exactly 4 digits")
     private String pin;
+
+    private String fullNames; // Client's full names (optional, will be used when creating/updating user)
 }
 

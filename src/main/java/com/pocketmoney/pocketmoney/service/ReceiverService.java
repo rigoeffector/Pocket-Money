@@ -739,8 +739,8 @@ public class ReceiverService {
         Receiver receiver = receiverRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Receiver not found with id: " + id));
 
-        // Use shared balance if submerchant (parent's balance)
-        Receiver balanceOwner = receiver.getParentReceiver() != null ? receiver.getParentReceiver() : receiver;
+        // Each receiver (main merchant or submerchant) has its own separate balance
+        // Use receiver's own balance, not parent's
 
         // Get commission settings for this receiver
         List<PaymentCommissionSetting> commissionSettings = paymentCommissionSettingRepository.findByReceiverIdAndIsActiveTrue(id);
@@ -755,12 +755,12 @@ public class ReceiverService {
         response.setReceiverId(receiver.getId());
         response.setCompanyName(receiver.getCompanyName());
         response.setReceiverPhone(receiver.getReceiverPhone());
-        response.setWalletBalance(balanceOwner.getWalletBalance()); // Shared wallet balance
-        response.setTotalReceived(balanceOwner.getTotalReceived()); // Shared total received
-        response.setAssignedBalance(balanceOwner.getAssignedBalance()); // Shared assigned balance
-        response.setRemainingBalance(balanceOwner.getRemainingBalance()); // Shared remaining balance
-        response.setDiscountPercentage(balanceOwner.getDiscountPercentage()); // Use balance owner's percentages
-        response.setUserBonusPercentage(balanceOwner.getUserBonusPercentage()); // Use balance owner's percentages
+        response.setWalletBalance(receiver.getWalletBalance()); // Receiver's own wallet balance
+        response.setTotalReceived(receiver.getTotalReceived()); // Receiver's own total received
+        response.setAssignedBalance(receiver.getAssignedBalance()); // Receiver's own assigned balance
+        response.setRemainingBalance(receiver.getRemainingBalance()); // Receiver's own remaining balance
+        response.setDiscountPercentage(receiver.getDiscountPercentage()); // Use receiver's own percentages
+        response.setUserBonusPercentage(receiver.getUserBonusPercentage()); // Use receiver's own percentages
         response.setCommissionSettings(commissionInfoList);
         response.setLastTransactionDate(receiver.getLastTransactionDate());
         return response;

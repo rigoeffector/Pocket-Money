@@ -426,9 +426,15 @@ public class UserService {
         // If user doesn't exist, create a new user with minimal information
         if (user == null) {
             logger.info("User not found with phone number: {}. Creating new user automatically.", phoneNumber);
+            
+            // Use provided fullNames or default to phone-based name
             String phoneDigitsOnly = phoneNumber.replaceAll("[^0-9]", "");
+            String userFullNames = (request.getFullNames() != null && !request.getFullNames().trim().isEmpty()) 
+                ? request.getFullNames().trim() 
+                : "User " + phoneDigitsOnly;
+            
             User newUser = new User();
-            newUser.setFullNames("User " + phoneDigitsOnly);
+            newUser.setFullNames(userFullNames);
             newUser.setPhoneNumber(normalizedPhone);
             newUser.setPin(passwordEncoder.encode("0000")); // Default PIN, will be updated below
             newUser.setIsAssignedNfcCard(false);
@@ -436,7 +442,18 @@ public class UserService {
             newUser.setAmountRemaining(BigDecimal.ZERO);
             newUser.setStatus(UserStatus.ACTIVE);
             user = userRepository.save(newUser);
-            logger.info("Created new user with ID: {}, Phone: {}", user.getId(), normalizedPhone);
+            logger.info("Created new user with ID: {}, Phone: {}, FullNames: {}", user.getId(), normalizedPhone, userFullNames);
+        } else {
+            // If user exists and fullNames is provided, update the user's name
+            if (request.getFullNames() != null && !request.getFullNames().trim().isEmpty()) {
+                String newFullNames = request.getFullNames().trim();
+                if (!newFullNames.equals(user.getFullNames())) {
+                    logger.info("Updating user fullNames from '{}' to '{}' for user ID: {}", 
+                        user.getFullNames(), newFullNames, user.getId());
+                    user.setFullNames(newFullNames);
+                    user = userRepository.save(user);
+                }
+            }
         }
         
         // Check if user is active
