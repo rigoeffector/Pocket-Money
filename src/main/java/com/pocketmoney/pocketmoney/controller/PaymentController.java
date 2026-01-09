@@ -1,24 +1,52 @@
 package com.pocketmoney.pocketmoney.controller;
 
-import com.pocketmoney.pocketmoney.dto.*;
-import com.pocketmoney.pocketmoney.service.PaymentService;
-import com.pocketmoney.pocketmoney.service.UserService;
-import com.pocketmoney.pocketmoney.service.PdfExportService;
-import jakarta.validation.Valid;
-import org.springframework.format.annotation.DateTimeFormat;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
-import com.pocketmoney.pocketmoney.dto.PaginatedResponse;
-
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+import com.pocketmoney.pocketmoney.dto.AdminDashboardStatisticsResponse;
+import com.pocketmoney.pocketmoney.dto.AdminIncomeResponse;
+import com.pocketmoney.pocketmoney.dto.ApiResponse;
+import com.pocketmoney.pocketmoney.dto.BalanceResponse;
+import com.pocketmoney.pocketmoney.dto.CardDetailsResponse;
+import com.pocketmoney.pocketmoney.dto.LoanResponse;
+import com.pocketmoney.pocketmoney.dto.MerchantTopUpRequest;
+import com.pocketmoney.pocketmoney.dto.MomoPaymentRequest;
+import com.pocketmoney.pocketmoney.dto.PaginatedResponse;
+import com.pocketmoney.pocketmoney.dto.PayLoanRequest;
+import com.pocketmoney.pocketmoney.dto.PaymentRequest;
+import com.pocketmoney.pocketmoney.dto.PaymentResponse;
+import com.pocketmoney.pocketmoney.dto.ReceiverTransactionsResponse;
+import com.pocketmoney.pocketmoney.dto.TopUpByPhoneRequest;
+import com.pocketmoney.pocketmoney.dto.TopUpRequest;
+import com.pocketmoney.pocketmoney.dto.UpdateLoanRequest;
+import com.pocketmoney.pocketmoney.dto.UserBonusHistoryResponse;
+import com.pocketmoney.pocketmoney.service.PaymentService;
+import com.pocketmoney.pocketmoney.service.PdfExportService;
+import com.pocketmoney.pocketmoney.service.UserService;
+
+import jakarta.validation.Valid;
 
 @RestController
 @RequestMapping("/api/payments")
 public class PaymentController {
 
+    private static final Logger logger = LoggerFactory.getLogger(PaymentController.class);
+    
     private final PaymentService paymentService;
     private final UserService userService;
     private final PdfExportService pdfExportService;
@@ -90,7 +118,7 @@ public class PaymentController {
     }
 
     @GetMapping("/balance/{userId}")
-    public ResponseEntity<ApiResponse<BalanceResponse>> checkBalance(@PathVariable UUID userId) {
+    public ResponseEntity<ApiResponse<BalanceResponse>> checkBalance(@PathVariable("userId") UUID userId) {
         try {
             BalanceResponse response = paymentService.checkBalance(userId);
             return ResponseEntity.ok(ApiResponse.success("Balance retrieved successfully", response));
@@ -102,7 +130,7 @@ public class PaymentController {
 
     @GetMapping("/status/{mopayTransactionId}")
     public ResponseEntity<ApiResponse<PaymentResponse>> checkTransactionStatus(
-            @PathVariable String mopayTransactionId) {
+            @PathVariable("mopayTransactionId") String mopayTransactionId) {
         try {
             PaymentResponse response = paymentService.checkTransactionStatus(mopayTransactionId);
             return ResponseEntity.ok(ApiResponse.success("Transaction status retrieved successfully", response));
@@ -114,10 +142,10 @@ public class PaymentController {
 
     @GetMapping("/transactions")
     public ResponseEntity<ApiResponse<PaginatedResponse<PaymentResponse>>> getAllTransactions(
-            @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "20") int size,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate) {
+            @RequestParam(value = "page", defaultValue = "0") int page,
+            @RequestParam(value = "size", defaultValue = "20") int size,
+            @RequestParam(value = "fromDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
+            @RequestParam(value = "toDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate) {
         try {
             PaginatedResponse<PaymentResponse> response = paymentService.getAllTransactions(page, size, fromDate, toDate);
             return ResponseEntity.ok(ApiResponse.success("Transactions retrieved successfully", response));
@@ -128,7 +156,7 @@ public class PaymentController {
     }
 
     @GetMapping("/transactions/{transactionId}")
-    public ResponseEntity<ApiResponse<PaymentResponse>> getTransactionById(@PathVariable UUID transactionId) {
+    public ResponseEntity<ApiResponse<PaymentResponse>> getTransactionById(@PathVariable("transactionId") UUID transactionId) {
         try {
             PaymentResponse response = paymentService.getTransactionById(transactionId);
             return ResponseEntity.ok(ApiResponse.success("Transaction retrieved successfully", response));
@@ -139,7 +167,7 @@ public class PaymentController {
     }
 
     @GetMapping("/transactions/user/{userId}")
-    public ResponseEntity<ApiResponse<List<PaymentResponse>>> getTransactionsByUser(@PathVariable UUID userId) {
+    public ResponseEntity<ApiResponse<List<PaymentResponse>>> getTransactionsByUser(@PathVariable("userId") UUID userId) {
         try {
             List<PaymentResponse> transactions = paymentService.getTransactionsByUser(userId);
             return ResponseEntity.ok(ApiResponse.success("User transactions retrieved successfully", transactions));
@@ -151,11 +179,11 @@ public class PaymentController {
 
     @GetMapping("/transactions/receiver/{receiverId}")
     public ResponseEntity<ApiResponse<ReceiverTransactionsResponse>> getTransactionsByReceiver(
-            @PathVariable UUID receiverId,
-            @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "20") int size,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate) {
+            @PathVariable("receiverId") UUID receiverId,
+            @RequestParam(value = "page", defaultValue = "0") int page,
+            @RequestParam(value = "size", defaultValue = "20") int size,
+            @RequestParam(value = "fromDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
+            @RequestParam(value = "toDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate) {
         try {
             ReceiverTransactionsResponse response = paymentService.getTransactionsByReceiver(receiverId, page, size, fromDate, toDate);
             return ResponseEntity.ok(ApiResponse.success("Receiver transactions retrieved successfully", response));
@@ -165,14 +193,14 @@ public class PaymentController {
         }
     }
 
-    @GetMapping(value = "/transactions/receiver/{receiverId}/export", produces = "application/pdf")
+    @GetMapping("/transactions/receiver/{receiverId}/export")
     public ResponseEntity<byte[]> exportTransactionsToPdf(
-            @PathVariable UUID receiverId,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate) {
+            @PathVariable("receiverId") UUID receiverId,
+            @RequestParam(value = "fromDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
+            @RequestParam(value = "toDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate) {
         try {
-            // Get all transactions (no pagination for PDF export)
-            ReceiverTransactionsResponse response = paymentService.getTransactionsByReceiver(receiverId, 0, Integer.MAX_VALUE, fromDate, toDate);
+            // Get all transactions (no pagination for PDF export) - filter only PAYMENT transactions
+            ReceiverTransactionsResponse response = paymentService.getPaymentTransactionsByReceiver(receiverId, 0, Integer.MAX_VALUE, fromDate, toDate);
             
             // Get receiver information
             com.pocketmoney.pocketmoney.entity.Receiver receiver = paymentService.getReceiverEntityById(receiverId);
@@ -184,25 +212,26 @@ public class PaymentController {
             org.springframework.http.HttpHeaders headers = new org.springframework.http.HttpHeaders();
             headers.setContentType(org.springframework.http.MediaType.APPLICATION_PDF);
             headers.setContentDispositionFormData("attachment", 
-                "transaction_history_" + receiverId + "_" + java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")) + ".pdf");
+                "payment_transactions_" + receiverId + "_" + java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")) + ".pdf");
             headers.setContentLength(pdfBytes.length);
             
             return ResponseEntity.ok()
                     .headers(headers)
                     .body(pdfBytes);
         } catch (RuntimeException e) {
+            logger.error("Error exporting transactions to PDF: {}", e.getMessage(), e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }
 
     @GetMapping("/transactions/main-merchant/{mainReceiverId}/all")
     public ResponseEntity<ApiResponse<PaginatedResponse<PaymentResponse>>> getAllTransactionsForMainMerchant(
-            @PathVariable UUID mainReceiverId,
-            @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "20") int size,
-            @RequestParam(required = false) String search,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate) {
+            @PathVariable("mainReceiverId") UUID mainReceiverId,
+            @RequestParam(value = "page", defaultValue = "0") int page,
+            @RequestParam(value = "size", defaultValue = "20") int size,
+            @RequestParam(value = "search", required = false) String search,
+            @RequestParam(value = "fromDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
+            @RequestParam(value = "toDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate) {
         try {
             // Set time to start/end of day if only date is provided
             if (fromDate != null && fromDate.getHour() == 0 && fromDate.getMinute() == 0 && fromDate.getSecond() == 0) {
@@ -223,8 +252,8 @@ public class PaymentController {
 
     @GetMapping("/transactions/main-merchant/{mainReceiverId}/submerchant/{submerchantId}")
     public ResponseEntity<ApiResponse<List<PaymentResponse>>> getTransactionsForSubmerchant(
-            @PathVariable UUID mainReceiverId,
-            @PathVariable UUID submerchantId) {
+            @PathVariable("mainReceiverId") UUID mainReceiverId,
+            @PathVariable("submerchantId") UUID submerchantId) {
         try {
             List<PaymentResponse> transactions = paymentService.getTransactionsForSubmerchant(mainReceiverId, submerchantId);
             return ResponseEntity.ok(ApiResponse.success("Submerchant transactions retrieved successfully", transactions));
@@ -235,7 +264,7 @@ public class PaymentController {
     }
 
     @GetMapping("/bonus-history/{userId}")
-    public ResponseEntity<ApiResponse<List<UserBonusHistoryResponse>>> getUserBonusHistory(@PathVariable UUID userId) {
+    public ResponseEntity<ApiResponse<List<UserBonusHistoryResponse>>> getUserBonusHistory(@PathVariable("userId") UUID userId) {
         try {
             List<UserBonusHistoryResponse> history = paymentService.getUserBonusHistory(userId);
             return ResponseEntity.ok(ApiResponse.success("User bonus history retrieved successfully", history));
@@ -246,7 +275,7 @@ public class PaymentController {
     }
 
     @GetMapping("/cards/{nfcCardId}")
-    public ResponseEntity<ApiResponse<CardDetailsResponse>> getCardDetails(@PathVariable String nfcCardId) {
+    public ResponseEntity<ApiResponse<CardDetailsResponse>> getCardDetails(@PathVariable("nfcCardId") String nfcCardId) {
         try {
             CardDetailsResponse response = userService.getCardDetailsByNfcCardId(nfcCardId);
             return ResponseEntity.ok(ApiResponse.success("Card details retrieved successfully", response));
@@ -258,11 +287,11 @@ public class PaymentController {
 
     @GetMapping("/admin-income")
     public ResponseEntity<ApiResponse<AdminIncomeResponse>> getAdminIncome(
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate,
-            @RequestParam(required = false) UUID receiverId,
-            @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "20") int size) {
+            @RequestParam(value = "fromDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
+            @RequestParam(value = "toDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate,
+            @RequestParam(value = "receiverId", required = false) UUID receiverId,
+            @RequestParam(value = "page", defaultValue = "0") int page,
+            @RequestParam(value = "size", defaultValue = "20") int size) {
         try {
             AdminIncomeResponse response = paymentService.getAdminIncome(fromDate, toDate, receiverId, page, size);
             return ResponseEntity.ok(ApiResponse.success("Admin income retrieved successfully", response));
@@ -284,7 +313,7 @@ public class PaymentController {
     }
 
     @GetMapping("/loans/user/{userId}")
-    public ResponseEntity<ApiResponse<List<LoanResponse>>> getUserLoans(@PathVariable UUID userId) {
+    public ResponseEntity<ApiResponse<List<LoanResponse>>> getUserLoans(@PathVariable("userId") UUID userId) {
         try {
             List<LoanResponse> loans = paymentService.getUserLoans(userId);
             return ResponseEntity.ok(ApiResponse.success("User loans retrieved successfully", loans));
@@ -295,7 +324,7 @@ public class PaymentController {
     }
 
     @GetMapping("/loans/merchant/{receiverId}")
-    public ResponseEntity<ApiResponse<List<LoanResponse>>> getMerchantLoans(@PathVariable UUID receiverId) {
+    public ResponseEntity<ApiResponse<List<LoanResponse>>> getMerchantLoans(@PathVariable("receiverId") UUID receiverId) {
         try {
             List<LoanResponse> loans = paymentService.getMerchantLoans(receiverId);
             return ResponseEntity.ok(ApiResponse.success("Merchant loans retrieved successfully", loans));

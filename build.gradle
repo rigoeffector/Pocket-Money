@@ -16,6 +16,10 @@ java {
 	targetCompatibility = '17'
 }
 
+tasks.withType(JavaCompile) {
+	options.compilerArgs.add('-parameters')
+}
+
 configurations {
 	compileOnly {
 		extendsFrom annotationProcessor

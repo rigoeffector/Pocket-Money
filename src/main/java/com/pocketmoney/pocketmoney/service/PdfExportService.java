@@ -47,7 +47,7 @@ public class PdfExportService {
                 contentStream.beginText();
                 contentStream.setFont(PDType1Font.HELVETICA_BOLD, 16);
                 contentStream.newLineAtOffset(MARGIN, yPosition);
-                contentStream.showText("Transaction History Report");
+                contentStream.showText("Payment Transactions Report");
                 contentStream.endText();
                 yPosition -= 25;
                 
@@ -204,9 +204,9 @@ public class PdfExportService {
                     contentStream.showText("No transactions found for the selected period.");
                     contentStream.endText();
                 } else {
-                    // Table configuration for landscape - optimized column widths
-                    float[] columnWidths = {110, 100, 85, 75, 65, 70, 120};
-                    String[] headers = {"Date/Time", "User", "Amount", "Bonus", "Status", "Method", "Transaction ID"};
+                    // Table configuration for landscape - optimized column widths with merchant name column
+                    float[] columnWidths = {100, 120, 100, 75, 65, 70, 90, 120};
+                    String[] headers = {"Date/Time", "Customer Names", "Merchant", "Amount", "Bonus", "Status", "Payment Info", "Transaction ID"};
                     float tableStartX = MARGIN;
                     float cellPadding = 3;
                     float rowHeight = TABLE_ROW_HEIGHT; // Use constant (16)
@@ -261,12 +261,13 @@ public class PdfExportService {
                         
                         // Prepare row data - increased truncation limits for landscape
                         String[] rowData = {
-                            truncateText(formatDateTime(transaction.getCreatedAt()), 22),
-                            truncateText(getUserName(transaction), 25),
+                            truncateText(formatDateTime(transaction.getCreatedAt()), 20),
+                            truncateText(getCustomerName(transaction), 25),
+                            truncateText(getMerchantName(transaction), 25),
                             truncateText(formatCurrency(transaction.getAmount()), 18),
                             truncateText(formatCurrency(transaction.getUserBonusAmount()), 18),
                             truncateText(transaction.getStatus() != null ? transaction.getStatus().toString() : "N/A", 15),
-                            truncateText(transaction.getPaymentMethod() != null ? transaction.getPaymentMethod() : "N/A", 15),
+                            truncateText(getPaymentInfo(transaction), 20),
                             truncateText(transaction.getMopayTransactionId() != null ? transaction.getMopayTransactionId() : "N/A", 25)
                         };
                         
@@ -353,7 +354,7 @@ public class PdfExportService {
         return dateTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
     }
 
-    private String getUserName(PaymentResponse transaction) {
+    private String getCustomerName(PaymentResponse transaction) {
         if (transaction.getUser() != null && transaction.getUser().getFullNames() != null) {
             return transaction.getUser().getFullNames();
         }
@@ -361,6 +362,35 @@ public class PdfExportService {
             return transaction.getPayerPhone();
         }
         return "Guest";
+    }
+    
+    private String getMerchantName(PaymentResponse transaction) {
+        if (transaction.getReceiverCompanyName() != null) {
+            return transaction.getReceiverCompanyName();
+        }
+        return "N/A";
+    }
+    
+    private String getPaymentInfo(PaymentResponse transaction) {
+        if (transaction.getPaymentMethod() == null) {
+            return "N/A";
+        }
+        
+        if ("MOMO".equals(transaction.getPaymentMethod())) {
+            // If paid with phone (MOMO), show phone number
+            if (transaction.getPayerPhone() != null && !transaction.getPayerPhone().trim().isEmpty()) {
+                return "Phone: " + transaction.getPayerPhone();
+            }
+            return "MOMO";
+        } else if ("NFC_CARD".equals(transaction.getPaymentMethod())) {
+            // If paid with NFC Card, show card number
+            if (transaction.getUser() != null && transaction.getUser().getNfcCardId() != null) {
+                return "Card: " + transaction.getUser().getNfcCardId();
+            }
+            return "NFC_CARD";
+        }
+        
+        return transaction.getPaymentMethod();
     }
     
     private void drawTableHeader(PDPageContentStream contentStream, float startX, float startY, 

@@ -910,29 +910,17 @@ public class PaymentService {
             BigDecimal amountDeductedFromMerchant = BigDecimal.ZERO;
             BigDecimal amountDeductedFromUserGlobal = BigDecimal.ZERO;
             
-            // First, deduct from merchant-specific balance if available
-            if (merchantUserBalance != null && actualMerchantBalance.compareTo(BigDecimal.ZERO) > 0) {
-                if (actualMerchantBalance.compareTo(remainingPayment) >= 0) {
-                    // Merchant balance covers entire payment
-                    BigDecimal newMerchantBalance = actualMerchantBalance.subtract(remainingPayment);
-                    merchantUserBalance.setBalance(newMerchantBalance);
-                    amountDeductedFromMerchant = remainingPayment;
-                    remainingPayment = BigDecimal.ZERO;
-                } else {
-                    // Merchant balance covers part of payment
-                    merchantUserBalance.setBalance(BigDecimal.ZERO);
-                    amountDeductedFromMerchant = actualMerchantBalance;
-                    remainingPayment = remainingPayment.subtract(actualMerchantBalance);
-                }
-                merchantUserBalanceRepository.save(merchantUserBalance);
-            }
+            // SIMPLIFIED APPROACH: Always deduct from user's global amountRemaining only
+            // Merchant balances are just records of what was topped up - they don't get deducted
+            // When top-up happens, we add to both merchant balance AND user's global amountRemaining
+            // When payment happens, we deduct from user's global amountRemaining only
+            // This way, user's global amountRemaining is the single source of truth for actual balance
+            logger.info("Deducting from user's global amountRemaining only (merchant balances are records only)");
             
-            // Deduct from user's global balance (amountRemaining) - but only up to what they have
-            // Don't allow user balance to go negative, even in flexible mode
-            // User can only pay until their balance reaches 0
-            if (remainingPayment.compareTo(BigDecimal.ZERO) > 0 && actualGlobalBalance.compareTo(BigDecimal.ZERO) > 0) {
+            // Deduct from user's global balance (amountRemaining) only
+            if (actualGlobalBalance.compareTo(BigDecimal.ZERO) > 0) {
                 if (actualGlobalBalance.compareTo(remainingPayment) >= 0) {
-                    // User has enough balance to cover remaining payment
+                    // User has enough balance to cover entire payment
                     amountDeductedFromUserGlobal = remainingPayment;
                     userNewBalance = actualGlobalBalance.subtract(remainingPayment);
                     remainingPayment = BigDecimal.ZERO;
@@ -945,10 +933,15 @@ public class PaymentService {
                         actualGlobalBalance, remainingPayment);
                 }
                 user.setAmountRemaining(userNewBalance);
+                logger.info("User global amountRemaining deducted: {}, New user balance: {}", 
+                    amountDeductedFromUserGlobal, userNewBalance);
             } else {
-                // No remaining payment or no user balance to deduct from
-                userNewBalance = actualGlobalBalance; // Keep balance as is
+                // No user balance to deduct from
+                userNewBalance = actualGlobalBalance; // Keep balance as is (0)
             }
+            
+            // Merchant balance is NOT deducted - it stays as a record of what was topped up
+            // The actual balance is tracked in user's global amountRemaining
             
             // If there's still remaining payment after deducting from merchant and user balance,
             // and we're in flexible mode, check if user has no balance left - payment should only use what user has
@@ -1402,9 +1395,17 @@ public class PaymentService {
         }
         
         // Note: amountRemaining already includes bonuses that were added back during payment processing
+        // We display totalBonusReceived separately for tracking purposes
+
+        // Calculate amountRemaining: in flexible mode, use sum of flexible merchant balances
+        BigDecimal amountRemaining = calculateAmountRemaining(user);
+        
+        // Note: amountRemaining already includes bonuses that were added back during payment processing
         // amountRemainingWithBonus shows the effective balance (which already has bonuses included)
         // We display totalBonusReceived separately for tracking purposes
-        BigDecimal amountRemainingWithBonus = user.getAmountRemaining();
+        // For flexible mode, amountRemainingWithBonus should also reflect flexible merchant balances
+        // In flexible mode, amountRemaining already reflects the merchant balances, so use it for both
+        BigDecimal amountRemainingWithBonus = amountRemaining;
 
         // Get merchant-specific balances
         List<MerchantUserBalance> merchantBalances = merchantUserBalanceRepository.findByUserId(userId);
@@ -1427,9 +1428,9 @@ public class PaymentService {
         response.setIsAssignedNfcCard(user.getIsAssignedNfcCard());
         response.setNfcCardId(user.getNfcCardId());
         response.setAmountOnCard(user.getAmountOnCard());
-        response.setAmountRemaining(user.getAmountRemaining());
+        response.setAmountRemaining(amountRemaining); // Includes merchant balance if merchant is flexible
         response.setTotalBonusReceived(totalBonusReceived);
-        response.setAmountRemainingWithBonus(amountRemainingWithBonus);
+        response.setAmountRemainingWithBonus(amountRemainingWithBonus); // Updated to include merchant balance in flexible mode
         response.setMerchantBalances(merchantBalanceInfos);
         response.setStatus(user.getStatus());
         response.setLastTransactionDate(user.getLastTransactionDate());
@@ -1838,8 +1839,39 @@ public class PaymentService {
 
     @Transactional(readOnly = true)
     public ReceiverTransactionsResponse getTransactionsByReceiver(UUID receiverId, int page, int size, LocalDateTime fromDate, LocalDateTime toDate) {
+        // Get current authenticated user
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication == null || !authentication.isAuthenticated()) {
+            throw new RuntimeException("User not authenticated");
+        }
+        
+        String currentUsername = authentication.getName();
+        
+        // Check if user is ADMIN - admins can access any receiver's transactions
+        boolean isAdmin = authentication.getAuthorities().stream()
+                .anyMatch(a -> a.getAuthority().equals("ROLE_ADMIN"));
+        
         Receiver receiver = receiverRepository.findById(receiverId)
                 .orElseThrow(() -> new RuntimeException("Receiver not found"));
+        
+        // If not admin, verify the authenticated merchant can access this receiver's transactions
+        if (!isAdmin) {
+            // Check if authenticated user is a receiver/merchant
+            Receiver authenticatedReceiver = receiverRepository.findByUsername(currentUsername)
+                    .orElseThrow(() -> new RuntimeException("Merchant not found with username: " + currentUsername));
+            
+            // Allow access if:
+            // 1. The authenticated merchant is requesting their own transactions
+            // 2. The authenticated merchant is a main merchant and requesting a submerchant's transactions
+            boolean canAccess = authenticatedReceiver.getId().equals(receiverId) ||
+                               (authenticatedReceiver.getParentReceiver() == null && 
+                                receiver.getParentReceiver() != null && 
+                                receiver.getParentReceiver().getId().equals(authenticatedReceiver.getId()));
+            
+            if (!canAccess) {
+                throw new RuntimeException("Access denied: You can only access your own transactions or your submerchants' transactions");
+            }
+        }
         
         // Build dynamic query using EntityManager
         StringBuilder queryBuilder = new StringBuilder();
@@ -1940,6 +1972,152 @@ public class PaymentService {
         response.setStatistics(statistics);
         // Add pagination info to response (we'll need to update ReceiverTransactionsResponse to include pagination)
         // For now, statistics will reflect all transactions in the date range
+        
+        return response;
+    }
+
+    /**
+     * Get only PAYMENT transactions for a receiver (for PDF export)
+     */
+    @Transactional(readOnly = true)
+    public ReceiverTransactionsResponse getPaymentTransactionsByReceiver(UUID receiverId, int page, int size, LocalDateTime fromDate, LocalDateTime toDate) {
+        // Get current authenticated user
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication == null || !authentication.isAuthenticated()) {
+            throw new RuntimeException("User not authenticated");
+        }
+        
+        String currentUsername = authentication.getName();
+        
+        // Check if user is ADMIN - admins can access any receiver's transactions
+        boolean isAdmin = authentication.getAuthorities().stream()
+                .anyMatch(a -> a.getAuthority().equals("ROLE_ADMIN"));
+        
+        Receiver receiver = receiverRepository.findById(receiverId)
+                .orElseThrow(() -> new RuntimeException("Receiver not found"));
+        
+        // If not admin, verify the authenticated merchant can access this receiver's transactions
+        if (!isAdmin) {
+            // Check if authenticated user is a receiver/merchant
+            Receiver authenticatedReceiver = receiverRepository.findByUsername(currentUsername)
+                    .orElseThrow(() -> new RuntimeException("Merchant not found with username: " + currentUsername));
+            
+            // Allow access if:
+            // 1. The authenticated merchant is requesting their own transactions
+            // 2. The authenticated merchant is a main merchant and requesting a submerchant's transactions
+            boolean canAccess = authenticatedReceiver.getId().equals(receiverId) ||
+                               (authenticatedReceiver.getParentReceiver() == null && 
+                                receiver.getParentReceiver() != null && 
+                                receiver.getParentReceiver().getId().equals(authenticatedReceiver.getId()));
+            
+            if (!canAccess) {
+                throw new RuntimeException("Access denied: You can only access your own transactions or your submerchants' transactions");
+            }
+        }
+        
+        // Build dynamic query using EntityManager - filter only PAYMENT transactions
+        StringBuilder queryBuilder = new StringBuilder();
+        queryBuilder.append("SELECT t FROM Transaction t ");
+        queryBuilder.append("LEFT JOIN FETCH t.user u ");
+        queryBuilder.append("LEFT JOIN FETCH t.paymentCategory pc ");
+        queryBuilder.append("LEFT JOIN FETCH t.receiver r ");
+        queryBuilder.append("WHERE t.receiver.id = :receiverId ");
+        queryBuilder.append("AND t.transactionType = :transactionType ");
+        
+        // Add date range filters
+        if (fromDate != null) {
+            queryBuilder.append("AND t.createdAt >= :fromDate ");
+        }
+        if (toDate != null) {
+            queryBuilder.append("AND t.createdAt <= :toDate ");
+        }
+        
+        queryBuilder.append("ORDER BY t.createdAt DESC");
+        
+        // Create query
+        Query query = entityManager.createQuery(queryBuilder.toString(), Transaction.class);
+        query.setParameter("receiverId", receiverId);
+        query.setParameter("transactionType", TransactionType.PAYMENT);
+        
+        // Set date parameters if provided
+        if (fromDate != null) {
+            query.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            query.setParameter("toDate", toDate);
+        }
+        
+        // Get total count (for pagination)
+        StringBuilder countQueryBuilder = new StringBuilder();
+        countQueryBuilder.append("SELECT COUNT(t) FROM Transaction t ");
+        countQueryBuilder.append("WHERE t.receiver.id = :receiverId ");
+        countQueryBuilder.append("AND t.transactionType = :transactionType ");
+        
+        if (fromDate != null) {
+            countQueryBuilder.append("AND t.createdAt >= :fromDate ");
+        }
+        if (toDate != null) {
+            countQueryBuilder.append("AND t.createdAt <= :toDate ");
+        }
+        
+        Query countQuery = entityManager.createQuery(countQueryBuilder.toString(), Long.class);
+        countQuery.setParameter("receiverId", receiverId);
+        countQuery.setParameter("transactionType", TransactionType.PAYMENT);
+        
+        if (fromDate != null) {
+            countQuery.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            countQuery.setParameter("toDate", toDate);
+        }
+        
+        // Apply pagination
+        int offset = page * size;
+        query.setFirstResult(offset);
+        query.setMaxResults(size);
+        
+        @SuppressWarnings("unchecked")
+        List<Transaction> paginatedTransactions = (List<Transaction>) query.getResultList();
+        
+        // Get ALL PAYMENT transactions for statistics calculation (without pagination)
+        StringBuilder statsQueryBuilder = new StringBuilder();
+        statsQueryBuilder.append("SELECT t FROM Transaction t ");
+        statsQueryBuilder.append("LEFT JOIN FETCH t.user u ");
+        statsQueryBuilder.append("WHERE t.receiver.id = :receiverId ");
+        statsQueryBuilder.append("AND t.transactionType = :transactionType ");
+        
+        if (fromDate != null) {
+            statsQueryBuilder.append("AND t.createdAt >= :fromDate ");
+        }
+        if (toDate != null) {
+            statsQueryBuilder.append("AND t.createdAt <= :toDate ");
+        }
+        
+        Query statsQuery = entityManager.createQuery(statsQueryBuilder.toString(), Transaction.class);
+        statsQuery.setParameter("receiverId", receiverId);
+        statsQuery.setParameter("transactionType", TransactionType.PAYMENT);
+        
+        if (fromDate != null) {
+            statsQuery.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            statsQuery.setParameter("toDate", toDate);
+        }
+        
+        @SuppressWarnings("unchecked")
+        List<Transaction> allTransactions = (List<Transaction>) statsQuery.getResultList();
+        
+        // Convert paginated transactions to PaymentResponse
+        List<PaymentResponse> transactionResponses = paginatedTransactions.stream()
+                .map(this::mapToPaymentResponse)
+                .collect(Collectors.toList());
+        
+        // Calculate statistics from ALL PAYMENT transactions (not just paginated)
+        ReceiverTransactionsResponse.TransactionStatistics statistics = calculateReceiverTransactionStatistics(allTransactions);
+        
+        ReceiverTransactionsResponse response = new ReceiverTransactionsResponse();
+        response.setTransactions(transactionResponses);
+        response.setStatistics(statistics);
         
         return response;
     }
@@ -2337,6 +2515,25 @@ public class PaymentService {
         return "POCHI" + timestamp + randomPart.toString();
     }
 
+    /**
+     * Calculate amountRemaining for a user.
+     * In flexible mode: returns sum of balances from flexible merchants only.
+     * Otherwise: returns the global amountRemaining from user entity.
+     */
+    /**
+     * Calculate amountRemaining for a user.
+     * Since we always add merchant balance amounts to user's global amountRemaining on top-up,
+     * and always deduct from user's global amountRemaining on payment,
+     * we simply return the user's global amountRemaining as the single source of truth.
+     * 
+     * Merchant balances are just records of what was topped up - they don't affect the actual balance.
+     */
+    private BigDecimal calculateAmountRemaining(User user) {
+        // User's global amountRemaining is the single source of truth
+        // It already includes all topped-up amounts from all merchants (LOAN, CASH, MOMO)
+        return user.getAmountRemaining() != null ? user.getAmountRemaining() : BigDecimal.ZERO;
+    }
+
     private UserResponse mapToUserResponse(User user) {
         UserResponse response = new UserResponse();
         response.setId(user.getId());
@@ -2346,7 +2543,10 @@ public class PaymentService {
         response.setIsAssignedNfcCard(user.getIsAssignedNfcCard());
         response.setNfcCardId(user.getNfcCardId());
         response.setAmountOnCard(user.getAmountOnCard());
-        response.setAmountRemaining(user.getAmountRemaining());
+        
+        // Calculate amountRemaining: in flexible mode, use sum of flexible merchant balances
+        BigDecimal amountRemaining = calculateAmountRemaining(user);
+        response.setAmountRemaining(amountRemaining);
         
         // Get merchant-specific balances
         List<MerchantUserBalance> merchantBalances = merchantUserBalanceRepository.findByUserId(user.getId());

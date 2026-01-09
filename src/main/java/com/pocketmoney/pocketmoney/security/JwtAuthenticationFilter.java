@@ -1,10 +1,8 @@
 package com.pocketmoney.pocketmoney.security;
 
-import com.pocketmoney.pocketmoney.util.JwtUtil;
-import jakarta.servlet.FilterChain;
-import jakarta.servlet.ServletException;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.util.List;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
@@ -14,8 +12,12 @@ import org.springframework.security.web.authentication.WebAuthenticationDetailsS
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
-import java.io.IOException;
-import java.util.List;
+import com.pocketmoney.pocketmoney.util.JwtUtil;
+
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 
 @Component
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
@@ -46,6 +48,8 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                 String subject = jwtUtil.getUsernameFromToken(token);
                 String tokenType = jwtUtil.getTypeFromToken(token);
                 
+                logger.info("Token validated successfully - Subject: {}, Type: {}, Request: {}", subject, tokenType, request.getRequestURI());
+                
                 String authority;
                 if ("AUTH".equals(tokenType)) {
                     // AUTH tokens have a role claim
@@ -53,7 +57,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                         String role = jwtUtil.getRoleFromToken(token).name();
                         authority = "ROLE_" + role;
                     } catch (Exception e) {
-                        logger.debug("Error getting role from AUTH token: {}", e.getMessage());
+                        logger.error("Error getting role from AUTH token for request {}: {}", request.getRequestURI(), e.getMessage(), e);
                         filterChain.doFilter(request, response);
                         return;
                     }
@@ -63,12 +67,12 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                     authority = "ROLE_RECEIVER";
                 } else {
                     // Unknown token type
-                    logger.debug("Unknown token type: {}", tokenType);
+                    logger.error("Unknown token type: {} for request: {}", tokenType, request.getRequestURI());
                     filterChain.doFilter(request, response);
                     return;
                 }
 
-                logger.debug("Token validated - Type: {}, Authority: {}, Subject: {}", tokenType, authority, subject);
+                logger.info("Token processed - Type: {}, Authority: {}, Subject: {}, Request: {}", tokenType, authority, subject, request.getRequestURI());
 
                 // Create authentication token
                 List<SimpleGrantedAuthority> authorities = List.of(new SimpleGrantedAuthority(authority));
@@ -78,12 +82,16 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
                 // Set authentication in security context
                 SecurityContextHolder.getContext().setAuthentication(authentication);
+                logger.info("Authentication set in security context - User: {}, Authority: {}, Request: {}", subject, authority, request.getRequestURI());
             } else {
-                logger.debug("Token validation failed for request: {}", request.getRequestURI());
+                logger.warn("Token validation failed for request: {}", request.getRequestURI());
+                // Don't set authentication - let Spring Security handle unauthorized requests
             }
         } catch (Exception e) {
-            // Token is invalid, continue without authentication
-            logger.debug("Invalid JWT token for request {}: {}", request.getRequestURI(), e.getMessage());
+            // Token is invalid, log the error but continue without authentication
+            logger.error("Error processing JWT token for request {}: {}", request.getRequestURI(), e.getMessage(), e);
+            logger.error("Exception details: ", e);
+            // Don't set authentication - let Spring Security handle unauthorized requests
         }
 
         filterChain.doFilter(request, response);

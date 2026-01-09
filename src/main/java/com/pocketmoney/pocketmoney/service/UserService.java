@@ -590,10 +590,16 @@ public class UserService {
         response.setIsAssignedNfcCard(user.getIsAssignedNfcCard());
         response.setNfcCardId(user.getNfcCardId());
         response.setAmountOnCard(user.getAmountOnCard());
-        response.setAmountRemaining(user.getAmountRemaining());
         
         // Get merchant-specific balances
         List<MerchantUserBalance> merchantBalances = merchantUserBalanceRepository.findByUserId(user.getId());
+        
+        // User's global amountRemaining is the single source of truth
+        // It already includes all topped-up amounts from all merchants (LOAN, CASH, MOMO)
+        // Merchant balances are just records - they don't affect the actual balance
+        BigDecimal amountRemaining = user.getAmountRemaining() != null ? user.getAmountRemaining() : BigDecimal.ZERO;
+        response.setAmountRemaining(amountRemaining);
+        
         List<MerchantBalanceInfo> merchantBalanceInfos = merchantBalances.stream()
                 .map(mb -> {
                     MerchantBalanceInfo info = new MerchantBalanceInfo();
