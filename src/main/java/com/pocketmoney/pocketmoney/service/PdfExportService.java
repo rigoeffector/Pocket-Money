@@ -204,9 +204,9 @@ public class PdfExportService {
                     contentStream.showText("No transactions found for the selected period.");
                     contentStream.endText();
                 } else {
-                    // Table configuration for landscape - optimized column widths with merchant name column
-                    float[] columnWidths = {100, 120, 100, 75, 65, 70, 90, 120};
-                    String[] headers = {"Date/Time", "Customer Names", "Merchant", "Amount", "Bonus", "Status", "Payment Info", "Transaction ID"};
+                    // Table configuration for landscape - optimized column widths with merchant name and payment type columns
+                    float[] columnWidths = {95, 110, 90, 75, 75, 60, 65, 85, 115};
+                    String[] headers = {"Date/Time", "Customer Names", "Merchant", "Payment Type", "Amount", "Bonus", "Status", "Payment Info", "Transaction ID"};
                     float tableStartX = MARGIN;
                     float cellPadding = 3;
                     float rowHeight = TABLE_ROW_HEIGHT; // Use constant (16)
@@ -261,9 +261,10 @@ public class PdfExportService {
                         
                         // Prepare row data - increased truncation limits for landscape
                         String[] rowData = {
-                            truncateText(formatDateTime(transaction.getCreatedAt()), 20),
-                            truncateText(getCustomerName(transaction), 25),
-                            truncateText(getMerchantName(transaction), 25),
+                            truncateText(formatDateTime(transaction.getCreatedAt()), 18),
+                            truncateText(getCustomerName(transaction), 22),
+                            truncateText(getMerchantName(transaction), 22),
+                            truncateText(getPaymentType(transaction), 18),
                             truncateText(formatCurrency(transaction.getAmount()), 18),
                             truncateText(formatCurrency(transaction.getUserBonusAmount()), 18),
                             truncateText(transaction.getStatus() != null ? transaction.getStatus().toString() : "N/A", 15),
@@ -369,6 +370,13 @@ public class PdfExportService {
             return transaction.getReceiverCompanyName();
         }
         return "N/A";
+    }
+    
+    private String getPaymentType(PaymentResponse transaction) {
+        if (transaction.getPaymentCategory() != null && transaction.getPaymentCategory().getName() != null) {
+            return transaction.getPaymentCategory().getName();
+        }
+        return "Others";
     }
     
     private String getPaymentInfo(PaymentResponse transaction) {
