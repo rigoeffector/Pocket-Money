@@ -23,7 +23,7 @@ public class PaymentCategoryDataInitializer implements CommandLineRunner {
 
     @Override
     public void run(String... args) throws Exception {
-        List<String> defaultCategories = Arrays.asList("Fuel", "Cantine", "Other");
+        List<String> defaultCategories = Arrays.asList("Fuel", "Cantine", "EFASHE", "Other");
 
         for (String categoryName : defaultCategories) {
             if (!paymentCategoryRepository.existsByName(categoryName)) {

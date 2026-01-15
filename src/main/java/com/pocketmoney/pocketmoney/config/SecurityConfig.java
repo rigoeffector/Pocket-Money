@@ -94,6 +94,7 @@ public class SecurityConfig {
                         .requestMatchers("/api/receivers/**").hasAnyRole("RECEIVER", "ADMIN")
                         .requestMatchers("/api/users/phone/*/nfc-card/**").hasAnyRole("RECEIVER", "ADMIN")
                         .requestMatchers("/api/users/*/nfc-card/**").hasAnyRole("USER", "RECEIVER", "ADMIN")
+                        .requestMatchers("/api/efashe/settings", "/api/efashe/settings/**").hasRole("ADMIN")
                         .anyRequest().authenticated()
                 )
                 .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
