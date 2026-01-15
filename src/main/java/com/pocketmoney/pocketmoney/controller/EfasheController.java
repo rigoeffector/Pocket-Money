@@ -3,7 +3,7 @@ package com.pocketmoney.pocketmoney.controller;
 import com.pocketmoney.pocketmoney.dto.ApiResponse;
 import com.pocketmoney.pocketmoney.dto.EfasheInitiateRequest;
 import com.pocketmoney.pocketmoney.dto.EfasheInitiateResponse;
-import com.pocketmoney.pocketmoney.dto.MoPayResponse;
+import com.pocketmoney.pocketmoney.dto.EfasheStatusResponse;
 import com.pocketmoney.pocketmoney.service.EfashePaymentService;
 import jakarta.validation.Valid;
 import org.slf4j.Logger;
@@ -44,12 +44,13 @@ public class EfasheController {
     /**
      * Check EFASHE transaction status using MoPay transaction ID
      * GET /api/efashe/status/{transactionId}
+     * Automatically triggers EFASHE validate and execute when MoPay status is SUCCESS
      */
     @GetMapping("/status/{transactionId}")
-    public ResponseEntity<ApiResponse<MoPayResponse>> checkTransactionStatus(
+    public ResponseEntity<ApiResponse<EfasheStatusResponse>> checkTransactionStatus(
             @PathVariable("transactionId") String transactionId) {
         try {
-            MoPayResponse response = efashePaymentService.checkTransactionStatus(transactionId);
+            EfasheStatusResponse response = efashePaymentService.checkTransactionStatus(transactionId);
             return ResponseEntity.ok(ApiResponse.success("Transaction status retrieved successfully", response));
         } catch (RuntimeException e) {
             logger.error("Error checking EFASHE transaction status: ", e);
