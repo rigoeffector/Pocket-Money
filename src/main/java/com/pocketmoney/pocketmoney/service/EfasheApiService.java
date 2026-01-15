@@ -356,10 +356,10 @@ public class EfasheApiService {
     /**
      * Poll EFASHE transaction status using the poll endpoint
      * GET /vend/{trxId}/status
-     * Does NOT use token authentication (as per user requirement)
+     * Uses token authentication (Bearer token)
      */
     public EfashePollStatusResponse pollTransactionStatus(String pollEndpoint) {
-        // pollEndpoint should be relative path like "/vend/23oMSt0cODJPa07PH0AOdpS73u6/status"
+        // pollEndpoint should be relative path like "/v2/trx/849d5438-fe49-4c11-b959-dac800d187dd/status/"
         // or full URL
         String url;
         if (pollEndpoint.startsWith("http")) {
@@ -372,7 +372,7 @@ public class EfasheApiService {
         
         logger.info("Polling EFASHE transaction status - Endpoint: {}", url);
         
-        HttpHeaders headers = buildHeaders();
+        HttpHeaders headers = buildHeadersWithToken();
         HttpEntity<String> entity = new HttpEntity<>(headers);
 
         try {
@@ -412,15 +412,54 @@ public class EfasheApiService {
                 throw new RuntimeException("Failed to parse EFASHE poll status response: " + e.getMessage());
             }
             
-            logger.info("EFASHE poll status response parsed - Status: {}, TrxId: {}", 
+            logger.info("EFASHE poll status response parsed - Status: {}, TrxId: {}, Message: {}", 
                 pollResponse != null ? pollResponse.getStatus() : "N/A",
-                pollResponse != null ? pollResponse.getTrxId() : "N/A");
+                pollResponse != null ? pollResponse.getTrxId() : "N/A",
+                pollResponse != null ? pollResponse.getMessage() : "N/A");
             
             return pollResponse;
         } catch (HttpClientErrorException e) {
             int statusCode = e.getStatusCode().value();
             String responseBody = e.getResponseBodyAsString();
             logger.error("EFASHE poll status HTTP error - Status: {}, Response: {}", statusCode, responseBody);
+            
+            // If 401, clear cached token and retry once
+            if (statusCode == 401) {
+                logger.warn("EFASHE token expired or invalid for poll status, clearing cache and retrying authentication");
+                cachedAccessToken = null;
+                tokenExpiresAt = null;
+                
+                // Retry once with new token
+                try {
+                    HttpHeaders retryHeaders = buildHeadersWithToken();
+                    HttpEntity<String> retryEntity = new HttpEntity<>(retryHeaders);
+                    ResponseEntity<String> retryResponse = restTemplate.exchange(
+                            url,
+                            HttpMethod.GET,
+                            retryEntity,
+                            String.class
+                    );
+                    
+                    // Parse retry response
+                    ObjectMapper objectMapper = new ObjectMapper();
+                    JsonNode jsonNode = objectMapper.readTree(retryResponse.getBody());
+                    EfashePollStatusResponse pollResponse;
+                    if (jsonNode.has("data")) {
+                        JsonNode dataNode = jsonNode.get("data");
+                        if (dataNode.has("data")) {
+                            pollResponse = objectMapper.treeToValue(dataNode.get("data"), EfashePollStatusResponse.class);
+                        } else {
+                            pollResponse = objectMapper.treeToValue(dataNode, EfashePollStatusResponse.class);
+                        }
+                    } else {
+                        pollResponse = objectMapper.treeToValue(jsonNode, EfashePollStatusResponse.class);
+                    }
+                    return pollResponse;
+                } catch (Exception retryException) {
+                    logger.error("EFASHE poll status retry failed: ", retryException);
+                    throw new RuntimeException("EFASHE API authentication failed after retry. Please verify API credentials.");
+                }
+            }
             
             throw new RuntimeException("Failed to poll EFASHE transaction status (Status: " + statusCode + "): " + 
                 (responseBody != null && !responseBody.isEmpty() ? responseBody : e.getMessage()));

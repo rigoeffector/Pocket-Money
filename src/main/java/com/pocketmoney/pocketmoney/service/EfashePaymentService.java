@@ -3,7 +3,9 @@ package com.pocketmoney.pocketmoney.service;
 import com.pocketmoney.pocketmoney.dto.*;
 import com.pocketmoney.pocketmoney.entity.EfasheTransaction;
 import com.pocketmoney.pocketmoney.entity.EfasheServiceType;
+import com.pocketmoney.pocketmoney.entity.User;
 import com.pocketmoney.pocketmoney.repository.EfasheTransactionRepository;
+import com.pocketmoney.pocketmoney.repository.UserRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -13,6 +15,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 @Service
 public class EfashePaymentService {
@@ -23,15 +26,21 @@ public class EfashePaymentService {
     private final MoPayService moPayService;
     private final EfasheApiService efasheApiService;
     private final EfasheTransactionRepository efasheTransactionRepository;
+    private final WhatsAppService whatsAppService;
+    private final UserRepository userRepository;
 
     public EfashePaymentService(EfasheSettingsService efasheSettingsService, 
                                  MoPayService moPayService,
                                  EfasheApiService efasheApiService,
-                                 EfasheTransactionRepository efasheTransactionRepository) {
+                                 EfasheTransactionRepository efasheTransactionRepository,
+                                 WhatsAppService whatsAppService,
+                                 UserRepository userRepository) {
         this.efasheSettingsService = efasheSettingsService;
         this.moPayService = moPayService;
         this.efasheApiService = efasheApiService;
         this.efasheTransactionRepository = efasheTransactionRepository;
+        this.whatsAppService = whatsAppService;
+        this.userRepository = userRepository;
     }
 
     public EfasheInitiateResponse initiatePayment(EfasheInitiateRequest request) {
@@ -239,22 +248,46 @@ public class EfashePaymentService {
                                 logger.info("EFASHE execute initiated async - PollEndpoint: {}, RetryAfterSecs: {}s", 
                                     executeResponse.getPollEndpoint(), executeResponse.getRetryAfterSecs());
                                 
+                                // Wait for retryAfterSecs before polling (if specified)
+                                if (executeResponse.getRetryAfterSecs() != null && executeResponse.getRetryAfterSecs() > 0) {
+                                    try {
+                                        logger.info("Waiting {} seconds before polling EFASHE status...", executeResponse.getRetryAfterSecs());
+                                        Thread.sleep(executeResponse.getRetryAfterSecs() * 1000L);
+                                    } catch (InterruptedException ie) {
+                                        Thread.currentThread().interrupt();
+                                        logger.warn("Interrupted while waiting to poll EFASHE status");
+                                    }
+                                }
+                                
                                 // Poll the status endpoint to check if transaction is SUCCESS
                                 try {
                                     EfashePollStatusResponse pollResponse = efasheApiService.pollTransactionStatus(executeResponse.getPollEndpoint());
                                     
-                                    if (pollResponse != null && "SUCCESS".equalsIgnoreCase(pollResponse.getStatus())) {
-                                        transaction.setEfasheStatus("SUCCESS");
-                                        transaction.setMessage(pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction completed successfully");
-                                        logger.info("EFASHE transaction SUCCESS confirmed from poll - Status: {}", pollResponse.getStatus());
+                                    if (pollResponse != null) {
+                                        String pollStatus = pollResponse.getStatus();
+                                        logger.info("EFASHE poll response received - Status: {}, Message: {}, TrxId: {}", 
+                                            pollStatus, pollResponse.getMessage(), pollResponse.getTrxId());
                                         
-                                        // Now send cashback transfers since transaction is SUCCESS
-                                        sendCashbackTransfers(transaction);
+                                        if ("SUCCESS".equalsIgnoreCase(pollStatus)) {
+                                            transaction.setEfasheStatus("SUCCESS");
+                                            transaction.setMessage(pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction completed successfully");
+                                            logger.info("EFASHE transaction SUCCESS confirmed from poll - Status: {}", pollStatus);
+                                            
+                                            // Now send cashback transfers since transaction is SUCCESS
+                                            sendCashbackTransfers(transaction);
+                                            
+                                            // Send WhatsApp notification
+                                            sendWhatsAppNotification(transaction);
+                                        } else {
+                                            // Still pending or failed
+                                            transaction.setEfasheStatus(pollStatus != null ? pollStatus : "PENDING");
+                                            transaction.setMessage(pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction is still processing");
+                                            logger.info("EFASHE transaction status from poll - Status: {}", pollStatus);
+                                        }
                                     } else {
-                                        // Still pending or failed
-                                        transaction.setEfasheStatus(pollResponse != null && pollResponse.getStatus() != null ? pollResponse.getStatus() : "PENDING");
-                                        transaction.setMessage(pollResponse != null && pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction is still processing");
-                                        logger.info("EFASHE transaction still pending - Status: {}", pollResponse != null ? pollResponse.getStatus() : "PENDING");
+                                        logger.warn("EFASHE poll response is null, keeping status as PENDING");
+                                        transaction.setEfasheStatus("PENDING");
+                                        transaction.setMessage("EFASHE transaction is still processing");
                                     }
                                 } catch (Exception e) {
                                     logger.warn("Error polling EFASHE status, will remain PENDING: ", e);
@@ -272,6 +305,9 @@ public class EfashePaymentService {
                                 if ("SUCCESS".equalsIgnoreCase(efasheStatus)) {
                                     logger.info("EFASHE transaction SUCCESS confirmed, sending cashback transfers");
                                     sendCashbackTransfers(transaction);
+                                    
+                                    // Send WhatsApp notification
+                                    sendWhatsAppNotification(transaction);
                                 } else {
                                     logger.info("EFASHE transaction status is not SUCCESS: {}, cashback transfers will not be sent", efasheStatus);
                                 }
@@ -312,6 +348,9 @@ public class EfashePaymentService {
                             
                             // Now send cashback transfers since transaction is SUCCESS
                             sendCashbackTransfers(transaction);
+                            
+                            // Send WhatsApp notification
+                            sendWhatsAppNotification(transaction);
                         } else if (pollResponse != null && pollResponse.getStatus() != null) {
                             // Update status (could be FAILED or still PENDING)
                             transaction.setEfasheStatus(pollResponse.getStatus());
@@ -513,6 +552,56 @@ public class EfashePaymentService {
         // Pad with zeros to ensure 6 digits
         String randomPart = String.format("%06d", randomNum);
         return "EFASHE" + timestamp + randomPart;
+    }
+    
+    /**
+     * Send WhatsApp notification to the customer when EFASHE transaction is SUCCESS
+     */
+    private void sendWhatsAppNotification(EfasheTransaction transaction) {
+        try {
+            if (transaction.getCustomerPhone() == null || transaction.getCustomerPhone().isEmpty()) {
+                logger.warn("Customer phone number is null or empty, skipping WhatsApp notification for transaction: {}", 
+                    transaction.getTransactionId());
+                return;
+            }
+            
+            // Find user by phone number (try multiple formats)
+            String normalizedPhone = normalizePhoneTo12Digits(transaction.getCustomerPhone());
+            Optional<User> userOpt = userRepository.findByPhoneNumber(normalizedPhone);
+            
+            // If not found, try other formats
+            if (!userOpt.isPresent()) {
+                String phoneDigitsOnly = transaction.getCustomerPhone().replaceAll("[^0-9]", "");
+                userOpt = userRepository.findByPhoneNumber(phoneDigitsOnly);
+            }
+            
+            if (!userOpt.isPresent() && normalizedPhone.startsWith("250") && normalizedPhone.length() == 12) {
+                String phoneWithout250 = "0" + normalizedPhone.substring(3);
+                userOpt = userRepository.findByPhoneNumber(phoneWithout250);
+            }
+            
+            // Build WhatsApp message
+            String serviceName = transaction.getServiceType() != null ? transaction.getServiceType().toString() : "payment";
+            String amount = transaction.getAmount() != null ? transaction.getAmount().toPlainString() : "0";
+            String cashbackAmount = transaction.getCustomerCashbackAmount() != null 
+                ? transaction.getCustomerCashbackAmount().toPlainString() : "0";
+            
+            String message = String.format(
+                "You Paid %s, %s RWF and your cash back is %s RWF, Thanks for working with us",
+                serviceName,
+                amount,
+                cashbackAmount
+            );
+            
+            // Send WhatsApp notification
+            whatsAppService.sendWhatsApp(message, normalizedPhone);
+            logger.info("WhatsApp notification sent to customer {} for EFASHE transaction: {}", 
+                normalizedPhone, transaction.getTransactionId());
+        } catch (Exception e) {
+            logger.error("Error sending WhatsApp notification for EFASHE transaction {}: ", 
+                transaction.getTransactionId(), e);
+            // Don't fail the transaction if WhatsApp fails
+        }
     }
 }
 
