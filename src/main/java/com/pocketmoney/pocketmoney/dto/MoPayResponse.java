@@ -12,6 +12,9 @@ public class MoPayResponse {
     private String message;
     private Boolean success;
     
+    @JsonProperty("errorMessage")
+    private String errorMessage;
+    
     // Legacy fields for backward compatibility (from check-status endpoint)
     @JsonProperty("transaction_id")
     private String transaction_id;

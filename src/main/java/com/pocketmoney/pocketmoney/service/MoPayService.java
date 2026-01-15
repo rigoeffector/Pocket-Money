@@ -1,5 +1,6 @@
 package com.pocketmoney.pocketmoney.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.pocketmoney.pocketmoney.dto.MoPayInitiateRequest;
 import com.pocketmoney.pocketmoney.dto.MoPayResponse;
 import org.slf4j.Logger;
@@ -7,6 +8,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 
 @Service
@@ -73,6 +75,34 @@ public class MoPayService {
             }
             
             return responseBody;
+        } catch (HttpClientErrorException e) {
+            // Handle HTTP client errors (4xx) - extract response body properly
+            int statusCode = e.getStatusCode().value();
+            String responseBody = e.getResponseBodyAsString();
+            
+            logger.error("MoPay HTTP error - Status: {}, Response: {}", statusCode, responseBody);
+            
+            MoPayResponse errorResponse = new MoPayResponse();
+            errorResponse.setStatus(statusCode);
+            errorResponse.setSuccess(false);
+            
+            // Try to parse the error response body
+            try {
+                ObjectMapper objectMapper = new ObjectMapper();
+                MoPayResponse parsedError = objectMapper.readValue(responseBody, MoPayResponse.class);
+                // Use errorMessage if available, otherwise use message
+                String errorMsg = parsedError.getErrorMessage() != null ? parsedError.getErrorMessage() : parsedError.getMessage();
+                errorResponse.setMessage(errorMsg);
+                errorResponse.setTransactionId(parsedError.getTransactionId());
+                logger.info("Parsed MoPay error response - Status: {}, Message: {}, TransactionId: {}", 
+                    statusCode, errorMsg, parsedError.getTransactionId());
+            } catch (Exception parseException) {
+                logger.warn("Failed to parse MoPay error response, using raw body: {}", responseBody);
+                // If parsing fails, use the raw response body as message
+                errorResponse.setMessage(responseBody != null && !responseBody.isEmpty() ? responseBody : e.getMessage());
+            }
+            
+            return errorResponse;
         } catch (Exception e) {
             logger.error("Error initiating MoPay payment: ", e);
             MoPayResponse errorResponse = new MoPayResponse();
