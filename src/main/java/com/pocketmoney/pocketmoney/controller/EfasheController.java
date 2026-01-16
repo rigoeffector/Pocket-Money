@@ -7,7 +7,6 @@ import com.pocketmoney.pocketmoney.dto.EfasheStatusResponse;
 import com.pocketmoney.pocketmoney.dto.EfasheTransactionResponse;
 import com.pocketmoney.pocketmoney.dto.PaginatedResponse;
 import com.pocketmoney.pocketmoney.entity.EfasheServiceType;
-import com.pocketmoney.pocketmoney.service.EfasheApiService;
 import com.pocketmoney.pocketmoney.service.EfashePaymentService;
 import jakarta.validation.Valid;
 import org.slf4j.Logger;
@@ -26,36 +25,14 @@ public class EfasheController {
     private static final Logger logger = LoggerFactory.getLogger(EfasheController.class);
 
     private final EfashePaymentService efashePaymentService;
-    private final EfasheApiService efasheApiService;
 
-    public EfasheController(EfashePaymentService efashePaymentService, EfasheApiService efasheApiService) {
+    public EfasheController(EfashePaymentService efashePaymentService) {
         this.efashePaymentService = efashePaymentService;
-        this.efasheApiService = efasheApiService;
     }
 
     /**
-     * Initiate EFASHE payment with MoPay
+     * Initiate EFASHE payment with MoPay (Admin only)
      * POST /api/efashe/initiate
-     * 
-     * Request body fields:
-     *   - amount: Transaction amount (required)
-     *   - phone: Customer phone number for MoPay payment collection (required)
-     *   - serviceType: Service type - AIRTIME, MTN, RRA, TV, ELECTRICITY (required)
-     *   - customerAccountNumber: Account number for the service (optional for AIRTIME/MTN, required for TV/RRA/ELECTRICITY)
-     *     - AIRTIME/MTN: Phone number (optional, will use phone if not provided)
-     *     - TV: Decoder number (required)
-     *     - RRA: TIN number (required)
-     *     - ELECTRICITY: Cashpower number (required)
-     *   - currency: Currency code (default: RWF)
-     *   - payment_mode: Payment mode (default: MOBILE)
-     *   - message: Optional message
-     *   - callback_url: Optional callback URL
-     * 
-     * Examples:
-     *   AIRTIME: { "amount": 1000, "phone": "250784638201", "serviceType": "AIRTIME" }
-     *   TV: { "amount": 2000, "phone": "250784638201", "serviceType": "TV", "customerAccountNumber": "DEC123456789" }
-     *   RRA: { "amount": 5000, "phone": "250784638201", "serviceType": "RRA", "customerAccountNumber": "TIN123456789" }
-     *   ELECTRICITY: { "amount": 3000, "phone": "250784638201", "serviceType": "ELECTRICITY", "customerAccountNumber": "1234567890123" }
      */
     @PostMapping("/initiate")
     public ResponseEntity<ApiResponse<EfasheInitiateResponse>> initiatePayment(
@@ -69,7 +46,7 @@ public class EfasheController {
                     .body(ApiResponse.error(e.getMessage()));
         }
     }
-    
+
     /**
      * Check EFASHE transaction status using MoPay transaction ID
      * GET /api/efashe/status/{transactionId}
@@ -87,20 +64,19 @@ public class EfasheController {
                     .body(ApiResponse.error(e.getMessage()));
         }
     }
-    
+
     /**
      * Get EFASHE transactions with optional filtering by service type, phone number, and date range
      * GET /api/efashe/transactions
      * 
      * Access Control:
      *   - ADMIN: Can see all transactions (optional phone filter available)
-     *   - RECEIVER/MERCHANT: Can see all transactions (optional phone filter available)
      *   - USER: Can only see their own transactions (automatically filtered by their phone number)
      * 
      * Query parameters:
-     *   - serviceType: Optional filter by service type (AIRTIME, RRA, TV, MTN, ELECTRICITY)
+     *   - serviceType: Optional filter by service type (AIRTIME, RRA, TV, MTN)
      *   - phone: Optional filter by customer phone number (accepts any format, will be normalized)
-     *            - For ADMIN/RECEIVER: optional filter
+     *            - For ADMIN: optional filter
      *            - For USER: ignored, automatically uses their own phone number
      *   - page: Page number (default: 0)
      *   - size: Page size (default: 20)
@@ -110,8 +86,6 @@ public class EfasheController {
      * Examples:
      *   ADMIN: /api/efashe/transactions?serviceType=RRA&phone=250784638201
      *   ADMIN: /api/efashe/transactions (returns all transactions)
-     *   RECEIVER: /api/efashe/transactions?serviceType=AIRTIME&phone=250784638201
-     *   RECEIVER: /api/efashe/transactions (returns all transactions)
      *   USER: /api/efashe/transactions?serviceType=RRA (returns only user's transactions)
      *   USER: /api/efashe/transactions?phone=250784638201 (phone parameter ignored, returns only user's transactions)
      */
@@ -131,24 +105,6 @@ public class EfasheController {
             return ResponseEntity.ok(ApiResponse.success("EFASHE transactions retrieved successfully", response));
         } catch (RuntimeException e) {
             logger.error("Error retrieving EFASHE transactions: ", e);
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                    .body(ApiResponse.error(e.getMessage()));
-        }
-    }
-    
-    /**
-     * Get all available verticals from EFASHE API
-     * GET /api/efashe/verticals
-     * Uses EFASHE API authentication (Bearer token)
-     * Returns list of all available service verticals (airtime, tax, decoder, electricity, etc.)
-     */
-    @GetMapping("/verticals")
-    public ResponseEntity<ApiResponse<Object>> getVerticals() {
-        try {
-            Object verticals = efasheApiService.getVerticals();
-            return ResponseEntity.ok(ApiResponse.success("EFASHE verticals retrieved successfully", verticals));
-        } catch (RuntimeException e) {
-            logger.error("Error retrieving EFASHE verticals: ", e);
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.error(e.getMessage()));
         }

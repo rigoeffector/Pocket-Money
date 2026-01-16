@@ -7,7 +7,7 @@ import lombok.Data;
 public class EfasheAuthResponse {
     @JsonProperty("data")
     private AuthData data;
-    
+
     @Data
     public static class AuthData {
         @JsonProperty("accessToken")
@@ -31,7 +31,7 @@ public class EfasheAuthResponse {
         @JsonProperty("agencyAccount")
         private AgencyAccount agencyAccount;
     }
-    
+
     @Data
     public static class AgencyPOP {
         @JsonProperty("popId")
@@ -61,7 +61,7 @@ public class EfasheAuthResponse {
         @JsonProperty("streetAddress")
         private String streetAddress;
     }
-    
+
     @Data
     public static class AgencyAccount {
         @JsonProperty("agencyId")
