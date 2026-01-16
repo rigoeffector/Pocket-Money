@@ -15,7 +15,7 @@ public class MessagingService {
 
     private static final Logger logger = LoggerFactory.getLogger(MessagingService.class);
 
-    @Value("${sms.api.url:https://swiftqom.io/api/prod}")
+    @Value("${sms.api.url:https://swiftqom.io/api/dev}")
     private String smsApiUrl;
 
     @Value("${sms.api.key:}")

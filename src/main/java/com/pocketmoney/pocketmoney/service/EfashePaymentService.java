@@ -62,6 +62,101 @@ public class EfashePaymentService {
         EfasheSettingsResponse settingsResponse = efasheSettingsService.getSettingsByServiceType(request.getServiceType());
 
         BigDecimal amount = request.getAmount();
+        
+        // Normalize customer phone first (needed for account number determination)
+        String normalizedCustomerPhone = normalizePhoneTo12Digits(request.getPhone());
+        
+        // Determine customer account number BEFORE validate
+        // For AIRTIME: use phone as account number (convert to account format)
+        // For other services (RRA, TV, ELECTRICITY): use customerAccountNumber from request
+        String customerAccountNumber;
+        if (request.getServiceType() == EfasheServiceType.AIRTIME || request.getServiceType() == EfasheServiceType.MTN) {
+            // Convert customer phone to account number format for EFASHE
+            // Remove 250 prefix and add 0 prefix: 250784638201 -> 0784638201
+            customerAccountNumber = normalizedCustomerPhone.startsWith("250") 
+                ? "0" + normalizedCustomerPhone.substring(3) 
+                : (normalizedCustomerPhone.startsWith("0") ? normalizedCustomerPhone : "0" + normalizedCustomerPhone);
+            logger.info("AIRTIME/MTN service - Using phone as account number: {} (from phone: {})", customerAccountNumber, normalizedCustomerPhone);
+        } else {
+            // For RRA, TV, ELECTRICITY: use customerAccountNumber from request
+            if (request.getCustomerAccountNumber() == null || request.getCustomerAccountNumber().trim().isEmpty()) {
+                throw new RuntimeException("customerAccountNumber is required for service type: " + request.getServiceType());
+            }
+            customerAccountNumber = request.getCustomerAccountNumber().trim();
+            logger.info("Non-AIRTIME service ({}) - Using customerAccountNumber from request: {} (phone for MoPay: {})", 
+                request.getServiceType(), customerAccountNumber, normalizedCustomerPhone);
+        }
+
+        // ===================================================================
+        // STEP 1: Validate with EFASHE BEFORE initiating MoPay
+        // ===================================================================
+        logger.info("=== STEP 1: Validating with EFASHE BEFORE MoPay initiation ===");
+        EfasheValidateRequest validateRequest = new EfasheValidateRequest();
+        validateRequest.setVerticalId(getVerticalId(request.getServiceType()));
+        validateRequest.setCustomerAccountNumber(customerAccountNumber);
+        
+        logger.info("Calling EFASHE validate - Vertical: {}, Customer Account Number: {}", 
+            validateRequest.getVerticalId(), validateRequest.getCustomerAccountNumber());
+        
+        EfasheValidateResponse validateResponse = efasheApiService.validateAccount(validateRequest);
+        
+        // Validate MUST succeed before proceeding with MoPay
+        if (validateResponse == null || validateResponse.getTrxId() == null || validateResponse.getTrxId().trim().isEmpty()) {
+            String errorMsg = "EFASHE validation failed - Invalid account or service unavailable";
+            if (validateResponse != null && validateResponse.getTrxResult() != null) {
+                errorMsg = "EFASHE validation failed: " + validateResponse.getTrxResult();
+            }
+            logger.error("EFASHE validation failed - Cannot proceed with MoPay. Account: {}, Service: {}", 
+                customerAccountNumber, request.getServiceType());
+            throw new RuntimeException(errorMsg);
+        }
+        
+        logger.info("EFASHE validation successful - TrxId: {}, Account: {}", 
+            validateResponse.getTrxId(), customerAccountNumber);
+        
+        // Store customer account name if available
+        String customerAccountName = null;
+        if (validateResponse.getCustomerAccountName() != null && !validateResponse.getCustomerAccountName().trim().isEmpty()) {
+            customerAccountName = validateResponse.getCustomerAccountName().trim();
+            logger.info("Customer Account Name from validate: {}", customerAccountName);
+        }
+        
+        // Determine delivery method from validate response
+        String deliveryMethodId = "direct_topup"; // Default
+        if (validateResponse.getDeliveryMethods() != null && !validateResponse.getDeliveryMethods().isEmpty()) {
+            if (request.getServiceType() == EfasheServiceType.ELECTRICITY || 
+                request.getServiceType() == EfasheServiceType.RRA) {
+                // For ELECTRICITY and RRA, prefer SMS delivery method
+                boolean hasSms = validateResponse.getDeliveryMethods().stream()
+                    .anyMatch(dm -> "sms".equals(dm.getId()));
+                
+                if (hasSms) {
+                    deliveryMethodId = "sms";
+                    logger.info("{} service - Using SMS delivery method (preferred for this service type)", request.getServiceType());
+                } else {
+                    // Use the first available delivery method
+                    deliveryMethodId = validateResponse.getDeliveryMethods().get(0).getId();
+                    logger.info("{} service - SMS not available, using delivery method: {}", request.getServiceType(), deliveryMethodId);
+                }
+            } else {
+                // For other services (AIRTIME, TV, MTN), prefer direct_topup
+                boolean hasDirectTopup = validateResponse.getDeliveryMethods().stream()
+                    .anyMatch(dm -> "direct_topup".equals(dm.getId()));
+                
+                if (hasDirectTopup) {
+                    deliveryMethodId = "direct_topup";
+                } else {
+                    // Use the first available delivery method
+                    deliveryMethodId = validateResponse.getDeliveryMethods().get(0).getId();
+                }
+            }
+        }
+        
+        logger.info("=== EFASHE Validation Complete - Proceeding with MoPay Initiation ===");
+
+        // ===================================================================
+        // STEP 2: Proceed with MoPay initiation (validate passed)
+        // ===================================================================
         BigDecimal agentCommissionPercent = settingsResponse.getAgentCommissionPercentage();
         BigDecimal customerCashbackPercent = settingsResponse.getCustomerCashbackPercentage();
         BigDecimal besoftSharePercent = settingsResponse.getBesoftSharePercentage();
@@ -103,9 +198,6 @@ public class EfashePaymentService {
         moPayRequest.setAmount(amount);
         moPayRequest.setCurrency(request.getCurrency());
         
-        // Normalize and set customer phone (debit)
-        // Phone is now String in request, convert to normalized format
-        String normalizedCustomerPhone = normalizePhoneTo12Digits(request.getPhone());
         // MoPay API requires phone as Long, so convert for API call but keep as String in DTO
         moPayRequest.setPhone(normalizedCustomerPhone); // Will be converted to Long in MoPayService if needed
         moPayRequest.setPayment_mode(request.getPayment_mode());
@@ -176,28 +268,14 @@ public class EfashePaymentService {
         transaction.setTransactionId(mopayTransactionId); // Use MoPay transaction ID as primary identifier
         transaction.setServiceType(request.getServiceType());
         transaction.setCustomerPhone(normalizedCustomerPhone);
-        
-        // For AIRTIME: use phone as account number (convert to account format)
-        // For other services (RRA, TV, ELECTRICITY): use customerAccountNumber from request
-        String customerAccountNumber;
-        if (request.getServiceType() == EfasheServiceType.AIRTIME || request.getServiceType() == EfasheServiceType.MTN) {
-            // Convert customer phone to account number format for EFASHE
-            // Remove 250 prefix and add 0 prefix: 250784638201 -> 0784638201
-            customerAccountNumber = normalizedCustomerPhone.startsWith("250") 
-                ? "0" + normalizedCustomerPhone.substring(3) 
-                : (normalizedCustomerPhone.startsWith("0") ? normalizedCustomerPhone : "0" + normalizedCustomerPhone);
-            logger.info("AIRTIME/MTN service - Using phone as account number: {} (from phone: {})", customerAccountNumber, normalizedCustomerPhone);
-        } else {
-            // For RRA, TV, ELECTRICITY: use customerAccountNumber from request
-            if (request.getCustomerAccountNumber() == null || request.getCustomerAccountNumber().trim().isEmpty()) {
-                throw new RuntimeException("customerAccountNumber is required for service type: " + request.getServiceType());
-            }
-            customerAccountNumber = request.getCustomerAccountNumber().trim();
-            logger.info("Non-AIRTIME service ({}) - Using customerAccountNumber from request: {} (phone for MoPay: {})", 
-                request.getServiceType(), customerAccountNumber, normalizedCustomerPhone);
-        }
-        
         transaction.setCustomerAccountNumber(customerAccountNumber);
+        
+        // Store validate response data
+        transaction.setTrxId(validateResponse.getTrxId());
+        if (customerAccountName != null) {
+            transaction.setCustomerAccountName(customerAccountName);
+        }
+        transaction.setDeliveryMethodId(deliveryMethodId);
         transaction.setAmount(amount);
         transaction.setCurrency(request.getCurrency());
         transaction.setMopayTransactionId(mopayTransactionId); // Also store in mopayTransactionId field
@@ -214,12 +292,11 @@ public class EfashePaymentService {
         
         transaction.setMessage(moPayRequest.getMessage());
         
-        // For ELECTRICITY and RRA services, delivery method is SMS, so set deliverTo to customer phone
-        // This will be used when we validate and execute the EFASHE transaction
-        if (request.getServiceType() == EfasheServiceType.ELECTRICITY || request.getServiceType() == EfasheServiceType.RRA) {
-            transaction.setDeliveryMethodId("sms");
+        // For ELECTRICITY and RRA services, if delivery method is SMS, set deliverTo to customer phone
+        // This will be used when we execute the EFASHE transaction
+        if ("sms".equals(deliveryMethodId)) {
             transaction.setDeliverTo(normalizedCustomerPhone); // Customer phone for SMS delivery
-            logger.info("{} service - Setting delivery method to SMS, deliverTo to customer phone: {}", 
+            logger.info("{} service - Delivery method is SMS, setting deliverTo to customer phone: {}", 
                 request.getServiceType(), normalizedCustomerPhone);
         }
         
@@ -279,7 +356,6 @@ public class EfashePaymentService {
         // Check MoPay status using the transaction ID (which is the MoPay transaction ID)
         MoPayResponse moPayResponse = moPayService.checkTransactionStatus(transactionId);
         
-        EfasheValidateResponse validateResponse = null;
         EfasheExecuteResponse executeResponse = null;
         
         // Update MoPay status in transaction record (UPDATE existing row, don't create new)
@@ -300,94 +376,63 @@ public class EfashePaymentService {
             logger.info("MoPay status check - Status: {}, Success: {}, Transaction ID: {}", 
                 statusCode, moPayResponse.getSuccess(), moPayResponse.getTransactionId());
             
-            // If MoPay status is SUCCESS (200 or 201) OR success flag is true, trigger EFASHE validate and execute
+            // If MoPay status is SUCCESS (200 or 201) OR success flag is true, trigger EFASHE execute
             boolean isSuccess = (statusCode != null && (statusCode == 200 || statusCode == 201)) 
                 || (moPayResponse.getSuccess() != null && moPayResponse.getSuccess());
             
             if (isSuccess && !"SUCCESS".equalsIgnoreCase(transaction.getEfasheStatus())) {
-                logger.info("MoPay transaction SUCCESS detected (status: {}, success: {}). Triggering EFASHE validate and execute...", 
+                logger.info("MoPay transaction SUCCESS detected (status: {}, success: {}). Triggering EFASHE execute...", 
                     statusCode, moPayResponse.getSuccess());
                 
                 try {
-                    // Step 1: Validate with EFASHE
-                    EfasheValidateRequest validateRequest = new EfasheValidateRequest();
-                    validateRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
-                    validateRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
+                    // Validation was already done during initiate, so we use the stored trxId
+                    String trxId = transaction.getTrxId();
+                    if (trxId == null || trxId.trim().isEmpty()) {
+                        // This shouldn't happen if validation was done correctly, but handle gracefully
+                        logger.error("Transaction missing trxId from validate - Cannot execute EFASHE transaction. Transaction ID: {}", 
+                            transaction.getTransactionId());
+                        transaction.setEfasheStatus("FAILED");
+                        transaction.setErrorMessage("Missing trxId - validation may not have been completed during initiate");
+                        efasheTransactionRepository.save(transaction);
+                    }
                     
-                    logger.info("Calling EFASHE validate - Vertical: {}, Customer Account Number: {}", 
-                        validateRequest.getVerticalId(), validateRequest.getCustomerAccountNumber());
-                    validateResponse = efasheApiService.validateAccount(validateRequest);
+                    logger.info("Using stored trxId from validate (done during initiate) - TrxId: {}", trxId);
                     
-                    if (validateResponse != null && validateResponse.getTrxId() != null) {
-                        transaction.setTrxId(validateResponse.getTrxId());
-                        
-                        // Store customer account name from validate response (e.g., "MUHINZI ANDRE" for electricity, TIN owner for RRA)
-                        if (validateResponse.getCustomerAccountName() != null && !validateResponse.getCustomerAccountName().trim().isEmpty()) {
-                            transaction.setCustomerAccountName(validateResponse.getCustomerAccountName().trim());
-                            logger.info("EFASHE validate successful - TrxId: {}, Customer Account Name: {}", 
-                                validateResponse.getTrxId(), validateResponse.getCustomerAccountName());
+                    // Execute EFASHE transaction using stored trxId and delivery method info
+                    EfasheExecuteRequest executeRequest = new EfasheExecuteRequest();
+                    executeRequest.setTrxId(trxId);
+                    executeRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
+                    executeRequest.setAmount(transaction.getAmount());
+                    executeRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
+                    
+                    // Use stored delivery method and deliverTo (already determined during initiate)
+                    String deliveryMethodId = transaction.getDeliveryMethodId();
+                    if (deliveryMethodId == null || deliveryMethodId.trim().isEmpty()) {
+                        deliveryMethodId = "direct_topup"; // Default fallback
+                        logger.warn("No delivery method stored, using default: {}", deliveryMethodId);
+                    }
+                    executeRequest.setDeliveryMethodId(deliveryMethodId);
+                    
+                    // If delivery method is "sms", use stored deliverTo
+                    if ("sms".equals(deliveryMethodId)) {
+                        String deliverTo = transaction.getDeliverTo();
+                        if (deliverTo != null && !deliverTo.trim().isEmpty()) {
+                            executeRequest.setDeliverTo(deliverTo);
+                            logger.info("Using stored deliverTo for SMS delivery: {}", deliverTo);
                         } else {
-                            logger.info("EFASHE validate successful - TrxId: {} (no customer account name in response)", 
-                                validateResponse.getTrxId());
-                        }
-                        
-                        // Step 2: Execute EFASHE transaction
-                        EfasheExecuteRequest executeRequest = new EfasheExecuteRequest();
-                        executeRequest.setTrxId(validateResponse.getTrxId());
-                        executeRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
-                        executeRequest.setAmount(transaction.getAmount());
-                        executeRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
-                        
-                        // Get delivery method from validate response
-                        // For ELECTRICITY and RRA: prefer SMS if available, otherwise use first available
-                        // For other services: prefer "direct_topup" if available, otherwise use first available
-                        String deliveryMethodId = "direct_topup"; // Default
-                        if (validateResponse.getDeliveryMethods() != null && !validateResponse.getDeliveryMethods().isEmpty()) {
-                            if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY || 
-                                transaction.getServiceType() == EfasheServiceType.RRA) {
-                                // For ELECTRICITY and RRA, prefer SMS delivery method
-                                boolean hasSms = validateResponse.getDeliveryMethods().stream()
-                                    .anyMatch(dm -> "sms".equals(dm.getId()));
-                                
-                                if (hasSms) {
-                                    deliveryMethodId = "sms";
-                                    logger.info("{} service - Using SMS delivery method (preferred for this service type)", transaction.getServiceType());
-                                } else {
-                                    // Use the first available delivery method
-                                    deliveryMethodId = validateResponse.getDeliveryMethods().get(0).getId();
-                                    logger.info("{} service - SMS not available, using delivery method: {}", transaction.getServiceType(), deliveryMethodId);
-                                }
-                            } else {
-                                // For other services (AIRTIME, TV, MTN), prefer direct_topup
-                                boolean hasDirectTopup = validateResponse.getDeliveryMethods().stream()
-                                    .anyMatch(dm -> "direct_topup".equals(dm.getId()));
-                                
-                                if (hasDirectTopup) {
-                                    deliveryMethodId = "direct_topup";
-                                } else {
-                                    // Use the first available delivery method
-                                    deliveryMethodId = validateResponse.getDeliveryMethods().get(0).getId();
-                                }
-                            }
-                        }
-                        
-                        executeRequest.setDeliveryMethodId(deliveryMethodId);
-                        
-                        // Store delivery method and deliverTo in transaction
-                        transaction.setDeliveryMethodId(deliveryMethodId);
-                        
-                        // If delivery method is "sms", set deliverTo to customer phone number
-                        if ("sms".equals(deliveryMethodId)) {
+                            // Fallback: use customer phone
                             String customerPhone = normalizePhoneTo12Digits(transaction.getCustomerPhone());
                             executeRequest.setDeliverTo(customerPhone);
                             transaction.setDeliverTo(customerPhone);
-                            logger.info("Delivery method is SMS, setting deliverTo to customer phone: {}", customerPhone);
+                            logger.info("No stored deliverTo, using customer phone: {}", customerPhone);
                         }
-                        // deliverTo and callBack are optional for direct_topup
-                        
-                        logger.info("Calling EFASHE execute - TrxId: {}, Amount: {}, Account: {}", 
-                            executeRequest.getTrxId(), executeRequest.getAmount(), executeRequest.getCustomerAccountNumber());
-                        executeResponse = efasheApiService.executeTransaction(executeRequest);
+                    }
+                    // deliverTo and callBack are optional for direct_topup
+                    
+                    logger.info("Calling EFASHE execute - TrxId: {}, Amount: {}, Account: {}, DeliveryMethod: {}", 
+                        executeRequest.getTrxId(), executeRequest.getAmount(), executeRequest.getCustomerAccountNumber(), 
+                        executeRequest.getDeliveryMethodId());
+                    executeResponse = efasheApiService.executeTransaction(executeRequest);
                         
                         if (executeResponse != null) {
                             // EFASHE execute returns async response with pollEndpoint
@@ -552,11 +597,7 @@ public class EfashePaymentService {
                             transaction.setErrorMessage("EFASHE execute returned null response");
                             logger.error("EFASHE execute returned null response");
                         }
-                    } else {
-                        transaction.setEfasheStatus("FAILED");
-                        transaction.setErrorMessage("EFASHE validate did not return trxId. Response: " + (validateResponse != null ? validateResponse.toString() : "null"));
-                        logger.error("EFASHE validate did not return trxId. Response: {}", validateResponse);
-                    }
+                        // Execute response handling continues below (no validate error handling needed since validate is done in initiate)
                 } catch (Exception e) {
                     transaction.setEfasheStatus("FAILED");
                     transaction.setErrorMessage("Failed to execute EFASHE transaction: " + e.getMessage());
@@ -628,7 +669,7 @@ public class EfashePaymentService {
         // Build response with all information
         EfasheStatusResponse response = new EfasheStatusResponse();
         response.setMoPayResponse(moPayResponse);
-        response.setValidateResponse(validateResponse);
+        response.setValidateResponse(null); // Validate was done in initiate, not in status check
         response.setExecuteResponse(executeResponse);
         response.setTransactionId(transactionId);
         response.setMopayStatus(transaction.getMopayStatus());
