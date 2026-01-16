@@ -250,6 +250,18 @@ apply_migrations() {
             echo 'Checking loans table:'
             psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c \"\\d loans\" > /dev/null 2>&1 && echo '✅ loans table exists' || echo '⚠️  loans table may not exist'
             
+            echo ''
+            echo 'Checking efashe_settings table:'
+            psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c \"\\d efashe_settings\" > /dev/null 2>&1 && echo '✅ efashe_settings table exists' || echo '⚠️  efashe_settings table may not exist'
+            
+            echo ''
+            echo 'Checking efashe_transactions table:'
+            psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c \"\\d efashe_transactions\" > /dev/null 2>&1 && echo '✅ efashe_transactions table exists' || echo '⚠️  efashe_transactions table may not exist'
+            
+            echo ''
+            echo 'Checking payment_categories for EFASHE:'
+            psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c \"SELECT name FROM payment_categories WHERE name = 'EFASHE';\" 2>/dev/null | grep -q EFASHE && echo '✅ EFASHE category exists' || echo '⚠️  EFASHE category may not exist'
+            
             # Clean up migration file
             rm -f /tmp/all_migrations_consolidated.sql
             echo ''

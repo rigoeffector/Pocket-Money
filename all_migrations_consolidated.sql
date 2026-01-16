@@ -227,6 +227,88 @@ WHERE NOT EXISTS (
     SELECT 1 FROM payment_categories WHERE name = 'EFASHE'
 );
 
+-- ===================================================================
+-- 10. Create EFASHE Settings table
+-- ===================================================================
+CREATE TABLE IF NOT EXISTS efashe_settings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    service_type VARCHAR(20) NOT NULL UNIQUE,
+    full_amount_phone_number VARCHAR(20) NOT NULL,
+    cashback_phone_number VARCHAR(20) NOT NULL,
+    agent_commission_percentage NUMERIC(5,2) NOT NULL DEFAULT 0,
+    customer_cashback_percentage NUMERIC(5,2) NOT NULL DEFAULT 0,
+    besoft_share_percentage NUMERIC(5,2) NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create index on service_type for faster lookups
+CREATE INDEX IF NOT EXISTS idx_efashe_settings_service_type ON efashe_settings(service_type);
+
+-- Add comments
+COMMENT ON TABLE efashe_settings IS 'EFASHE API service settings with payment distribution percentages';
+COMMENT ON COLUMN efashe_settings.service_type IS 'Service type: AIRTIME, RRA, TV, MTN';
+COMMENT ON COLUMN efashe_settings.full_amount_phone_number IS 'Phone number to receive full transaction amount (minus cashback)';
+COMMENT ON COLUMN efashe_settings.cashback_phone_number IS 'Phone number to receive besoft share amount';
+COMMENT ON COLUMN efashe_settings.agent_commission_percentage IS 'Agent commission percentage (0-100)';
+COMMENT ON COLUMN efashe_settings.customer_cashback_percentage IS 'Customer cashback percentage (0-100)';
+COMMENT ON COLUMN efashe_settings.besoft_share_percentage IS 'Besoft share percentage (0-100)';
+
+-- ===================================================================
+-- 11. Create EFASHE Transactions table
+-- ===================================================================
+CREATE TABLE IF NOT EXISTS efashe_transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    transaction_id VARCHAR(255) NOT NULL UNIQUE,
+    service_type VARCHAR(20) NOT NULL,
+    customer_phone VARCHAR(20) NOT NULL,
+    customer_account_number VARCHAR(20) NOT NULL,
+    amount NUMERIC(10, 2) NOT NULL,
+    currency VARCHAR(10) NOT NULL DEFAULT 'RWF',
+    trx_id VARCHAR(255),
+    mopay_transaction_id VARCHAR(255),
+    mopay_status VARCHAR(50),
+    efashe_status VARCHAR(50),
+    delivery_method_id VARCHAR(50),
+    deliver_to VARCHAR(500),
+    poll_endpoint VARCHAR(500),
+    retry_after_secs INTEGER,
+    message VARCHAR(1000),
+    error_message VARCHAR(1000),
+    customer_cashback_amount NUMERIC(10, 2),
+    besoft_share_amount NUMERIC(10, 2),
+    full_amount_phone VARCHAR(20),
+    cashback_phone VARCHAR(20),
+    cashback_sent BOOLEAN DEFAULT false,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create indexes for faster lookups
+CREATE INDEX IF NOT EXISTS idx_efashe_transactions_transaction_id ON efashe_transactions(transaction_id);
+CREATE INDEX IF NOT EXISTS idx_efashe_transactions_service_type ON efashe_transactions(service_type);
+CREATE INDEX IF NOT EXISTS idx_efashe_transactions_customer_phone ON efashe_transactions(customer_phone);
+CREATE INDEX IF NOT EXISTS idx_efashe_transactions_efashe_status ON efashe_transactions(efashe_status);
+CREATE INDEX IF NOT EXISTS idx_efashe_transactions_mopay_status ON efashe_transactions(mopay_status);
+CREATE INDEX IF NOT EXISTS idx_efashe_transactions_created_at ON efashe_transactions(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_efashe_transactions_service_type_created_at ON efashe_transactions(service_type, created_at DESC);
+
+-- Add comments
+COMMENT ON TABLE efashe_transactions IS 'Stores EFASHE payment transactions history';
+COMMENT ON COLUMN efashe_transactions.transaction_id IS 'EFASHE transaction ID (unique)';
+COMMENT ON COLUMN efashe_transactions.service_type IS 'Service type: AIRTIME, RRA, TV, MTN';
+COMMENT ON COLUMN efashe_transactions.customer_phone IS 'Customer phone number (12 digits with 250 prefix)';
+COMMENT ON COLUMN efashe_transactions.customer_account_number IS 'Customer account number for EFASHE (format: 0XXXXXXXXX)';
+COMMENT ON COLUMN efashe_transactions.trx_id IS 'EFASHE trxId from validate response';
+COMMENT ON COLUMN efashe_transactions.mopay_transaction_id IS 'MoPay transaction ID';
+COMMENT ON COLUMN efashe_transactions.efashe_status IS 'EFASHE transaction status: PENDING, SUCCESS, FAILED';
+COMMENT ON COLUMN efashe_transactions.poll_endpoint IS 'EFASHE poll endpoint for async status checking';
+COMMENT ON COLUMN efashe_transactions.customer_cashback_amount IS 'Amount to send to customer as cashback';
+COMMENT ON COLUMN efashe_transactions.besoft_share_amount IS 'Amount to send to besoft phone';
+COMMENT ON COLUMN efashe_transactions.full_amount_phone IS 'Phone number that receives full amount (minus cashback and besoft share)';
+COMMENT ON COLUMN efashe_transactions.cashback_phone IS 'Phone number to receive besoft share';
+COMMENT ON COLUMN efashe_transactions.cashback_sent IS 'Flag to track if cashback transfers were sent (now included in initial request)';
+
 COMMIT;
 
 -- ===================================================================
@@ -238,5 +320,7 @@ COMMIT;
 --   \d balance_assignment_history
 --   \d merchant_user_balances
 --   \d loans
+--   \d efashe_settings
+--   \d efashe_transactions
 -- ===================================================================
 
