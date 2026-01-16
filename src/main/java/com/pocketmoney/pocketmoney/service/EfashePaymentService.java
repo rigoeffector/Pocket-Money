@@ -176,13 +176,28 @@ public class EfashePaymentService {
         transaction.setTransactionId(mopayTransactionId); // Use MoPay transaction ID as primary identifier
         transaction.setServiceType(request.getServiceType());
         transaction.setCustomerPhone(normalizedCustomerPhone);
-        // Convert customer phone to account number format for EFASHE
-        // Remove 250 prefix and add 0 prefix: 250784638201 -> 0784638201
-        String customerAccountNumber = normalizedCustomerPhone.startsWith("250") 
-            ? "0" + normalizedCustomerPhone.substring(3) 
-            : (normalizedCustomerPhone.startsWith("0") ? normalizedCustomerPhone : "0" + normalizedCustomerPhone);
+        
+        // For AIRTIME: use phone as account number (convert to account format)
+        // For other services (RRA, TV, ELECTRICITY): use customerAccountNumber from request
+        String customerAccountNumber;
+        if (request.getServiceType() == EfasheServiceType.AIRTIME || request.getServiceType() == EfasheServiceType.MTN) {
+            // Convert customer phone to account number format for EFASHE
+            // Remove 250 prefix and add 0 prefix: 250784638201 -> 0784638201
+            customerAccountNumber = normalizedCustomerPhone.startsWith("250") 
+                ? "0" + normalizedCustomerPhone.substring(3) 
+                : (normalizedCustomerPhone.startsWith("0") ? normalizedCustomerPhone : "0" + normalizedCustomerPhone);
+            logger.info("AIRTIME/MTN service - Using phone as account number: {} (from phone: {})", customerAccountNumber, normalizedCustomerPhone);
+        } else {
+            // For RRA, TV, ELECTRICITY: use customerAccountNumber from request
+            if (request.getCustomerAccountNumber() == null || request.getCustomerAccountNumber().trim().isEmpty()) {
+                throw new RuntimeException("customerAccountNumber is required for service type: " + request.getServiceType());
+            }
+            customerAccountNumber = request.getCustomerAccountNumber().trim();
+            logger.info("Non-AIRTIME service ({}) - Using customerAccountNumber from request: {} (phone for MoPay: {})", 
+                request.getServiceType(), customerAccountNumber, normalizedCustomerPhone);
+        }
+        
         transaction.setCustomerAccountNumber(customerAccountNumber);
-        logger.info("Customer account number for EFASHE: {} (from phone: {})", customerAccountNumber, normalizedCustomerPhone);
         transaction.setAmount(amount);
         transaction.setCurrency(request.getCurrency());
         transaction.setMopayTransactionId(mopayTransactionId); // Also store in mopayTransactionId field

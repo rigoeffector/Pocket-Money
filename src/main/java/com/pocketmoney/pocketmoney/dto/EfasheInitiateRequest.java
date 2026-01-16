@@ -20,7 +20,12 @@ public class EfasheInitiateRequest {
     
     @NotNull(message = "Phone number is required")
     @NotBlank(message = "Phone number cannot be blank")
-    private String phone; // DEBIT - customer phone
+    private String phone; // DEBIT - customer phone for MoPay payment
+    
+    // Customer account number for EFASHE service (meter number, decoder number, TIN, etc.)
+    // Required for non-AIRTIME services (RRA, TV, ELECTRICITY)
+    // For AIRTIME, this can be null and will be derived from phone
+    private String customerAccountNumber;
     
     private String payment_mode = "MOBILE";
     
@@ -29,6 +34,6 @@ public class EfasheInitiateRequest {
     private String callback_url;
     
     @NotNull(message = "Service type is required")
-    private EfasheServiceType serviceType; // AIRTIME, MTN, RRA, TV
+    private EfasheServiceType serviceType; // AIRTIME, MTN, RRA, TV, ELECTRICITY
 }
 
