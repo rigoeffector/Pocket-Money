@@ -1023,7 +1023,30 @@ public class EfashePaymentService {
     }
     
     /**
-     * Send electricity token to user via WhatsApp or SMS
+     * Format electricity token with dashes (e.g., 34941584149888503133 -> 3494-5841-4988-8503-133)
+     */
+    private String formatElectricityToken(String token) {
+        if (token == null || token.trim().isEmpty()) {
+            return token;
+        }
+        
+        // Remove any existing dashes or spaces
+        String cleanToken = token.replaceAll("[^0-9]", "");
+        
+        // Format with dashes every 4 digits
+        StringBuilder formatted = new StringBuilder();
+        for (int i = 0; i < cleanToken.length(); i++) {
+            if (i > 0 && i % 4 == 0) {
+                formatted.append("-");
+            }
+            formatted.append(cleanToken.charAt(i));
+        }
+        
+        return formatted.toString();
+    }
+
+    /**
+     * Send electricity token to user via SMS (Swiftcom or BeSoft)
      * Only called for ELECTRICITY service type after successful execution
      */
     private void sendElectricityToken(EfasheTransaction transaction, String token, ElectricityTokenResponse.TokenData tokenData) {
@@ -1032,7 +1055,7 @@ public class EfashePaymentService {
             logger.info("Transaction ID: {}", transaction.getTransactionId());
             logger.info("Customer Phone: {}", transaction.getCustomerPhone());
             logger.info("Meter Number: {}", transaction.getCustomerAccountNumber());
-            logger.info("Token: {}", token);
+            logger.info("Token (raw): {}", token);
             logger.info("Units: {}", tokenData.getUnits());
             
             if (transaction.getCustomerPhone() == null || transaction.getCustomerPhone().isEmpty()) {
@@ -1045,6 +1068,10 @@ public class EfashePaymentService {
             String normalizedPhone = normalizePhoneTo12Digits(transaction.getCustomerPhone());
             logger.info("Normalized customer phone for token notification: {} (original: {})", normalizedPhone, transaction.getCustomerPhone());
             
+            // Format token with dashes
+            String formattedToken = formatElectricityToken(token);
+            logger.info("Formatted token: {} (original: {})", formattedToken, token);
+            
             // Build token message
             String units = tokenData.getUnits() != null ? tokenData.getUnits().toPlainString() : "N/A";
             String amount = transaction.getAmount() != null ? transaction.getAmount().toPlainString() : "0";
@@ -1053,27 +1080,15 @@ public class EfashePaymentService {
             String tokenMessage = String.format(
                 "Your electricity token for meter %s:\n\nToken: %s\nUnits: %s kWh\nAmount: %s RWF\n\nThank you for using POCHI App!",
                 meterNo,
-                token,
+                formattedToken,
                 units,
                 amount
             );
             
-            // Try WhatsApp first, fallback to SMS
-            try {
-                logger.info("Attempting to send electricity token via WhatsApp to: {}", normalizedPhone);
-                whatsAppService.sendWhatsApp(tokenMessage, normalizedPhone);
-                logger.info("✅ Electricity token sent successfully via WhatsApp");
-            } catch (Exception whatsappError) {
-                logger.warn("Failed to send electricity token via WhatsApp, trying SMS: {}", whatsappError.getMessage());
-                // Fallback to SMS
-                try {
-                    messagingService.sendSms(tokenMessage, normalizedPhone);
-                    logger.info("✅ Electricity token sent successfully via SMS");
-                } catch (Exception smsError) {
-                    logger.error("Failed to send electricity token via SMS: {}", smsError.getMessage());
-                    throw smsError;
-                }
-            }
+            // Send via SMS (Swiftcom or BeSoft based on configuration)
+            logger.info("Sending electricity token via SMS to: {}", normalizedPhone);
+            messagingService.sendSms(tokenMessage, normalizedPhone);
+            logger.info("✅ Electricity token sent successfully via SMS");
             
             logger.info("=== END Electricity Token Notification ===");
         } catch (Exception e) {
