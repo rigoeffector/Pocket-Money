@@ -29,6 +29,6 @@ public class EfasheInitiateRequest {
     private String callback_url;
     
     @NotNull(message = "Service type is required")
-    private EfasheServiceType serviceType; // AIRTIME, MTN, RRA, TV
+    private EfasheServiceType serviceType; // AIRTIME, MTN, RRA, TV, ELECTRICITY
 }
 

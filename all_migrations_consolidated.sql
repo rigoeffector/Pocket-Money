@@ -242,12 +242,25 @@ CREATE TABLE IF NOT EXISTS efashe_settings (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Drop existing check constraint if it exists and recreate with ELECTRICITY
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'efashe_settings_service_type_check') THEN
+        ALTER TABLE efashe_settings DROP CONSTRAINT efashe_settings_service_type_check;
+    END IF;
+END $$;
+
+-- Add check constraint to allow all service types including ELECTRICITY
+ALTER TABLE efashe_settings 
+ADD CONSTRAINT efashe_settings_service_type_check 
+CHECK (service_type IN ('AIRTIME', 'RRA', 'TV', 'MTN', 'ELECTRICITY'));
+
 -- Create index on service_type for faster lookups
 CREATE INDEX IF NOT EXISTS idx_efashe_settings_service_type ON efashe_settings(service_type);
 
 -- Add comments
 COMMENT ON TABLE efashe_settings IS 'EFASHE API service settings with payment distribution percentages';
-COMMENT ON COLUMN efashe_settings.service_type IS 'Service type: AIRTIME, RRA, TV, MTN';
+COMMENT ON COLUMN efashe_settings.service_type IS 'Service type: AIRTIME, RRA, TV, MTN, ELECTRICITY';
 COMMENT ON COLUMN efashe_settings.full_amount_phone_number IS 'Phone number to receive full transaction amount (minus cashback)';
 COMMENT ON COLUMN efashe_settings.cashback_phone_number IS 'Phone number to receive besoft share amount';
 COMMENT ON COLUMN efashe_settings.agent_commission_percentage IS 'Agent commission percentage (0-100)';

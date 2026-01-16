@@ -751,6 +751,8 @@ public class EfashePaymentService {
                 return "rra";
             case TV:
                 return "tv";
+            case ELECTRICITY:
+                return "electricity";
             default:
                 return "airtime";
         }
@@ -882,10 +884,11 @@ public class EfashePaymentService {
     /**
      * Get EFASHE transactions with optional filtering by service type, phone number, and date range
      * - ADMIN users can see all transactions (can optionally filter by phone)
+     * - RECEIVER/MERCHANT users can see all transactions (can optionally filter by phone)
      * - USER users can only see their own transactions (automatically filtered by their phone number)
-     * @param serviceType Optional service type filter (AIRTIME, RRA, TV, MTN)
+     * @param serviceType Optional service type filter (AIRTIME, RRA, TV, MTN, ELECTRICITY)
      * @param phone Optional phone number filter (will be normalized to 12 digits with 250 prefix)
-     *              - For ADMIN: optional filter
+     *              - For ADMIN/RECEIVER: optional filter
      *              - For USER: ignored, automatically uses their own phone number
      * @param page Page number (0-indexed)
      * @param size Page size
@@ -905,6 +908,7 @@ public class EfashePaymentService {
         // Get current authentication to check user role
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         boolean isAdmin = false;
+        boolean isReceiver = false;
         String userPhone = null;
         
         if (authentication != null && authentication.isAuthenticated()) {
@@ -913,24 +917,31 @@ public class EfashePaymentService {
                 .map(GrantedAuthority::getAuthority)
                 .anyMatch(authority -> authority.equals("ROLE_ADMIN"));
             
+            // Check if user has RECEIVER role
+            isReceiver = authentication.getAuthorities().stream()
+                .map(GrantedAuthority::getAuthority)
+                .anyMatch(authority -> authority.equals("ROLE_RECEIVER"));
+            
             // For USER tokens, the subject is the phone number
-            if (!isAdmin) {
+            if (!isAdmin && !isReceiver) {
                 userPhone = authentication.getName();
-                logger.info("Non-admin user detected, will filter by user's phone number: {}", userPhone);
-            } else {
+                logger.info("USER detected, will filter by user's phone number: {}", userPhone);
+            } else if (isAdmin) {
                 logger.info("Admin user detected, can see all transactions");
+            } else if (isReceiver) {
+                logger.info("Receiver/Merchant user detected, can see all transactions");
             }
         }
         
         // Normalize phone number for filtering
         String normalizedPhone = null;
         
-        if (isAdmin) {
-            // ADMIN: Use provided phone filter if any
+        if (isAdmin || isReceiver) {
+            // ADMIN and RECEIVER: Use provided phone filter if any
             if (phone != null && !phone.trim().isEmpty()) {
                 try {
                     normalizedPhone = normalizePhoneTo12Digits(phone);
-                    logger.info("Admin filtering by phone: {} -> {}", phone, normalizedPhone);
+                    logger.info("{} filtering by phone: {} -> {}", isAdmin ? "Admin" : "Merchant", phone, normalizedPhone);
                 } catch (Exception e) {
                     logger.warn("Invalid phone number format for filtering: {}, error: {}", phone, e.getMessage());
                     throw new RuntimeException("Invalid phone number format: " + phone);
@@ -951,8 +962,8 @@ public class EfashePaymentService {
             }
         }
         
-        logger.info("Fetching EFASHE transactions - IsAdmin: {}, ServiceType: {}, Phone: {} (normalized: {}), Page: {}, Size: {}, FromDate: {}, ToDate: {}", 
-            isAdmin, serviceType, phone, normalizedPhone, page, size, fromDate, toDate);
+        logger.info("Fetching EFASHE transactions - IsAdmin: {}, IsReceiver: {}, ServiceType: {}, Phone: {} (normalized: {}), Page: {}, Size: {}, FromDate: {}, ToDate: {}", 
+            isAdmin, isReceiver, serviceType, phone, normalizedPhone, page, size, fromDate, toDate);
         
         // Build dynamic query to avoid PostgreSQL type inference issues with nullable parameters
         StringBuilder queryBuilder = new StringBuilder();

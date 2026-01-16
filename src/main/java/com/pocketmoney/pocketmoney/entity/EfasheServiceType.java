@@ -4,6 +4,7 @@ public enum EfasheServiceType {
     AIRTIME,
     RRA,
     TV,
-    MTN
+    MTN,
+    ELECTRICITY
 }
 
