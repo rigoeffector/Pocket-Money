@@ -7,6 +7,7 @@ import com.pocketmoney.pocketmoney.dto.EfasheStatusResponse;
 import com.pocketmoney.pocketmoney.dto.EfasheTransactionResponse;
 import com.pocketmoney.pocketmoney.dto.PaginatedResponse;
 import com.pocketmoney.pocketmoney.entity.EfasheServiceType;
+import com.pocketmoney.pocketmoney.service.EfasheApiService;
 import com.pocketmoney.pocketmoney.service.EfashePaymentService;
 import jakarta.validation.Valid;
 import org.slf4j.Logger;
@@ -25,9 +26,11 @@ public class EfasheController {
     private static final Logger logger = LoggerFactory.getLogger(EfasheController.class);
 
     private final EfashePaymentService efashePaymentService;
+    private final EfasheApiService efasheApiService;
 
-    public EfasheController(EfashePaymentService efashePaymentService) {
+    public EfasheController(EfashePaymentService efashePaymentService, EfasheApiService efasheApiService) {
         this.efashePaymentService = efashePaymentService;
+        this.efasheApiService = efasheApiService;
     }
 
     /**
@@ -128,6 +131,24 @@ public class EfasheController {
             return ResponseEntity.ok(ApiResponse.success("EFASHE transactions retrieved successfully", response));
         } catch (RuntimeException e) {
             logger.error("Error retrieving EFASHE transactions: ", e);
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+    
+    /**
+     * Get all available verticals from EFASHE API
+     * GET /api/efashe/verticals
+     * Uses EFASHE API authentication (Bearer token)
+     * Returns list of all available service verticals (airtime, tax, decoder, electricity, etc.)
+     */
+    @GetMapping("/verticals")
+    public ResponseEntity<ApiResponse<Object>> getVerticals() {
+        try {
+            Object verticals = efasheApiService.getVerticals();
+            return ResponseEntity.ok(ApiResponse.success("EFASHE verticals retrieved successfully", verticals));
+        } catch (RuntimeException e) {
+            logger.error("Error retrieving EFASHE verticals: ", e);
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.error(e.getMessage()));
         }

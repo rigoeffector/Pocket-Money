@@ -135,10 +135,11 @@ public class EfashePaymentService {
             throw new RuntimeException("Invalid percentage configuration: Total percentages exceed 100%. Full amount phone would receive negative amount: " + fullAmountPhoneReceives);
         }
 
-        // Build MoPay request
+        // Build MoPay request - NO TRANSFERS in initial request
+        // ALL transfers (full amount + customer cashback + besoft share) will be sent ONLY after EFASHE status is SUCCESS
         MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
-        moPayRequest.setTransaction_id(transactionId); // Main transaction ID - will be used for ALL transfers (full amount, customer, besoft)
-        logger.info("Setting main transaction ID for full amount transfer: {}", transactionId);
+        moPayRequest.setTransaction_id(transactionId); // Main transaction ID - will be used for ALL transfers later
+        logger.info("Setting main transaction ID: {} - NO transfers in initial request, all transfers will be sent after EFASHE SUCCESS", transactionId);
         moPayRequest.setAmount(amount);
         moPayRequest.setCurrency(request.getCurrency());
         
@@ -152,50 +153,9 @@ public class EfashePaymentService {
             "EFASHE " + request.getServiceType() + " payment");
         moPayRequest.setCallback_url(request.getCallback_url());
 
-        // Build transfers array - Include ALL transfers (Full Amount, Customer Cashback, Besoft Share) in the same request
-        // All transfers use the same transaction_id from the main request
-        List<MoPayInitiateRequest.Transfer> transfers = new ArrayList<>();
-
-        // Transfer 1: Full Amount Phone Number - receives amount minus customer cashback and besoft share
-        // Amount: 100 - 2.00 (customer cashback) - 3.50 (besoft share) = 94.50
-        // NOTE: Do NOT set transaction_id on transfers - only on main request
-        // All transfers (full amount, customer cashback, besoft share) use the same transaction_id from the main request
-        MoPayInitiateRequest.Transfer transfer1 = new MoPayInitiateRequest.Transfer();
-        transfer1.setAmount(fullAmountPhoneReceives);
-        String normalizedFullAmountPhone = normalizePhoneTo12Digits(settingsResponse.getFullAmountPhoneNumber());
-        transfer1.setPhone(Long.parseLong(normalizedFullAmountPhone)); // Phone as number (Long)
-        transfer1.setMessage("EFASHE " + request.getServiceType() + " - Full amount");
-        transfers.add(transfer1);
-        logger.info("Transfer 1 - Full Amount Phone: {}, Amount: {} (amount - customer cashback - besoft share), Transaction ID: {} (same as all transfers)", 
-            normalizedFullAmountPhone, fullAmountPhoneReceives, transactionId);
-        
-        // Transfer 2: Customer Cashback - send customer cashback back to customer
-        if (customerCashbackAmount.compareTo(BigDecimal.ZERO) > 0) {
-            MoPayInitiateRequest.Transfer transfer2 = new MoPayInitiateRequest.Transfer();
-            transfer2.setAmount(customerCashbackAmount);
-            transfer2.setPhone(Long.parseLong(normalizedCustomerPhone)); // Customer phone
-            transfer2.setMessage("EFASHE " + request.getServiceType() + " - Customer cashback");
-            transfers.add(transfer2);
-            logger.info("Transfer 2 - Customer Cashback: {}, Amount: {}, Transaction ID: {} (same as all transfers)", 
-                normalizedCustomerPhone, customerCashbackAmount, transactionId);
-        }
-        
-        // Transfer 3: Besoft Share - send besoft share to besoft phone
-        if (besoftShareAmount.compareTo(BigDecimal.ZERO) > 0) {
-            String normalizedCashbackPhone = normalizePhoneTo12Digits(settingsResponse.getCashbackPhoneNumber());
-            MoPayInitiateRequest.Transfer transfer3 = new MoPayInitiateRequest.Transfer();
-            transfer3.setAmount(besoftShareAmount);
-            transfer3.setPhone(Long.parseLong(normalizedCashbackPhone)); // Besoft phone
-            transfer3.setMessage("EFASHE " + request.getServiceType() + " - Besoft share");
-            transfers.add(transfer3);
-            logger.info("Transfer 3 - Besoft Share: {}, Amount: {}, Transaction ID: {} (same as all transfers)", 
-                normalizedCashbackPhone, besoftShareAmount, transactionId);
-        }
-        
-        logger.info("All transfers included in initial MoPay request - Total transfers: {}, Transaction ID: {} (same for all)", 
-            transfers.size(), transactionId);
-
-        moPayRequest.setTransfers(transfers);
+        // NO TRANSFERS in initial request - all transfers will be sent ONLY after EFASHE status is SUCCESS
+        // This includes: full amount transfer, customer cashback, and besoft share
+        logger.info("NO transfers in initial MoPay request - ALL transfers (full amount + customer cashback + besoft share) will be sent ONLY after EFASHE status is SUCCESS");
 
         // Initiate payment with MoPay
         MoPayResponse moPayResponse = moPayService.initiatePayment(moPayRequest);
@@ -239,19 +199,22 @@ public class EfashePaymentService {
         transaction.setMessage(moPayRequest.getMessage());
         
         // Store cashback amounts and phone numbers for reference
-        // NOTE: All transfers (full amount, customer cashback, besoft share) are already included in the initial MoPay request
-        // No separate cashback transfer requests needed - MoPay allows same transaction_id in transfers array
+        // NOTE: NO transfers in initial MoPay request
+        // ALL transfers (full amount + customer cashback + besoft share) will be sent ONLY after EFASHE status is SUCCESS
         transaction.setCustomerCashbackAmount(customerCashbackAmount);
         transaction.setBesoftShareAmount(besoftShareAmount);
         transaction.setFullAmountPhone(normalizePhoneTo12Digits(settingsResponse.getFullAmountPhoneNumber()));
         transaction.setCashbackPhone(normalizePhoneTo12Digits(settingsResponse.getCashbackPhoneNumber()));
-        transaction.setCashbackSent(true); // Mark as sent since transfers are included in initial request
+        transaction.setCashbackSent(false); // Not sent yet - will be sent only when EFASHE status is SUCCESS
+        // Store fullAmountPhoneReceives for later transfer
+        // We need to calculate this and store it, but we'll calculate it in sendCashbackTransfers
         
         // Save transaction
         efasheTransactionRepository.save(transaction);
         logger.info("Saved EFASHE transaction record - Transaction ID: {}", transactionId);
 
         // Build response - normalize all phone numbers to consistent format
+        String normalizedFullAmountPhone = normalizePhoneTo12Digits(settingsResponse.getFullAmountPhoneNumber());
         EfasheInitiateResponse response = new EfasheInitiateResponse();
         response.setTransactionId(transactionId);
         response.setServiceType(request.getServiceType());
@@ -330,7 +293,29 @@ public class EfashePaymentService {
                         executeRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
                         executeRequest.setAmount(transaction.getAmount());
                         executeRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
-                        executeRequest.setDeliveryMethodId("direct_topup"); // Default for airtime
+                        // Set deliveryMethodId based on service type: "sms" for ELECTRICITY and RRA, "direct_topup" for others
+                        String deliveryMethodId = (transaction.getServiceType() == EfasheServiceType.ELECTRICITY || 
+                            transaction.getServiceType() == EfasheServiceType.RRA) ? "sms" : "direct_topup";
+                        executeRequest.setDeliveryMethodId(deliveryMethodId);
+                        // Save deliveryMethodId to transaction for reference
+                        transaction.setDeliveryMethodId(deliveryMethodId);
+                        logger.info("Set deliveryMethodId: {} for service type: {}", deliveryMethodId, transaction.getServiceType());
+                        
+                        // Set deliverTo when deliveryMethodId is "sms" (required for ELECTRICITY and RRA)
+                        // deliverTo should be the customer's phone number for SMS delivery
+                        if ("sms".equals(deliveryMethodId)) {
+                            // Use customer phone number for SMS delivery
+                            // Normalize phone to 12 digits format (250XXXXXXXXX)
+                            String normalizedPhone = normalizePhoneTo12Digits(transaction.getCustomerPhone());
+                            // For SMS delivery, EFASHE might expect phone without 250 prefix or in a specific format
+                            // Try without 250 prefix first (0784638201 format)
+                            String deliverToPhone = normalizedPhone.startsWith("250") 
+                                ? "0" + normalizedPhone.substring(3) 
+                                : normalizedPhone;
+                            executeRequest.setDeliverTo(deliverToPhone);
+                            logger.info("Set deliverTo (SMS): {} for service type: {} (normalized from: {})", 
+                                deliverToPhone, transaction.getServiceType(), normalizedPhone);
+                        }
                         // deliverTo and callBack are optional for direct_topup
                         
                         logger.info("Calling EFASHE execute - TrxId: {}, Amount: {}, Account: {}", 
@@ -353,12 +338,18 @@ public class EfashePaymentService {
                                 logger.info("EFASHE execute returned HTTP {} - Setting status to SUCCESS immediately. Skipping polling. PollEndpoint: {}, RetryAfterSecs: {}", 
                                     executeResponse.getHttpStatusCode(), executeResponse.getPollEndpoint(), executeResponse.getRetryAfterSecs());
                                 
-                                // Save transaction - cashback transfers already included in initial MoPay request
+                                // Save transaction before sending cashback transfers
                                 efasheTransactionRepository.save(transaction);
                                 
-                                // Cashback transfers are already included in the initial MoPay request
-                                // No need to send separate cashback transfer requests
-                                logger.info("Cashback transfers already included in initial MoPay request - no separate requests needed");
+                                // Send cashback transfers ONLY when EFASHE status is SUCCESS
+                                logger.info("EFASHE status is SUCCESS - Sending cashback transfers (customer and besoft)");
+                                try {
+                                    sendCashbackTransfers(transaction, transactionId);
+                                    logger.info("Cashback transfers sent successfully after EFASHE SUCCESS");
+                                } catch (Exception cashbackException) {
+                                    logger.error("Failed to send cashback transfers after EFASHE SUCCESS: ", cashbackException);
+                                    // Don't fail the transaction if cashback transfers fail
+                                }
                                 
                                 // For ELECTRICITY service, get token and send it to user
                                 if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
@@ -431,11 +422,18 @@ public class EfashePaymentService {
                                             transaction.setMessage(pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction completed successfully");
                                             logger.info("EFASHE transaction SUCCESS confirmed from poll - Status: '{}'", trimmedStatus);
                                             
-                                            // Save transaction - cashback transfers already included in initial MoPay request
+                                            // Save transaction before sending cashback transfers
                                             efasheTransactionRepository.save(transaction);
                                             
-                                            // Cashback transfers already included in initial MoPay request - no separate requests needed
-                                            logger.info("Cashback transfers already included in initial MoPay request - no separate requests needed");
+                                            // Send cashback transfers ONLY when EFASHE status is SUCCESS
+                                            logger.info("EFASHE status is SUCCESS - Sending cashback transfers (customer and besoft)");
+                                            try {
+                                                sendCashbackTransfers(transaction, transactionId);
+                                                logger.info("Cashback transfers sent successfully after EFASHE SUCCESS");
+                                            } catch (Exception cashbackException) {
+                                                logger.error("Failed to send cashback transfers after EFASHE SUCCESS: ", cashbackException);
+                                                // Don't fail the transaction if cashback transfers fail
+                                            }
                                             
                                             // For ELECTRICITY service, get token and send it to user
                                             if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
@@ -491,15 +489,26 @@ public class EfashePaymentService {
                                 logger.info("EFASHE execute synchronous response - Status: {}, Message: {}", 
                                     executeResponse.getStatus(), executeResponse.getMessage());
                                 
-                                // Only send WhatsApp notification if status is SUCCESS
-                                // Cashback transfers already included in initial MoPay request
+                                // Only send cashback transfers and WhatsApp notification if status is SUCCESS
                                 if ("SUCCESS".equalsIgnoreCase(efasheStatus)) {
-                                    logger.info("EFASHE transaction SUCCESS confirmed - cashback transfers already included in initial MoPay request");
+                                    logger.info("EFASHE transaction SUCCESS confirmed - Sending cashback transfers");
+                                    
+                                    // Save transaction before sending cashback transfers
+                                    efasheTransactionRepository.save(transaction);
+                                    
+                                    // Send cashback transfers ONLY when EFASHE status is SUCCESS
+                                    try {
+                                        sendCashbackTransfers(transaction, transactionId);
+                                        logger.info("Cashback transfers sent successfully after EFASHE SUCCESS");
+                                    } catch (Exception cashbackException) {
+                                        logger.error("Failed to send cashback transfers after EFASHE SUCCESS: ", cashbackException);
+                                        // Don't fail the transaction if cashback transfers fail
+                                    }
                                     
                                     // Send WhatsApp notification
                                     sendWhatsAppNotification(transaction);
                                 } else {
-                                    logger.info("EFASHE transaction status is not SUCCESS: {}, cashback transfers will not be sent", efasheStatus);
+                                    logger.info("EFASHE transaction status is not SUCCESS: {}, cashback transfers will NOT be sent", efasheStatus);
                                 }
                             }
                         } else {
@@ -517,6 +526,9 @@ public class EfashePaymentService {
                     transaction.setErrorMessage("Failed to execute EFASHE transaction: " + e.getMessage());
                     logger.error("Error executing EFASHE transaction after MoPay SUCCESS: ", e);
                     e.printStackTrace();
+                    // Save transaction with FAILED status
+                    efasheTransactionRepository.save(transaction);
+                    logger.info("Transaction saved with FAILED status due to validation/execution error");
                 }
             } else {
                 logger.info("MoPay transaction not yet SUCCESS or already processed - Status: {}, EFASHE Status: {}", 
@@ -544,11 +556,18 @@ public class EfashePaymentService {
                                 transaction.setMessage(pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction completed successfully");
                                 logger.info("EFASHE transaction SUCCESS confirmed from poll - Status: {}", pollStatus);
                                 
-                                // Save transaction - cashback transfers already included in initial MoPay request
+                                // Save transaction before sending cashback transfers
                                 efasheTransactionRepository.save(transaction);
                                 
-                                // Cashback transfers already included in initial MoPay request - no separate requests needed
-                                logger.info("Cashback transfers already included in initial MoPay request - no separate requests needed");
+                                // Send cashback transfers ONLY when EFASHE status is SUCCESS
+                                logger.info("EFASHE status is SUCCESS - Sending cashback transfers (customer and besoft)");
+                                try {
+                                    sendCashbackTransfers(transaction, transactionId);
+                                    logger.info("Cashback transfers sent successfully after EFASHE SUCCESS");
+                                } catch (Exception cashbackException) {
+                                    logger.error("Failed to send cashback transfers after EFASHE SUCCESS: ", cashbackException);
+                                    // Don't fail the transaction if cashback transfers fail
+                                }
                                 
                                 // For ELECTRICITY service, get token and send it to user
                                 if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
@@ -618,6 +637,11 @@ public class EfashePaymentService {
         response.setPollEndpoint(transaction.getPollEndpoint());
         response.setRetryAfterSecs(transaction.getRetryAfterSecs());
         
+        // Set success field: true if EFASHE status is SUCCESS, false otherwise
+        boolean isSuccess = "SUCCESS".equalsIgnoreCase(transaction.getEfasheStatus());
+        response.setSuccess(isSuccess);
+        logger.info("Response success field set to: {} (EFASHE status: {})", isSuccess, transaction.getEfasheStatus());
+        
         // Build transfers list - include full amount transfer and cashback transfers
         List<EfasheStatusResponse.TransferInfo> transfers = new ArrayList<>();
         
@@ -638,10 +662,11 @@ public class EfashePaymentService {
             transfers.add(fullAmountTransfer);
         }
         
-        // Transfer 2: Customer Cashback (planned or sent)
-        // Show even if not sent yet (cashbackSent check removed)
-        if (transaction.getCustomerCashbackAmount() != null 
-            && transaction.getCustomerCashbackAmount().compareTo(BigDecimal.ZERO) > 0) {
+        // Transfer 2: Customer Cashback - ONLY show if EFASHE status is SUCCESS and cashback was sent
+        // If status is FAILED, do NOT show cashback transfers (they were never sent)
+        if (isSuccess && transaction.getCustomerCashbackAmount() != null 
+            && transaction.getCustomerCashbackAmount().compareTo(BigDecimal.ZERO) > 0
+            && transaction.getCashbackSent() != null && transaction.getCashbackSent()) {
             EfasheStatusResponse.TransferInfo customerCashbackTransfer = new EfasheStatusResponse.TransferInfo();
             customerCashbackTransfer.setType("CUSTOMER_CASHBACK");
             customerCashbackTransfer.setFromPhone(transaction.getFullAmountPhone());
@@ -655,10 +680,11 @@ public class EfashePaymentService {
                 transaction.getCustomerPhone(), transaction.getCashbackSent());
         }
         
-        // Transfer 3: Besoft Share (planned or sent)
-        // Show even if not sent yet (cashbackSent check removed)
-        if (transaction.getBesoftShareAmount() != null 
-            && transaction.getBesoftShareAmount().compareTo(BigDecimal.ZERO) > 0) {
+        // Transfer 3: Besoft Share - ONLY show if EFASHE status is SUCCESS and cashback was sent
+        // If status is FAILED, do NOT show cashback transfers (they were never sent)
+        if (isSuccess && transaction.getBesoftShareAmount() != null 
+            && transaction.getBesoftShareAmount().compareTo(BigDecimal.ZERO) > 0
+            && transaction.getCashbackSent() != null && transaction.getCashbackSent()) {
             EfasheStatusResponse.TransferInfo besoftShareTransfer = new EfasheStatusResponse.TransferInfo();
             besoftShareTransfer.setType("BESOFT_SHARE");
             besoftShareTransfer.setFromPhone(transaction.getFullAmountPhone());
@@ -682,12 +708,20 @@ public class EfashePaymentService {
     /**
      * Send cashback transfers to customer and besoft phone after EFASHE execute completes
      * This creates separate MoPay payment requests for each cashback transfer
-     * All transfers use the same transaction ID as the main transaction
+     * Uses the MoPay transaction ID from the initial payment initiation
+     */
+    /**
+     * Send ALL transfers (full amount + customer cashback + besoft share) in a SINGLE MoPay request
+     * All transfers use the same transaction ID (the main MoPay transaction ID)
+     * This is called ONLY after EFASHE status is SUCCESS
+     * This allows MoPay to accept multiple transfers with the same transaction ID in one request
      */
     private void sendCashbackTransfers(EfasheTransaction transaction, String mainTransactionId) {
-        logger.info("=== sendCashbackTransfers START ===");
+        logger.info("=== sendAllTransfers START (Full Amount + Customer Cashback + Besoft Share) ===");
         logger.info("Transaction ID: {}", transaction.getTransactionId());
+        logger.info("MoPay Transaction ID: {}", transaction.getMopayTransactionId());
         logger.info("Cashback Sent Flag: {}", transaction.getCashbackSent());
+        logger.info("Total Amount: {}", transaction.getAmount());
         logger.info("Customer Cashback Amount: {}", transaction.getCustomerCashbackAmount());
         logger.info("Besoft Share Amount: {}", transaction.getBesoftShareAmount());
         logger.info("Full Amount Phone: {}", transaction.getFullAmountPhone());
@@ -695,189 +729,157 @@ public class EfashePaymentService {
         logger.info("Cashback Phone: {}", transaction.getCashbackPhone());
         
         if (transaction.getCashbackSent() != null && transaction.getCashbackSent()) {
-            logger.info("Cashback transfers already sent for transaction: {}, skipping", transaction.getTransactionId());
-            logger.info("=== sendCashbackTransfers END (already sent) ===");
+            logger.info("All transfers already sent for transaction: {}, skipping", transaction.getTransactionId());
+            logger.info("=== sendAllTransfers END (already sent) ===");
             return;
         }
         
-        if (transaction.getCustomerCashbackAmount() == null || transaction.getBesoftShareAmount() == null) {
-            logger.warn("Cashback amounts not set for transaction: {} - Customer: {}, Besoft: {}", 
-                transaction.getTransactionId(), 
-                transaction.getCustomerCashbackAmount(), 
-                transaction.getBesoftShareAmount());
-            return;
-        }
+        // Use the SAME transaction ID from initial MoPay payment for the transfers request
+        // This is the transaction ID that was used in the initial payment
+        // All transfers in the array will use this same transaction ID (set on main request, not on individual transfers)
+        String transactionIdToUse = transaction.getMopayTransactionId() != null && !transaction.getMopayTransactionId().isEmpty()
+            ? transaction.getMopayTransactionId()
+            : mainTransactionId;
         
-        logger.info("Starting cashback transfers for transaction: {} - Customer: {} RWF, Besoft: {} RWF", 
-            transaction.getTransactionId(), 
-            transaction.getCustomerCashbackAmount(), 
-            transaction.getBesoftShareAmount());
+        logger.info("Using transaction ID for ALL transfers (main request and array): {} (MoPay: {}, EFASHE: {})", 
+            transactionIdToUse, transaction.getMopayTransactionId(), mainTransactionId);
         
         try {
             String normalizedFullAmountPhone = normalizePhoneTo12Digits(transaction.getFullAmountPhone());
             String normalizedCustomerPhone = normalizePhoneTo12Digits(transaction.getCustomerPhone());
             String normalizedBesoftPhone = normalizePhoneTo12Digits(transaction.getCashbackPhone());
             
-            boolean customerCashbackSent = false;
-            boolean besoftShareSent = false;
+            // Calculate full amount phone receives: amount - customerCashback - besoftShare
+            BigDecimal customerCashbackAmount = transaction.getCustomerCashbackAmount() != null ? transaction.getCustomerCashbackAmount() : BigDecimal.ZERO;
+            BigDecimal besoftShareAmount = transaction.getBesoftShareAmount() != null ? transaction.getBesoftShareAmount() : BigDecimal.ZERO;
+            BigDecimal fullAmountPhoneReceives = transaction.getAmount()
+                .subtract(customerCashbackAmount)
+                .subtract(besoftShareAmount)
+                .setScale(0, RoundingMode.HALF_UP);
             
-            // Send customer cashback transfer
-            if (transaction.getCustomerCashbackAmount().compareTo(BigDecimal.ZERO) > 0) {
-                logger.info("=== Sending Customer Cashback Transfer ===");
-                logger.info("From: {}, To: {}, Amount: {}", normalizedFullAmountPhone, normalizedCustomerPhone, transaction.getCustomerCashbackAmount());
-                try {
-                    sendCashbackTransfer(
-                        normalizedFullAmountPhone,
-                        normalizedCustomerPhone,
-                        transaction.getCustomerCashbackAmount(),
-                        "EFASHE " + transaction.getServiceType() + " - Customer cashback",
-                        "CustomerCashback",
-                        mainTransactionId // Use same transaction ID as main transaction
-                    );
-                    customerCashbackSent = true;
-                    logger.info("✅ Customer cashback transfer sent successfully - Amount: {}, From: {}, To: {}", 
-                        transaction.getCustomerCashbackAmount(), normalizedFullAmountPhone, normalizedCustomerPhone);
-                } catch (Exception e) {
-                    logger.error("❌ Failed to send customer cashback transfer - Amount: {}, From: {}, To: {}: ", 
-                        transaction.getCustomerCashbackAmount(), normalizedFullAmountPhone, normalizedCustomerPhone, e);
-                    e.printStackTrace();
-                }
-            } else {
-                logger.info("Customer cashback amount is 0 or null, skipping customer cashback transfer");
+            logger.info("Calculated full amount phone receives: {} (Total: {} - Customer Cashback: {} - Besoft Share: {})", 
+                fullAmountPhoneReceives, transaction.getAmount(), customerCashbackAmount, besoftShareAmount);
+            
+            // Build transfers array - NO transaction_id on individual transfers
+            // The transaction_id is set on the main request, and all transfers inherit it
+            List<MoPayInitiateRequest.Transfer> transfers = new ArrayList<>();
+            BigDecimal totalTransferAmount = BigDecimal.ZERO;
+            
+            // Transfer 1: Full Amount Phone - receives amount minus customer cashback and besoft share
+            if (fullAmountPhoneReceives.compareTo(BigDecimal.ZERO) > 0) {
+                MoPayInitiateRequest.Transfer fullAmountTransfer = new MoPayInitiateRequest.Transfer();
+                // NO transaction_id on individual transfers - they inherit from main request
+                fullAmountTransfer.setAmount(fullAmountPhoneReceives);
+                fullAmountTransfer.setPhone(Long.parseLong(normalizedFullAmountPhone));
+                fullAmountTransfer.setMessage("EFASHE " + transaction.getServiceType() + " - Full amount");
+                transfers.add(fullAmountTransfer);
+                totalTransferAmount = totalTransferAmount.add(fullAmountPhoneReceives);
+                logger.info("Added full amount transfer to array - Amount: {}, To: {}", 
+                    fullAmountPhoneReceives, normalizedFullAmountPhone);
             }
             
-            // Send besoft share transfer
-            if (transaction.getBesoftShareAmount().compareTo(BigDecimal.ZERO) > 0) {
-                logger.info("=== Sending Besoft Share Transfer ===");
-                logger.info("From: {}, To: {}, Amount: {}", normalizedFullAmountPhone, normalizedBesoftPhone, transaction.getBesoftShareAmount());
-                try {
-                    sendCashbackTransfer(
-                        normalizedFullAmountPhone,
-                        normalizedBesoftPhone,
-                        transaction.getBesoftShareAmount(),
-                        "EFASHE " + transaction.getServiceType() + " - Besoft share",
-                        "BesoftShare",
-                        mainTransactionId // Use same transaction ID as main transaction
-                    );
-                    besoftShareSent = true;
-                    logger.info("✅ Besoft share transfer sent successfully - Amount: {}, From: {}, To: {}", 
-                        transaction.getBesoftShareAmount(), normalizedFullAmountPhone, normalizedBesoftPhone);
-                } catch (Exception e) {
-                    logger.error("❌ Failed to send besoft share transfer - Amount: {}, From: {}, To: {}: ", 
-                        transaction.getBesoftShareAmount(), normalizedFullAmountPhone, normalizedBesoftPhone, e);
-                    e.printStackTrace();
-                }
-            } else {
-                logger.info("Besoft share amount is 0 or null, skipping besoft share transfer");
+            // Transfer 2: Customer Cashback
+            if (customerCashbackAmount.compareTo(BigDecimal.ZERO) > 0) {
+                MoPayInitiateRequest.Transfer customerTransfer = new MoPayInitiateRequest.Transfer();
+                // NO transaction_id on individual transfers - they inherit from main request
+                customerTransfer.setAmount(customerCashbackAmount);
+                customerTransfer.setPhone(Long.parseLong(normalizedCustomerPhone));
+                customerTransfer.setMessage("EFASHE " + transaction.getServiceType() + " - Customer cashback");
+                transfers.add(customerTransfer);
+                totalTransferAmount = totalTransferAmount.add(customerCashbackAmount);
+                logger.info("Added customer cashback transfer to array - Amount: {}, To: {}", 
+                    customerCashbackAmount, normalizedCustomerPhone);
             }
             
-            // Mark cashback as sent only if at least one transfer was attempted
-            // Even if one fails, we mark as sent to avoid infinite retries
+            // Transfer 3: Besoft Share
+            if (besoftShareAmount.compareTo(BigDecimal.ZERO) > 0) {
+                MoPayInitiateRequest.Transfer besoftTransfer = new MoPayInitiateRequest.Transfer();
+                // NO transaction_id on individual transfers - they inherit from main request
+                besoftTransfer.setAmount(besoftShareAmount);
+                besoftTransfer.setPhone(Long.parseLong(normalizedBesoftPhone));
+                besoftTransfer.setMessage("EFASHE " + transaction.getServiceType() + " - Besoft share");
+                transfers.add(besoftTransfer);
+                totalTransferAmount = totalTransferAmount.add(besoftShareAmount);
+                logger.info("Added Besoft share transfer to array - Amount: {}, To: {}", 
+                    besoftShareAmount, normalizedBesoftPhone);
+            }
+            
+            if (transfers.isEmpty()) {
+                logger.info("No transfers to send (all amounts are 0 or null)");
+                transaction.setCashbackSent(true);
+                efasheTransactionRepository.save(transaction);
+                return;
+            }
+            
+            // Build SINGLE MoPay request with ALL transfers in the transfers array
+            // Main request uses the SAME transaction ID from initial payment
+            // All transfers in array inherit this transaction ID
+            MoPayInitiateRequest allTransfersRequest = new MoPayInitiateRequest();
+            allTransfersRequest.setTransaction_id(transactionIdToUse); // SAME transaction ID from initial payment
+            allTransfersRequest.setAmount(totalTransferAmount); // Total amount of all transfers
+            allTransfersRequest.setCurrency("RWF");
+            allTransfersRequest.setPhone(normalizedCustomerPhone); // From phone (customer who paid)
+            allTransfersRequest.setPayment_mode("MOBILE");
+            allTransfersRequest.setMessage("EFASHE " + transaction.getServiceType() + " - All transfers");
+            allTransfersRequest.setTransfers(transfers); // All transfers in one array, all using same transaction ID
+            
+            logger.info("=== Sending ALL transfers (Full Amount + Customer Cashback + Besoft Share) in SINGLE MoPay request ===");
+            logger.info("Transaction ID (same for main request and all transfers): {}", transactionIdToUse);
+            logger.info("Total Transfer Amount: {}", totalTransferAmount);
+            logger.info("From Phone (customer): {}", normalizedCustomerPhone);
+            logger.info("Number of transfers: {}", transfers.size());
+            for (int i = 0; i < transfers.size(); i++) {
+                MoPayInitiateRequest.Transfer t = transfers.get(i);
+                logger.info("  Transfer {}: Amount={}, To={} (Transaction ID inherited from main request: {})", 
+                    i + 1, t.getAmount(), t.getPhone(), transactionIdToUse);
+            }
+            
+            // Make SINGLE MoPay API call with all transfers
+            MoPayResponse transfersResponse = moPayService.initiatePayment(allTransfersRequest);
+            logger.info("MoPayService.initiatePayment returned - Success: {}, Status: {}, Transaction ID: {}", 
+                transfersResponse != null ? transfersResponse.getSuccess() : null,
+                transfersResponse != null ? transfersResponse.getStatus() : null,
+                transfersResponse != null ? transfersResponse.getTransactionId() : null);
+            
+            boolean transfersSuccessful = transfersResponse != null && transfersResponse.getSuccess() != null && transfersResponse.getSuccess();
+            
+            // Mark as sent
             transaction.setCashbackSent(true);
             
-            // Update EFASHE status to SUCCESS after cashback transfers are completed
-            // This ensures the overall transaction status reflects completion
-            transaction.setEfasheStatus("SUCCESS");
-            
-            if (customerCashbackSent && besoftShareSent) {
-                transaction.setMessage("EFASHE transaction completed successfully. Cashback transfers sent to customer and besoft.");
-                logger.info("Both cashback transfers successful, EFASHE status updated to SUCCESS for transaction: {}", 
-                    transaction.getTransactionId());
-            } else if (customerCashbackSent || besoftShareSent) {
-                transaction.setMessage("EFASHE transaction completed. Some cashback transfers may have failed.");
-                logger.warn("Partial cashback transfer success for transaction: {} - Customer: {}, Besoft: {}. Status updated to SUCCESS.", 
-                    transaction.getTransactionId(), customerCashbackSent, besoftShareSent);
+            if (transfersSuccessful) {
+                transaction.setMessage(transaction.getMessage() != null ? transaction.getMessage() + " All transfers sent (full amount + customer cashback + besoft share)." : 
+                    "EFASHE transaction completed successfully. All transfers sent (full amount + customer cashback + besoft share).");
+                logger.info("✅ All transfers sent successfully in single request - Transaction ID: {}", transactionIdToUse);
             } else {
-                transaction.setMessage("EFASHE transaction completed, but cashback transfers failed.");
-                logger.error("All cashback transfers failed for transaction: {}, but status updated to SUCCESS", transaction.getTransactionId());
+                transaction.setMessage(transaction.getMessage() != null ? transaction.getMessage() + " Transfers failed." : 
+                    "EFASHE transaction completed, but transfers failed.");
+                logger.error("❌ Transfers failed - Transaction ID: {}, Response: {}", transactionIdToUse, transfersResponse);
             }
             
             efasheTransactionRepository.save(transaction);
-            logger.info("Cashback transfers completed for transaction: {} - Customer: {}, Besoft: {}, EFASHE Status: SUCCESS", 
-                transaction.getTransactionId(), customerCashbackSent, besoftShareSent);
-            logger.info("=== sendCashbackTransfers END ===");
+            logger.info("All transfers completed for transaction: {} - Success: {}, EFASHE Status: {}", 
+                transaction.getTransactionId(), transfersSuccessful, transaction.getEfasheStatus());
+            logger.info("=== sendAllTransfers END ===");
         } catch (Exception e) {
-            logger.error("=== ERROR in sendCashbackTransfers ===");
+            logger.error("=== ERROR in sendAllTransfers ===");
             logger.error("Transaction ID: {}", transaction.getTransactionId());
-            logger.error("Error sending cashback transfers for transaction {}: ", transaction.getTransactionId(), e);
+            logger.error("Error sending all transfers for transaction {}: ", transaction.getTransactionId(), e);
             e.printStackTrace();
             logger.error("=== END ERROR ===");
-            // Don't fail the whole transaction if cashback transfer fails
-        }
-    }
-    
-    /**
-     * Send a single cashback transfer via MoPay
-     * Creates a new MoPay payment from Full Amount Phone to recipient
-     * Uses the same transaction ID as the main transaction
-     */
-    private void sendCashbackTransfer(String fromPhone, String toPhone, BigDecimal amount, String message, String transferType, String mainTransactionId) {
-        logger.info("=== sendCashbackTransfer START ===");
-        logger.info("Type: {}, Amount: {}, From: {}, To: {}, Message: {}", transferType, amount, fromPhone, toPhone, message);
-        logger.info("Using main transaction ID: {} as base for cashback transfer", mainTransactionId);
-        try {
-            // MoPay doesn't allow reusing the same transaction_id in separate requests
-            // Generate a unique transaction ID for this cashback transfer, but related to the main one
-            // Format: {mainTransactionId}-{transferType} to keep them related
-            String cashbackTransactionId = mainTransactionId + "-" + transferType;
-            logger.info("✅ Using unique transaction ID for cashback transfer: {} (related to main: {})", 
-                cashbackTransactionId, mainTransactionId);
-            
-            // Build MoPay request for cashback transfer
-            MoPayInitiateRequest cashbackRequest = new MoPayInitiateRequest();
-            cashbackRequest.setTransaction_id(cashbackTransactionId); // Same transaction_id as full amount transfer
-            cashbackRequest.setAmount(amount);
-            cashbackRequest.setCurrency("RWF");
-            cashbackRequest.setPhone(fromPhone); // Phone as string
-            cashbackRequest.setPayment_mode("MOBILE");
-            cashbackRequest.setMessage(message);
-            
-            // Create transfer to recipient
-            List<MoPayInitiateRequest.Transfer> transfers = new ArrayList<>();
-            MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
-            transfer.setAmount(amount);
-            // Convert phone string to Long (MoPay API requires number in transfers)
-            Long toPhoneLong = Long.parseLong(toPhone);
-            transfer.setPhone(toPhoneLong); // Phone as number (Long)
-            transfer.setMessage(message);
-            // Note: Each MoPay request needs a unique transaction_id (MoPay doesn't allow reusing same ID in separate requests)
-            // This cashback transfer uses a unique transaction_id related to the main transaction
-            transfers.add(transfer);
-            logger.info("Created cashback transfer - Type: {}, Amount: {}, To Phone (Long): {}, Transaction ID: {} (unique for this request, related to main: {})", 
-                transferType, amount, toPhoneLong, cashbackTransactionId, mainTransactionId);
-            cashbackRequest.setTransfers(transfers);
-            
-            logger.info("MoPay cashback request - Transaction ID: {}, Amount: {}, From: {}, To: {}", 
-                cashbackTransactionId, amount, fromPhone, toPhone);
-            
-            // Initiate the cashback transfer
-            logger.info("Calling MoPayService.initiatePayment for cashback transfer...");
-            MoPayResponse cashbackResponse = moPayService.initiatePayment(cashbackRequest);
-            logger.info("MoPayService.initiatePayment returned - Success: {}, Status: {}, Transaction ID: {}", 
-                cashbackResponse != null ? cashbackResponse.getSuccess() : null,
-                cashbackResponse != null ? cashbackResponse.getStatus() : null,
-                cashbackResponse != null ? cashbackResponse.getTransactionId() : null);
-            
-            if (cashbackResponse != null && cashbackResponse.getSuccess() != null && cashbackResponse.getSuccess()) {
-                logger.info("✅ Cashback transfer initiated successfully - Type: {}, Amount: {}, From: {}, To: {}, Transaction ID: {}", 
-                    transferType, amount, fromPhone, toPhone, cashbackResponse.getTransactionId());
-            } else {
-                logger.error("❌ Cashback transfer failed - Type: {}, Amount: {}, From: {}, To: {}, Response: {}", 
-                    transferType, amount, fromPhone, toPhone, cashbackResponse);
-            }
-            logger.info("=== sendCashbackTransfer END ===");
-        } catch (Exception e) {
-            logger.error("=== ERROR in sendCashbackTransfer ===");
-            logger.error("Type: {}, Amount: {}, From: {}, To: {}", transferType, amount, fromPhone, toPhone);
-            logger.error("Error initiating cashback transfer: ", e);
-            e.printStackTrace();
-            logger.error("=== END ERROR ===");
-            throw e;
+            // Mark as sent to avoid infinite retries
+            transaction.setCashbackSent(true);
+            efasheTransactionRepository.save(transaction);
         }
     }
     
     /**
      * Convert EfasheServiceType to EFASHE verticalId
+     * Based on actual EFASHE API verticals:
+     * - airtime: Airtime
+     * - ers: Voice and Data Bundles (for MTN)
+     * - paytv: Pay Television (for TV)
+     * - tax: RRA Taxes (for RRA)
+     * - electricity: Electricity
      */
     private String getVerticalId(EfasheServiceType serviceType) {
         if (serviceType == null) {
@@ -887,11 +889,11 @@ public class EfashePaymentService {
             case AIRTIME:
                 return "airtime";
             case MTN:
-                return "airtime"; // MTN is also airtime
+                return "ers"; // MTN uses "ers" (Voice and Data Bundles)
             case RRA:
-                return "rra";
+                return "tax"; // RRA uses "tax" as verticalId
             case TV:
-                return "tv";
+                return "paytv"; // TV uses "paytv" (Pay Television)
             case ELECTRICITY:
                 return "electricity";
             default:
@@ -946,11 +948,11 @@ public class EfashePaymentService {
     }
     
     /**
-     * Send WhatsApp notification to the customer when EFASHE transaction is SUCCESS
+     * Send WhatsApp and SMS notifications to the customer when EFASHE transaction is SUCCESS
      */
     private void sendWhatsAppNotification(EfasheTransaction transaction) {
         try {
-            logger.info("=== START WhatsApp Notification for EFASHE Transaction ===");
+            logger.info("=== START Payment Notification (WhatsApp + SMS) for EFASHE Transaction ===");
             logger.info("Transaction ID: {}", transaction.getTransactionId());
             logger.info("Customer Phone: {}", transaction.getCustomerPhone());
             logger.info("Amount: {}", transaction.getAmount());
@@ -959,14 +961,14 @@ public class EfashePaymentService {
             logger.info("Customer Cashback Amount: {}", transaction.getCustomerCashbackAmount());
             
             if (transaction.getCustomerPhone() == null || transaction.getCustomerPhone().isEmpty()) {
-                logger.warn("Customer phone number is null or empty, skipping WhatsApp notification for transaction: {}", 
+                logger.warn("Customer phone number is null or empty, skipping notifications for transaction: {}", 
                     transaction.getTransactionId());
                 return;
             }
             
             // Find user by phone number (try multiple formats)
             String normalizedPhone = normalizePhoneTo12Digits(transaction.getCustomerPhone());
-            logger.info("Normalized customer phone for WhatsApp: {} (original: {})", normalizedPhone, transaction.getCustomerPhone());
+            logger.info("Normalized customer phone: {} (original: {})", normalizedPhone, transaction.getCustomerPhone());
             
             Optional<User> userOpt = userRepository.findByPhoneNumber(normalizedPhone);
             
@@ -983,42 +985,65 @@ public class EfashePaymentService {
                 logger.debug("Trying phone format with 0 prefix: {}", phoneWithout250);
             }
             
-            // Build WhatsApp message
+            // Build notification messages
             String serviceName = transaction.getServiceType() != null ? transaction.getServiceType().toString() : "payment";
             String amount = transaction.getAmount() != null ? transaction.getAmount().toPlainString() : "0";
             String cashbackAmount = transaction.getCustomerCashbackAmount() != null 
                 ? transaction.getCustomerCashbackAmount().toPlainString() : "0";
             
-            String message = String.format(
+            // WhatsApp message
+            String whatsAppMessage = String.format(
                 "You Paid %s, %s and your cash back is %s, Thanks for using POCHI App",
                 serviceName,
                 amount,
                 cashbackAmount
             );
             
+            // SMS message (shortened format for SMS)
+            String smsMessage = String.format(
+                "Paid %s %s RWF. Cashback: %s RWF. Thanks!",
+                serviceName,
+                amount,
+                cashbackAmount
+            );
+            
             // Use the same phone format as PaymentService (12 digits with 250)
-            // WhatsApp service should handle the format conversion if needed
-            String whatsappPhone = normalizedPhone;
-            logger.info("=== CALLING WhatsApp Service ===");
-            logger.info("WhatsApp Phone: {}", whatsappPhone);
-            logger.info("WhatsApp Message: {}", message);
+            String notificationPhone = normalizedPhone;
+            logger.info("=== Sending Notifications (SMS + WhatsApp) ===");
+            logger.info("Phone: {}", notificationPhone);
+            logger.info("WhatsApp Message: {}", whatsAppMessage);
+            logger.info("SMS Message: {}", smsMessage);
+            
+            // Send SMS notification
+            try {
+                messagingService.sendSms(smsMessage, notificationPhone);
+                logger.info("✅ SMS notification sent successfully to customer {} for EFASHE transaction: {}", 
+                    notificationPhone, transaction.getTransactionId());
+            } catch (Exception smsException) {
+                logger.error("Failed to send SMS notification for transaction {}: ", transaction.getTransactionId(), smsException);
+                // Continue with WhatsApp even if SMS fails
+            }
             
             // Send WhatsApp notification
-            whatsAppService.sendWhatsApp(message, whatsappPhone);
+            try {
+                whatsAppService.sendWhatsApp(whatsAppMessage, notificationPhone);
+                logger.info("✅ WhatsApp notification sent successfully to customer {} for EFASHE transaction: {}", 
+                    notificationPhone, transaction.getTransactionId());
+            } catch (Exception whatsAppException) {
+                logger.error("Failed to send WhatsApp notification for transaction {}: ", transaction.getTransactionId(), whatsAppException);
+                // Continue even if WhatsApp fails
+            }
             
-            logger.info("=== WhatsApp Service Call Completed ===");
-            logger.info("WhatsApp notification sent successfully to customer {} for EFASHE transaction: {}", 
-                whatsappPhone, transaction.getTransactionId());
-            logger.info("=== END WhatsApp Notification ===");
+            logger.info("=== END Payment Notification (SMS + WhatsApp) ===");
         } catch (Exception e) {
-            logger.error("=== ERROR in WhatsApp Notification ===");
+            logger.error("=== ERROR in Payment Notification ===");
             logger.error("Transaction ID: {}", transaction.getTransactionId());
             logger.error("Customer Phone: {}", transaction.getCustomerPhone());
-            logger.error("Error sending WhatsApp notification for EFASHE transaction {}: ", 
+            logger.error("Error sending notifications for EFASHE transaction {}: ", 
                 transaction.getTransactionId(), e);
             e.printStackTrace();
-            logger.error("=== END WhatsApp Error ===");
-            // Don't fail the transaction if WhatsApp fails
+            logger.error("=== END Payment Notification Error ===");
+            // Don't fail the transaction if notifications fail
         }
     }
     
@@ -1073,22 +1098,42 @@ public class EfashePaymentService {
             logger.info("Formatted token: {} (original: {})", formattedToken, token);
             
             // Build token message
-            String units = tokenData.getUnits() != null ? tokenData.getUnits().toPlainString() : "N/A";
+            // Format units to one decimal place
+            String units = "N/A";
+            if (tokenData.getUnits() != null) {
+                BigDecimal unitsValue = tokenData.getUnits().setScale(1, RoundingMode.HALF_UP);
+                units = unitsValue.toPlainString();
+            }
             String amount = transaction.getAmount() != null ? transaction.getAmount().toPlainString() : "0";
             String meterNo = transaction.getCustomerAccountNumber() != null ? transaction.getCustomerAccountNumber() : "N/A";
             
             String tokenMessage = String.format(
-                "Your electricity token for meter %s:\n\nToken: %s\nUnits: %s kWh\nAmount: %s RWF\n\nThank you for using POCHI App!",
+                "Electricity token for meter %s:\nToken: %s\nUnits: %s kWh\nAmount: %s RWF\nThanks!",
                 meterNo,
                 formattedToken,
                 units,
                 amount
             );
             
-            // Send via SMS (Swiftcom or BeSoft based on configuration)
+            // Send via SMS
             logger.info("Sending electricity token via SMS to: {}", normalizedPhone);
-            messagingService.sendSms(tokenMessage, normalizedPhone);
-            logger.info("✅ Electricity token sent successfully via SMS");
+            try {
+                messagingService.sendSms(tokenMessage, normalizedPhone);
+                logger.info("✅ Electricity token sent successfully via SMS");
+            } catch (Exception smsException) {
+                logger.error("Failed to send electricity token via SMS: ", smsException);
+                // Continue with WhatsApp even if SMS fails
+            }
+            
+            // Send via WhatsApp
+            logger.info("Sending electricity token via WhatsApp to: {}", normalizedPhone);
+            try {
+                whatsAppService.sendWhatsApp(tokenMessage, normalizedPhone);
+                logger.info("✅ Electricity token sent successfully via WhatsApp");
+            } catch (Exception whatsAppException) {
+                logger.error("Failed to send electricity token via WhatsApp: ", whatsAppException);
+                // Continue even if WhatsApp fails
+            }
             
             logger.info("=== END Electricity Token Notification ===");
         } catch (Exception e) {

@@ -119,8 +119,10 @@ public class EfasheApiService {
     private HttpHeaders buildHeadersWithToken() {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
+        // First authenticate with EFASHE API to get access token
         String token = getAccessToken();
-        headers.set("Authorization", "Bearer " + token);
+        logger.debug("Using EFASHE access token for API call");
+        headers.set("Authorization", "Bearer " + token); // EFASHE API requires "Bearer " prefix
         return headers;
     }
     
@@ -591,6 +593,94 @@ public class EfasheApiService {
         } catch (Exception e) {
             logger.error("Error getting electricity tokens: ", e);
             throw new RuntimeException("Failed to get electricity tokens: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Get all available verticals from EFASHE API
+     * GET /verticals
+     * Uses token authentication
+     */
+    public Object getVerticals() {
+        String url = efasheApiUrl + "/verticals";
+        
+        logger.info("Getting EFASHE verticals list - will authenticate first");
+        
+        // This will call getAccessToken() which authenticates with /auth endpoint first
+        HttpHeaders headers = buildHeadersWithToken();
+        logger.info("EFASHE authentication completed, now calling /verticals endpoint");
+        
+        HttpEntity<Void> entity = new HttpEntity<>(headers);
+
+        try {
+            ResponseEntity<String> rawResponse = restTemplate.exchange(
+                    url,
+                    HttpMethod.GET,
+                    entity,
+                    String.class
+            );
+            
+            String responseBodyString = rawResponse.getBody();
+            int httpStatusCode = rawResponse.getStatusCode().value();
+            
+            logger.info("EFASHE verticals response - Status: {}, Body: {}", httpStatusCode, responseBodyString);
+            
+            if (httpStatusCode == 200) {
+                ObjectMapper objectMapper = new ObjectMapper();
+                try {
+                    JsonNode jsonNode = objectMapper.readTree(responseBodyString);
+                    // Return the parsed JSON (could be wrapped in "data" or direct)
+                    if (jsonNode.has("data")) {
+                        return objectMapper.treeToValue(jsonNode.get("data"), Object.class);
+                    } else {
+                        return objectMapper.treeToValue(jsonNode, Object.class);
+                    }
+                } catch (Exception e) {
+                    logger.error("Error parsing verticals response: ", e);
+                    // Return raw response if parsing fails
+                    return responseBodyString;
+                }
+            } else {
+                throw new RuntimeException("Failed to get verticals (Status: " + httpStatusCode + "): " + responseBodyString);
+            }
+        } catch (HttpClientErrorException e) {
+            int statusCode = e.getStatusCode().value();
+            String responseBody = e.getResponseBodyAsString();
+            logger.error("HTTP error getting verticals - Status: {}, Response: {}", statusCode, responseBody);
+            
+            // If 401, token might be expired - try to refresh
+            if (statusCode == 401) {
+                logger.warn("Authentication failed, clearing token cache and retrying...");
+                cachedAccessToken = null;
+                tokenExpiresAt = null;
+                
+                // Retry once with new token
+                try {
+                    headers = buildHeadersWithToken();
+                    entity = new HttpEntity<>(headers);
+                    ResponseEntity<String> retryResponse = restTemplate.exchange(
+                            url,
+                            HttpMethod.GET,
+                            entity,
+                            String.class
+                    );
+                    ObjectMapper objectMapper = new ObjectMapper();
+                    JsonNode jsonNode = objectMapper.readTree(retryResponse.getBody());
+                    if (jsonNode.has("data")) {
+                        return objectMapper.treeToValue(jsonNode.get("data"), Object.class);
+                    } else {
+                        return objectMapper.treeToValue(jsonNode, Object.class);
+                    }
+                } catch (Exception retryException) {
+                    logger.error("Verticals retry failed: ", retryException);
+                    throw new RuntimeException("Failed to get verticals after retry: " + retryException.getMessage());
+                }
+            }
+            
+            throw new RuntimeException("Failed to get verticals (Status: " + statusCode + "): " + responseBody);
+        } catch (Exception e) {
+            logger.error("Error getting verticals: ", e);
+            throw new RuntimeException("Failed to get verticals: " + e.getMessage());
         }
     }
 }

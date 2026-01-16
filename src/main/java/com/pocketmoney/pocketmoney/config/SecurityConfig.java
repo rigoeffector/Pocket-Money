@@ -98,6 +98,7 @@ public class SecurityConfig {
                         .requestMatchers("/api/efashe/initiate").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .requestMatchers("/api/efashe/status/**").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .requestMatchers("/api/efashe/transactions").hasAnyRole("USER", "RECEIVER", "ADMIN")
+                        .requestMatchers("/api/efashe/verticals").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .requestMatchers("/api/efashe/settings", "/api/efashe/settings/**").hasRole("ADMIN")
                         .anyRequest().authenticated()
                 )

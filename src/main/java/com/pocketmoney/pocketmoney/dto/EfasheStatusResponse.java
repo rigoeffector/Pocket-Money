@@ -16,6 +16,7 @@ public class EfasheStatusResponse {
     private String pollEndpoint; // EFASHE poll endpoint for async status checking
     private Integer retryAfterSecs; // Retry interval for polling
     private List<TransferInfo> transfers; // List of transfers made for this transaction
+    private Boolean success; // true if EFASHE status is SUCCESS, false otherwise
     
     @Data
     public static class TransferInfo {
