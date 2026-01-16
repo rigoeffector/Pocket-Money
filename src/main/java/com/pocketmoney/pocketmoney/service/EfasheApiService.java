@@ -498,4 +498,75 @@ public class EfasheApiService {
             throw new RuntimeException("Failed to poll EFASHE transaction status: " + e.getMessage());
         }
     }
+    
+    /**
+     * Get list of verticals from EFASHE API
+     * GET /verticals or /vend/verticals
+     * Uses token authentication
+     */
+    public Object getVerticals() {
+        // Try common EFASHE API endpoints for verticals
+        String[] possibleEndpoints = {
+            efasheApiUrl + "/verticals",
+            efasheApiUrl + "/vend/verticals",
+            efasheApiUrl + "/verticals/list"
+        };
+        
+        HttpHeaders headers = buildHeadersWithToken();
+        
+        for (String url : possibleEndpoints) {
+            try {
+                logger.info("Attempting to fetch verticals from: {}", url);
+                HttpEntity<String> entity = new HttpEntity<>(headers);
+                
+                ResponseEntity<String> response = restTemplate.exchange(
+                    url,
+                    HttpMethod.GET,
+                    entity,
+                    String.class
+                );
+                
+                String responseBody = response.getBody();
+                int httpStatusCode = response.getStatusCode().value();
+                
+                logger.info("EFASHE verticals response - Status: {}, URL: {}", httpStatusCode, url);
+                
+                if (httpStatusCode == 200 && responseBody != null) {
+                    // Parse and return the response
+                    ObjectMapper objectMapper = new ObjectMapper();
+                    try {
+                        // Try to parse as JSON
+                        JsonNode jsonNode = objectMapper.readTree(responseBody);
+                        
+                        // Handle wrapped response in "data" field
+                        if (jsonNode.has("data")) {
+                            return objectMapper.convertValue(jsonNode.get("data"), Object.class);
+                        }
+                        
+                        return objectMapper.convertValue(jsonNode, Object.class);
+                    } catch (Exception e) {
+                        logger.warn("Failed to parse verticals response as JSON, returning raw string");
+                        return responseBody;
+                    }
+                }
+            } catch (HttpClientErrorException e) {
+                if (e.getStatusCode().value() == 404) {
+                    // Endpoint doesn't exist, try next one
+                    logger.debug("Endpoint {} returned 404, trying next...", url);
+                    continue;
+                }
+                
+                // For other HTTP errors, log and continue to next endpoint
+                logger.warn("Error fetching verticals from {}: Status: {}, Message: {}", 
+                    url, e.getStatusCode().value(), e.getMessage());
+                continue;
+            } catch (Exception e) {
+                logger.warn("Exception fetching verticals from {}: {}", url, e.getMessage());
+                continue;
+            }
+        }
+        
+        // If all endpoints failed, throw error
+        throw new RuntimeException("Failed to fetch verticals from EFASHE API. Tried multiple endpoints but none returned valid data.");
+    }
 }

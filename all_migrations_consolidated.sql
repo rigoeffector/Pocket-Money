@@ -6,6 +6,10 @@
 -- Database: pocketmoney_db
 -- Run as: postgres user or database owner
 -- ===================================================================
+-- IMPORTANT: This script is IDEMPOTENT - safe to run multiple times
+-- All CREATE/ALTER statements use IF NOT EXISTS to prevent errors
+-- This script is automatically run on every deployment via deploy.sh
+-- ===================================================================
 
 BEGIN;
 
@@ -280,6 +284,11 @@ CREATE TABLE IF NOT EXISTS efashe_transactions (
     full_amount_phone VARCHAR(20),
     cashback_phone VARCHAR(20),
     cashback_sent BOOLEAN DEFAULT false,
+    full_amount_transaction_id VARCHAR(255),
+    customer_cashback_transaction_id VARCHAR(255),
+    besoft_share_transaction_id VARCHAR(255),
+    initial_mopay_status VARCHAR(50),
+    initial_efashe_status VARCHAR(50),
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -308,6 +317,21 @@ COMMENT ON COLUMN efashe_transactions.besoft_share_amount IS 'Amount to send to 
 COMMENT ON COLUMN efashe_transactions.full_amount_phone IS 'Phone number that receives full amount (minus cashback and besoft share)';
 COMMENT ON COLUMN efashe_transactions.cashback_phone IS 'Phone number to receive besoft share';
 COMMENT ON COLUMN efashe_transactions.cashback_sent IS 'Flag to track if cashback transfers were sent (now included in initial request)';
+COMMENT ON COLUMN efashe_transactions.full_amount_transaction_id IS 'Unique transaction ID for full amount transfer to full amount phone';
+COMMENT ON COLUMN efashe_transactions.customer_cashback_transaction_id IS 'Unique transaction ID for customer cashback transfer';
+COMMENT ON COLUMN efashe_transactions.besoft_share_transaction_id IS 'Unique transaction ID for besoft share transfer';
+COMMENT ON COLUMN efashe_transactions.initial_mopay_status IS 'Initial MoPay status when transaction was first created';
+COMMENT ON COLUMN efashe_transactions.initial_efashe_status IS 'Initial EFASHE status when transaction was first created';
+
+-- Add indexes for transfer transaction IDs (if not already created)
+CREATE INDEX IF NOT EXISTS idx_efashe_transactions_full_amount_tx_id ON efashe_transactions(full_amount_transaction_id);
+CREATE INDEX IF NOT EXISTS idx_efashe_transactions_customer_cashback_tx_id ON efashe_transactions(customer_cashback_transaction_id);
+CREATE INDEX IF NOT EXISTS idx_efashe_transactions_besoft_share_tx_id ON efashe_transactions(besoft_share_transaction_id);
+
+-- Ensure initial status columns exist (for existing databases)
+ALTER TABLE efashe_transactions 
+ADD COLUMN IF NOT EXISTS initial_mopay_status VARCHAR(50),
+ADD COLUMN IF NOT EXISTS initial_efashe_status VARCHAR(50);
 
 COMMIT;
 

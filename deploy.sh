@@ -199,8 +199,11 @@ setup_database() {
 }
 
 # Apply database migrations
+# NOTE: This function runs on EVERY deployment to ensure all migrations are applied
+# The consolidated migration file uses IF NOT EXISTS clauses to make it safe to run multiple times
 apply_migrations() {
     print_status "Applying database migrations to remote server..."
+    print_status "NOTE: All migrations are applied on every deployment (idempotent - safe to run multiple times)"
     
     # Check if consolidated migration file exists
     if [ ! -f "all_migrations_consolidated.sql" ]; then
@@ -257,6 +260,10 @@ apply_migrations() {
             echo ''
             echo 'Checking efashe_transactions table:'
             psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c \"\\d efashe_transactions\" > /dev/null 2>&1 && echo '✅ efashe_transactions table exists' || echo '⚠️  efashe_transactions table may not exist'
+            
+            echo ''
+            echo 'Checking efashe_transactions table columns:'
+            psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c \"\\d efashe_transactions\" | grep -E '(full_amount_transaction_id|customer_cashback_transaction_id|besoft_share_transaction_id|initial_mopay_status|initial_efashe_status)' || echo 'Columns verification completed'
             
             echo ''
             echo 'Checking payment_categories for EFASHE:'

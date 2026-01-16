@@ -66,17 +66,35 @@ public class EfasheController {
     }
 
     /**
+     * Get list of verticals from EFASHE API
+     * GET /api/efashe/verticals
+     * Uses same authentication as validate endpoint
+     */
+    @GetMapping("/verticals")
+    public ResponseEntity<ApiResponse<Object>> getVerticals() {
+        try {
+            Object verticals = efashePaymentService.getVerticals();
+            return ResponseEntity.ok(ApiResponse.success("EFASHE verticals retrieved successfully", verticals));
+        } catch (RuntimeException e) {
+            logger.error("Error retrieving EFASHE verticals: ", e);
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    /**
      * Get EFASHE transactions with optional filtering by service type, phone number, and date range
      * GET /api/efashe/transactions
      * 
      * Access Control:
      *   - ADMIN: Can see all transactions (optional phone filter available)
+     *   - RECEIVER: Can see all transactions (optional phone filter available)
      *   - USER: Can only see their own transactions (automatically filtered by their phone number)
      * 
      * Query parameters:
      *   - serviceType: Optional filter by service type (AIRTIME, RRA, TV, MTN)
      *   - phone: Optional filter by customer phone number (accepts any format, will be normalized)
-     *            - For ADMIN: optional filter
+     *            - For ADMIN/RECEIVER: optional filter
      *            - For USER: ignored, automatically uses their own phone number
      *   - page: Page number (default: 0)
      *   - size: Page size (default: 20)
@@ -86,6 +104,8 @@ public class EfasheController {
      * Examples:
      *   ADMIN: /api/efashe/transactions?serviceType=RRA&phone=250784638201
      *   ADMIN: /api/efashe/transactions (returns all transactions)
+     *   RECEIVER: /api/efashe/transactions?serviceType=AIRTIME&phone=250784638201
+     *   RECEIVER: /api/efashe/transactions (returns all transactions)
      *   USER: /api/efashe/transactions?serviceType=RRA (returns only user's transactions)
      *   USER: /api/efashe/transactions?phone=250784638201 (phone parameter ignored, returns only user's transactions)
      */

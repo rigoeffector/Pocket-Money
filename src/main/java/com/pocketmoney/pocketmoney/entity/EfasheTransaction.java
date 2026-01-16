@@ -49,10 +49,16 @@ public class EfasheTransaction {
     private String mopayTransactionId; // MoPay transaction ID
 
     @Column(name = "mopay_status")
-    private String mopayStatus; // PENDING, SUCCESS, FAILED
+    private String mopayStatus; // Current MoPay status: PENDING, SUCCESS, FAILED
 
     @Column(name = "efashe_status")
-    private String efasheStatus; // PENDING, SUCCESS, FAILED
+    private String efasheStatus; // Current EFASHE status: PENDING, SUCCESS, FAILED
+
+    @Column(name = "initial_mopay_status")
+    private String initialMopayStatus; // Initial MoPay status when transaction was created
+
+    @Column(name = "initial_efashe_status")
+    private String initialEfasheStatus; // Initial EFASHE status when transaction was created
 
     @Column(name = "delivery_method_id")
     private String deliveryMethodId; // print, email, sms, direct_topup
@@ -86,6 +92,15 @@ public class EfasheTransaction {
 
     @Column(name = "cashback_sent")
     private Boolean cashbackSent = false; // Flag to track if cashback transfers were sent
+
+    @Column(name = "full_amount_transaction_id")
+    private String fullAmountTransactionId; // Unique transaction ID for full amount transfer
+
+    @Column(name = "customer_cashback_transaction_id")
+    private String customerCashbackTransactionId; // Unique transaction ID for customer cashback transfer
+
+    @Column(name = "besoft_share_transaction_id")
+    private String besoftShareTransactionId; // Unique transaction ID for besoft share transfer
 
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
