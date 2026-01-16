@@ -13,5 +13,11 @@ public class EfashePollStatusResponse {
     
     @JsonProperty("message")
     private String message;
+    
+    @JsonProperty("token")
+    private String token; // Token information for electricity purchases
+    
+    @JsonProperty("extraInfo")
+    private Object extraInfo; // Additional info that might contain token
 }
 

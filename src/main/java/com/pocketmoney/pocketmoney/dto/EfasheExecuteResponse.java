@@ -30,6 +30,12 @@ public class EfasheExecuteResponse {
     @JsonProperty("amount")
     private Double amount;
     
+    @JsonProperty("token")
+    private String token; // Token information for electricity purchases (delivered via SMS)
+    
+    @JsonProperty("extraInfo")
+    private Object extraInfo; // Additional info that might contain token
+    
     // HTTP status code from the execute API call (200 = success)
     private Integer httpStatusCode;
 }

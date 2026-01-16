@@ -285,12 +285,42 @@ public class EfasheApiService {
                     // Extract from "data" wrapper
                     JsonNode dataNode = jsonNode.get("data");
                     executeResponse = objectMapper.treeToValue(dataNode, EfasheExecuteResponse.class);
-                    logger.info("EFASHE execute response extracted from 'data' wrapper - PollEndpoint: {}, RetryAfterSecs: {}", 
+                    
+                    // Try to extract token from data node if it's not in the response object
+                    if (executeResponse != null && (executeResponse.getToken() == null || executeResponse.getToken().isEmpty())) {
+                        if (dataNode.has("token")) {
+                            executeResponse.setToken(dataNode.get("token").asText());
+                            logger.info("Extracted token from data node: {}", executeResponse.getToken());
+                        } else if (dataNode.has("extraInfo")) {
+                            // Token might be in extraInfo
+                            JsonNode extraInfo = dataNode.get("extraInfo");
+                            if (extraInfo.has("token")) {
+                                executeResponse.setToken(extraInfo.get("token").asText());
+                                logger.info("Extracted token from extraInfo: {}", executeResponse.getToken());
+                            }
+                        }
+                        // Also check if token is in message
+                        if ((executeResponse.getToken() == null || executeResponse.getToken().isEmpty()) 
+                            && executeResponse.getMessage() != null && executeResponse.getMessage().toLowerCase().contains("token")) {
+                            logger.info("Token information may be in message field: {}", executeResponse.getMessage());
+                        }
+                    }
+                    
+                    logger.info("EFASHE execute response extracted from 'data' wrapper - PollEndpoint: {}, RetryAfterSecs: {}, Token: {}", 
                         executeResponse != null ? executeResponse.getPollEndpoint() : "N/A",
-                        executeResponse != null ? executeResponse.getRetryAfterSecs() : "N/A");
+                        executeResponse != null ? executeResponse.getRetryAfterSecs() : "N/A",
+                        executeResponse != null && executeResponse.getToken() != null ? executeResponse.getToken() : "N/A");
                 } else {
                     // Try direct parsing
                     executeResponse = objectMapper.treeToValue(jsonNode, EfasheExecuteResponse.class);
+                    
+                    // Try to extract token if not in response object
+                    if (executeResponse != null && (executeResponse.getToken() == null || executeResponse.getToken().isEmpty())) {
+                        if (jsonNode.has("token")) {
+                            executeResponse.setToken(jsonNode.get("token").asText());
+                            logger.info("Extracted token from root node: {}", executeResponse.getToken());
+                        }
+                    }
                 }
             } catch (Exception e) {
                 logger.error("Error parsing EFASHE execute response: ", e);
@@ -423,11 +453,33 @@ public class EfasheApiService {
                     // If data has another "data" nested, get that
                     if (dataNode.has("data")) {
                         pollResponse = objectMapper.treeToValue(dataNode.get("data"), EfashePollStatusResponse.class);
+                        // Extract token if available in nested data
+                        if (pollResponse != null && (pollResponse.getToken() == null || pollResponse.getToken().isEmpty())) {
+                            JsonNode nestedDataNode = dataNode.get("data");
+                            if (nestedDataNode.has("token")) {
+                                pollResponse.setToken(nestedDataNode.get("token").asText());
+                                logger.info("Extracted token from nested data node: {}", pollResponse.getToken());
+                            }
+                        }
                     } else {
                         pollResponse = objectMapper.treeToValue(dataNode, EfashePollStatusResponse.class);
+                        // Extract token if available
+                        if (pollResponse != null && (pollResponse.getToken() == null || pollResponse.getToken().isEmpty())) {
+                            if (dataNode.has("token")) {
+                                pollResponse.setToken(dataNode.get("token").asText());
+                                logger.info("Extracted token from data node: {}", pollResponse.getToken());
+                            }
+                        }
                     }
                 } else {
                     pollResponse = objectMapper.treeToValue(jsonNode, EfashePollStatusResponse.class);
+                    // Extract token if available
+                    if (pollResponse != null && (pollResponse.getToken() == null || pollResponse.getToken().isEmpty())) {
+                        if (jsonNode.has("token")) {
+                            pollResponse.setToken(jsonNode.get("token").asText());
+                            logger.info("Extracted token from root node: {}", pollResponse.getToken());
+                        }
+                    }
                 }
             } catch (Exception e) {
                 logger.error("Error parsing EFASHE poll status response: ", e);

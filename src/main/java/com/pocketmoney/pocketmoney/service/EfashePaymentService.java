@@ -214,6 +214,14 @@ public class EfashePaymentService {
         
         transaction.setMessage(moPayRequest.getMessage());
         
+        // For ELECTRICITY service, delivery method is SMS, so set deliverTo to customer phone
+        // This will be used when we validate and execute the EFASHE transaction
+        if (request.getServiceType() == EfasheServiceType.ELECTRICITY) {
+            transaction.setDeliveryMethodId("sms");
+            transaction.setDeliverTo(normalizedCustomerPhone); // Customer phone for SMS delivery
+            logger.info("ELECTRICITY service - Setting delivery method to SMS, deliverTo to customer phone: {}", normalizedCustomerPhone);
+        }
+        
         // Store cashback amounts and phone numbers for reference
         transaction.setCustomerCashbackAmount(customerCashbackAmount);
         transaction.setBesoftShareAmount(besoftShareAmount);
@@ -338,10 +346,14 @@ public class EfashePaymentService {
                         
                         executeRequest.setDeliveryMethodId(deliveryMethodId);
                         
+                        // Store delivery method and deliverTo in transaction
+                        transaction.setDeliveryMethodId(deliveryMethodId);
+                        
                         // If delivery method is "sms", set deliverTo to customer phone number
                         if ("sms".equals(deliveryMethodId)) {
                             String customerPhone = normalizePhoneTo12Digits(transaction.getCustomerPhone());
                             executeRequest.setDeliverTo(customerPhone);
+                            transaction.setDeliverTo(customerPhone);
                             logger.info("Delivery method is SMS, setting deliverTo to customer phone: {}", customerPhone);
                         }
                         // deliverTo and callBack are optional for direct_topup
@@ -355,14 +367,38 @@ public class EfashePaymentService {
                             transaction.setPollEndpoint(executeResponse.getPollEndpoint());
                             transaction.setRetryAfterSecs(executeResponse.getRetryAfterSecs());
                             
+                            // For ELECTRICITY service, extract and store token information if available
+                            if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
+                                String token = executeResponse.getToken();
+                                if (token != null && !token.isEmpty()) {
+                                    // Store token in message field (since we don't have a separate token field)
+                                    // Token will be included in WhatsApp message
+                                    String existingMessage = executeResponse.getMessage() != null ? executeResponse.getMessage() : "";
+                                    String messageWithToken = existingMessage + (existingMessage.isEmpty() ? "" : " | ") + "Token: " + token;
+                                    transaction.setMessage(messageWithToken);
+                                    logger.info("ELECTRICITY service - Token received: {}", token);
+                                } else {
+                                    // Check if token is in message
+                                    if (executeResponse.getMessage() != null && executeResponse.getMessage().contains("token")) {
+                                        logger.info("ELECTRICITY service - Token information may be in message: {}", executeResponse.getMessage());
+                                    }
+                                    transaction.setMessage(executeResponse.getMessage());
+                                }
+                            }
+                            
                             // If /vend/execute returns HTTP 200 or 202, set status to SUCCESS immediately
                             // HTTP 200/202 means the execute request was successful, regardless of pollEndpoint
                             // Skip polling - treat as SUCCESS immediately
                             if (executeResponse.getHttpStatusCode() != null && 
                                 (executeResponse.getHttpStatusCode() == 200 || executeResponse.getHttpStatusCode() == 202)) {
-                                transaction.setEfasheStatus("SUCCESS");
-                                transaction.setMessage(executeResponse.getMessage() != null ? executeResponse.getMessage() : 
-                                    "EFASHE transaction executed successfully (HTTP " + executeResponse.getHttpStatusCode() + ")");
+                                // Only override message if not already set for ELECTRICITY
+                                if (transaction.getServiceType() != EfasheServiceType.ELECTRICITY || transaction.getMessage() == null) {
+                                    transaction.setEfasheStatus("SUCCESS");
+                                    transaction.setMessage(executeResponse.getMessage() != null ? executeResponse.getMessage() : 
+                                        "EFASHE transaction executed successfully (HTTP " + executeResponse.getHttpStatusCode() + ")");
+                                } else {
+                                    transaction.setEfasheStatus("SUCCESS");
+                                }
                                 logger.info("EFASHE execute returned HTTP {} - Setting status to SUCCESS immediately. Skipping polling. PollEndpoint: {}, RetryAfterSecs: {}", 
                                     executeResponse.getHttpStatusCode(), executeResponse.getPollEndpoint(), executeResponse.getRetryAfterSecs());
                                 
@@ -414,7 +450,30 @@ public class EfashePaymentService {
                                         String trimmedStatus = pollStatus != null ? pollStatus.trim() : null;
                                         if (trimmedStatus != null && "SUCCESS".equalsIgnoreCase(trimmedStatus)) {
                                             transaction.setEfasheStatus("SUCCESS");
-                                            transaction.setMessage(pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction completed successfully");
+                                            
+                                            // For ELECTRICITY service, extract and store token information if available
+                                            if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
+                                                String token = pollResponse.getToken();
+                                                String pollMessage = pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction completed successfully";
+                                                
+                                                if (token != null && !token.isEmpty()) {
+                                                    // Store token in message field
+                                                    String messageWithToken = pollMessage + " | Token: " + token;
+                                                    transaction.setMessage(messageWithToken);
+                                                    logger.info("ELECTRICITY service - Token received from poll: {}", token);
+                                                } else {
+                                                    // Check if token is in message
+                                                    if (pollMessage != null && pollMessage.toLowerCase().contains("token")) {
+                                                        logger.info("ELECTRICITY service - Token information may be in poll message: {}", pollMessage);
+                                                        transaction.setMessage(pollMessage);
+                                                    } else {
+                                                        transaction.setMessage(pollMessage);
+                                                    }
+                                                }
+                                            } else {
+                                                transaction.setMessage(pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction completed successfully");
+                                            }
+                                            
                                             logger.info("EFASHE transaction SUCCESS confirmed from poll - Status: '{}'", trimmedStatus);
                                             
                                             // Update existing transaction (never create new row)
@@ -951,12 +1010,49 @@ public class EfashePaymentService {
             String cashbackAmount = transaction.getCustomerCashbackAmount() != null 
                 ? transaction.getCustomerCashbackAmount().toPlainString() : "0";
             
-            String message = String.format(
-                "You Paid %s, %s and your cash back is %s, Thanks for using POCHI App",
-                serviceName,
-                amount,
-                cashbackAmount
-            );
+            String message;
+            
+            // For ELECTRICITY service, include token information if available
+            if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
+                // Extract token from message if it's stored there
+                String tokenInfo = "";
+                if (transaction.getMessage() != null && transaction.getMessage().contains("Token:")) {
+                    // Extract token from message
+                    String[] parts = transaction.getMessage().split("Token:");
+                    if (parts.length > 1) {
+                        tokenInfo = parts[1].trim();
+                        // Remove any additional text after token
+                        if (tokenInfo.contains(" | ")) {
+                            tokenInfo = tokenInfo.split(" \\| ")[0];
+                        }
+                    }
+                }
+                
+                if (!tokenInfo.isEmpty()) {
+                    message = String.format(
+                        "You Paid %s RWF for %s. Your token is: %s. Cashback: %s RWF. Thanks for using POCHI App",
+                        amount,
+                        serviceName,
+                        tokenInfo,
+                        cashbackAmount
+                    );
+                } else {
+                    // No token available yet, use standard message
+                    message = String.format(
+                        "You Paid %s, %s and your cash back is %s, Thanks for using POCHI App",
+                        serviceName,
+                        amount,
+                        cashbackAmount
+                    );
+                }
+            } else {
+                message = String.format(
+                    "You Paid %s, %s and your cash back is %s, Thanks for using POCHI App",
+                    serviceName,
+                    amount,
+                    cashbackAmount
+                );
+            }
             
             // Use the same phone format as PaymentService (12 digits with 250)
             // WhatsApp service should handle the format conversion if needed
