@@ -35,6 +35,7 @@ public class EfashePaymentService {
     private final EfasheApiService efasheApiService;
     private final EfasheTransactionRepository efasheTransactionRepository;
     private final WhatsAppService whatsAppService;
+    private final MessagingService messagingService;
     private final UserRepository userRepository;
     private final EntityManager entityManager;
 
@@ -43,6 +44,7 @@ public class EfashePaymentService {
                                  EfasheApiService efasheApiService,
                                  EfasheTransactionRepository efasheTransactionRepository,
                                  WhatsAppService whatsAppService,
+                                 MessagingService messagingService,
                                  UserRepository userRepository,
                                  EntityManager entityManager) {
         this.efasheSettingsService = efasheSettingsService;
@@ -50,6 +52,7 @@ public class EfashePaymentService {
         this.efasheApiService = efasheApiService;
         this.efasheTransactionRepository = efasheTransactionRepository;
         this.whatsAppService = whatsAppService;
+        this.messagingService = messagingService;
         this.userRepository = userRepository;
         this.entityManager = entityManager;
     }
@@ -357,6 +360,34 @@ public class EfashePaymentService {
                                 // No need to send separate cashback transfer requests
                                 logger.info("Cashback transfers already included in initial MoPay request - no separate requests needed");
                                 
+                                // For ELECTRICITY service, get token and send it to user
+                                if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
+                                    logger.info("=== ELECTRICITY transaction - Retrieving token ===");
+                                    try {
+                                        ElectricityTokenResponse tokenResponse = efasheApiService.getElectricityTokens(
+                                            transaction.getCustomerAccountNumber(), 1);
+                                        
+                                        if (tokenResponse != null && tokenResponse.getData() != null && 
+                                            !tokenResponse.getData().isEmpty()) {
+                                            ElectricityTokenResponse.TokenData tokenData = tokenResponse.getData().get(0);
+                                            String token = tokenData.getToken();
+                                            
+                                            if (token != null && !token.trim().isEmpty()) {
+                                                logger.info("Electricity token retrieved: {}", token);
+                                                // Send token via WhatsApp or SMS
+                                                sendElectricityToken(transaction, token, tokenData);
+                                            } else {
+                                                logger.warn("Electricity token is empty in response");
+                                            }
+                                        } else {
+                                            logger.warn("No token data returned from electricity tokens endpoint");
+                                        }
+                                    } catch (Exception e) {
+                                        logger.error("Error retrieving electricity token: ", e);
+                                        // Don't fail the transaction if token retrieval fails
+                                    }
+                                }
+                                
                                 // Send WhatsApp notification since transaction is SUCCESS
                                 logger.info("=== STARTING WhatsApp Notification for Transaction: {} ===", transaction.getTransactionId());
                                 sendWhatsAppNotification(transaction);
@@ -405,6 +436,34 @@ public class EfashePaymentService {
                                             
                                             // Cashback transfers already included in initial MoPay request - no separate requests needed
                                             logger.info("Cashback transfers already included in initial MoPay request - no separate requests needed");
+                                            
+                                            // For ELECTRICITY service, get token and send it to user
+                                            if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
+                                                logger.info("=== ELECTRICITY transaction - Retrieving token ===");
+                                                try {
+                                                    ElectricityTokenResponse tokenResponse = efasheApiService.getElectricityTokens(
+                                                        transaction.getCustomerAccountNumber(), 1);
+                                                    
+                                                    if (tokenResponse != null && tokenResponse.getData() != null && 
+                                                        !tokenResponse.getData().isEmpty()) {
+                                                        ElectricityTokenResponse.TokenData tokenData = tokenResponse.getData().get(0);
+                                                        String token = tokenData.getToken();
+                                                        
+                                                        if (token != null && !token.trim().isEmpty()) {
+                                                            logger.info("Electricity token retrieved: {}", token);
+                                                            // Send token via WhatsApp or SMS
+                                                            sendElectricityToken(transaction, token, tokenData);
+                                                        } else {
+                                                            logger.warn("Electricity token is empty in response");
+                                                        }
+                                                    } else {
+                                                        logger.warn("No token data returned from electricity tokens endpoint");
+                                                    }
+                                                } catch (Exception e) {
+                                                    logger.error("Error retrieving electricity token: ", e);
+                                                    // Don't fail the transaction if token retrieval fails
+                                                }
+                                            }
                                             
                                             // Send WhatsApp notification
                                             sendWhatsAppNotification(transaction);
@@ -490,6 +549,34 @@ public class EfashePaymentService {
                                 
                                 // Cashback transfers already included in initial MoPay request - no separate requests needed
                                 logger.info("Cashback transfers already included in initial MoPay request - no separate requests needed");
+                                
+                                // For ELECTRICITY service, get token and send it to user
+                                if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
+                                    logger.info("=== ELECTRICITY transaction - Retrieving token ===");
+                                    try {
+                                        ElectricityTokenResponse tokenResponse = efasheApiService.getElectricityTokens(
+                                            transaction.getCustomerAccountNumber(), 1);
+                                        
+                                        if (tokenResponse != null && tokenResponse.getData() != null && 
+                                            !tokenResponse.getData().isEmpty()) {
+                                            ElectricityTokenResponse.TokenData tokenData = tokenResponse.getData().get(0);
+                                            String token = tokenData.getToken();
+                                            
+                                            if (token != null && !token.trim().isEmpty()) {
+                                                logger.info("Electricity token retrieved: {}", token);
+                                                // Send token via WhatsApp or SMS
+                                                sendElectricityToken(transaction, token, tokenData);
+                                            } else {
+                                                logger.warn("Electricity token is empty in response");
+                                            }
+                                        } else {
+                                            logger.warn("No token data returned from electricity tokens endpoint");
+                                        }
+                                    } catch (Exception e) {
+                                        logger.error("Error retrieving electricity token: ", e);
+                                        // Don't fail the transaction if token retrieval fails
+                                    }
+                                }
                                 
                                 // Send WhatsApp notification
                                 sendWhatsAppNotification(transaction);
@@ -932,6 +1019,70 @@ public class EfashePaymentService {
             e.printStackTrace();
             logger.error("=== END WhatsApp Error ===");
             // Don't fail the transaction if WhatsApp fails
+        }
+    }
+    
+    /**
+     * Send electricity token to user via WhatsApp or SMS
+     * Only called for ELECTRICITY service type after successful execution
+     */
+    private void sendElectricityToken(EfasheTransaction transaction, String token, ElectricityTokenResponse.TokenData tokenData) {
+        try {
+            logger.info("=== START Electricity Token Notification ===");
+            logger.info("Transaction ID: {}", transaction.getTransactionId());
+            logger.info("Customer Phone: {}", transaction.getCustomerPhone());
+            logger.info("Meter Number: {}", transaction.getCustomerAccountNumber());
+            logger.info("Token: {}", token);
+            logger.info("Units: {}", tokenData.getUnits());
+            
+            if (transaction.getCustomerPhone() == null || transaction.getCustomerPhone().isEmpty()) {
+                logger.warn("Customer phone number is null or empty, skipping token notification for transaction: {}", 
+                    transaction.getTransactionId());
+                return;
+            }
+            
+            // Normalize phone number
+            String normalizedPhone = normalizePhoneTo12Digits(transaction.getCustomerPhone());
+            logger.info("Normalized customer phone for token notification: {} (original: {})", normalizedPhone, transaction.getCustomerPhone());
+            
+            // Build token message
+            String units = tokenData.getUnits() != null ? tokenData.getUnits().toPlainString() : "N/A";
+            String amount = transaction.getAmount() != null ? transaction.getAmount().toPlainString() : "0";
+            String meterNo = transaction.getCustomerAccountNumber() != null ? transaction.getCustomerAccountNumber() : "N/A";
+            
+            String tokenMessage = String.format(
+                "Your electricity token for meter %s:\n\nToken: %s\nUnits: %s kWh\nAmount: %s RWF\n\nThank you for using POCHI App!",
+                meterNo,
+                token,
+                units,
+                amount
+            );
+            
+            // Try WhatsApp first, fallback to SMS
+            try {
+                logger.info("Attempting to send electricity token via WhatsApp to: {}", normalizedPhone);
+                whatsAppService.sendWhatsApp(tokenMessage, normalizedPhone);
+                logger.info("✅ Electricity token sent successfully via WhatsApp");
+            } catch (Exception whatsappError) {
+                logger.warn("Failed to send electricity token via WhatsApp, trying SMS: {}", whatsappError.getMessage());
+                // Fallback to SMS
+                try {
+                    messagingService.sendSms(tokenMessage, normalizedPhone);
+                    logger.info("✅ Electricity token sent successfully via SMS");
+                } catch (Exception smsError) {
+                    logger.error("Failed to send electricity token via SMS: {}", smsError.getMessage());
+                    throw smsError;
+                }
+            }
+            
+            logger.info("=== END Electricity Token Notification ===");
+        } catch (Exception e) {
+            logger.error("=== ERROR in Electricity Token Notification ===");
+            logger.error("Transaction ID: {}", transaction.getTransactionId());
+            logger.error("Customer Phone: {}", transaction.getCustomerPhone());
+            logger.error("Error sending electricity token notification: ", e);
+            logger.error("=== END Electricity Token Error ===");
+            // Don't fail the transaction if token notification fails
         }
     }
     

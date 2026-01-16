@@ -498,4 +498,99 @@ public class EfasheApiService {
             throw new RuntimeException("Failed to poll EFASHE transaction status: " + e.getMessage());
         }
     }
+    
+    /**
+     * Get electricity tokens after successful execution
+     * GET /electricity/tokens?meterNo={meterNo}&numTokens={numTokens}
+     * Uses token authentication
+     * Only applicable for ELECTRICITY service type
+     */
+    public ElectricityTokenResponse getElectricityTokens(String meterNo, Integer numTokens) {
+        String url = efasheApiUrl + "/electricity/tokens?meterNo=" + meterNo + "&numTokens=" + (numTokens != null ? numTokens : 1);
+        
+        logger.info("Getting electricity tokens - MeterNo: {}, NumTokens: {}", meterNo, numTokens);
+        
+        HttpHeaders headers = buildHeadersWithToken();
+        HttpEntity<Void> entity = new HttpEntity<>(headers);
+
+        try {
+            ResponseEntity<String> rawResponse = restTemplate.exchange(
+                    url,
+                    HttpMethod.GET,
+                    entity,
+                    String.class
+            );
+            
+            String responseBodyString = rawResponse.getBody();
+            int httpStatusCode = rawResponse.getStatusCode().value();
+            
+            logger.info("Electricity tokens response - Status: {}, Body: {}", httpStatusCode, responseBodyString);
+            
+            if (httpStatusCode == 200) {
+                ObjectMapper objectMapper = new ObjectMapper();
+                try {
+                    JsonNode jsonNode = objectMapper.readTree(responseBodyString);
+                    if (jsonNode.has("data")) {
+                        // Extract from "data" wrapper
+                        JsonNode dataNode = jsonNode.get("data");
+                        ElectricityTokenResponse response = new ElectricityTokenResponse();
+                        response.setData(objectMapper.treeToValue(dataNode, 
+                            objectMapper.getTypeFactory().constructCollectionType(java.util.List.class, ElectricityTokenResponse.TokenData.class)));
+                        logger.info("Electricity tokens retrieved successfully - Count: {}", 
+                            response.getData() != null ? response.getData().size() : 0);
+                        return response;
+                    } else {
+                        // Try direct parsing
+                        return objectMapper.readValue(responseBodyString, ElectricityTokenResponse.class);
+                    }
+                } catch (Exception e) {
+                    logger.error("Error parsing electricity tokens response: ", e);
+                    throw new RuntimeException("Failed to parse electricity tokens response: " + e.getMessage());
+                }
+            } else {
+                throw new RuntimeException("Failed to get electricity tokens (Status: " + httpStatusCode + "): " + responseBodyString);
+            }
+        } catch (HttpClientErrorException e) {
+            int statusCode = e.getStatusCode().value();
+            String responseBody = e.getResponseBodyAsString();
+            logger.error("HTTP error getting electricity tokens - Status: {}, Response: {}", statusCode, responseBody);
+            
+            // If 401, token might be expired - try to refresh
+            if (statusCode == 401) {
+                logger.warn("Authentication failed, clearing token cache and retrying...");
+                cachedAccessToken = null;
+                tokenExpiresAt = null;
+                
+                // Retry once with new token
+                try {
+                    headers = buildHeadersWithToken();
+                    entity = new HttpEntity<>(headers);
+                    ResponseEntity<String> retryResponse = restTemplate.exchange(
+                            url,
+                            HttpMethod.GET,
+                            entity,
+                            String.class
+                    );
+                    ObjectMapper objectMapper = new ObjectMapper();
+                    JsonNode jsonNode = objectMapper.readTree(retryResponse.getBody());
+                    if (jsonNode.has("data")) {
+                        ElectricityTokenResponse response = new ElectricityTokenResponse();
+                        response.setData(objectMapper.treeToValue(jsonNode.get("data"), 
+                            objectMapper.getTypeFactory().constructCollectionType(java.util.List.class, ElectricityTokenResponse.TokenData.class)));
+                        return response;
+                    } else {
+                        return objectMapper.readValue(retryResponse.getBody(), ElectricityTokenResponse.class);
+                    }
+                } catch (Exception retryException) {
+                    logger.error("Electricity tokens retry failed: ", retryException);
+                    throw new RuntimeException("Failed to get electricity tokens after retry: " + retryException.getMessage());
+                }
+            }
+            
+            throw new RuntimeException("Failed to get electricity tokens (Status: " + statusCode + "): " + responseBody);
+        } catch (Exception e) {
+            logger.error("Error getting electricity tokens: ", e);
+            throw new RuntimeException("Failed to get electricity tokens: " + e.getMessage());
+        }
+    }
 }
