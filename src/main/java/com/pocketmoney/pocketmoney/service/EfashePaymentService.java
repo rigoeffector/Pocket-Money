@@ -214,12 +214,13 @@ public class EfashePaymentService {
         
         transaction.setMessage(moPayRequest.getMessage());
         
-        // For ELECTRICITY service, delivery method is SMS, so set deliverTo to customer phone
+        // For ELECTRICITY and RRA services, delivery method is SMS, so set deliverTo to customer phone
         // This will be used when we validate and execute the EFASHE transaction
-        if (request.getServiceType() == EfasheServiceType.ELECTRICITY) {
+        if (request.getServiceType() == EfasheServiceType.ELECTRICITY || request.getServiceType() == EfasheServiceType.RRA) {
             transaction.setDeliveryMethodId("sms");
             transaction.setDeliverTo(normalizedCustomerPhone); // Customer phone for SMS delivery
-            logger.info("ELECTRICITY service - Setting delivery method to SMS, deliverTo to customer phone: {}", normalizedCustomerPhone);
+            logger.info("{} service - Setting delivery method to SMS, deliverTo to customer phone: {}", 
+                request.getServiceType(), normalizedCustomerPhone);
         }
         
         // Store cashback amounts and phone numbers for reference
@@ -319,7 +320,16 @@ public class EfashePaymentService {
                     
                     if (validateResponse != null && validateResponse.getTrxId() != null) {
                         transaction.setTrxId(validateResponse.getTrxId());
-                        logger.info("EFASHE validate successful - TrxId: {}", validateResponse.getTrxId());
+                        
+                        // Store customer account name from validate response (e.g., "MUHINZI ANDRE" for electricity, TIN owner for RRA)
+                        if (validateResponse.getCustomerAccountName() != null && !validateResponse.getCustomerAccountName().trim().isEmpty()) {
+                            transaction.setCustomerAccountName(validateResponse.getCustomerAccountName().trim());
+                            logger.info("EFASHE validate successful - TrxId: {}, Customer Account Name: {}", 
+                                validateResponse.getTrxId(), validateResponse.getCustomerAccountName());
+                        } else {
+                            logger.info("EFASHE validate successful - TrxId: {} (no customer account name in response)", 
+                                validateResponse.getTrxId());
+                        }
                         
                         // Step 2: Execute EFASHE transaction
                         EfasheExecuteRequest executeRequest = new EfasheExecuteRequest();
@@ -329,18 +339,35 @@ public class EfashePaymentService {
                         executeRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
                         
                         // Get delivery method from validate response
-                        // Prefer "direct_topup" if available, otherwise use the first delivery method
+                        // For ELECTRICITY and RRA: prefer SMS if available, otherwise use first available
+                        // For other services: prefer "direct_topup" if available, otherwise use first available
                         String deliveryMethodId = "direct_topup"; // Default
                         if (validateResponse.getDeliveryMethods() != null && !validateResponse.getDeliveryMethods().isEmpty()) {
-                            // Check if "direct_topup" is available
-                            boolean hasDirectTopup = validateResponse.getDeliveryMethods().stream()
-                                .anyMatch(dm -> "direct_topup".equals(dm.getId()));
-                            
-                            if (hasDirectTopup) {
-                                deliveryMethodId = "direct_topup";
+                            if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY || 
+                                transaction.getServiceType() == EfasheServiceType.RRA) {
+                                // For ELECTRICITY and RRA, prefer SMS delivery method
+                                boolean hasSms = validateResponse.getDeliveryMethods().stream()
+                                    .anyMatch(dm -> "sms".equals(dm.getId()));
+                                
+                                if (hasSms) {
+                                    deliveryMethodId = "sms";
+                                    logger.info("{} service - Using SMS delivery method (preferred for this service type)", transaction.getServiceType());
+                                } else {
+                                    // Use the first available delivery method
+                                    deliveryMethodId = validateResponse.getDeliveryMethods().get(0).getId();
+                                    logger.info("{} service - SMS not available, using delivery method: {}", transaction.getServiceType(), deliveryMethodId);
+                                }
                             } else {
-                                // Use the first available delivery method
-                                deliveryMethodId = validateResponse.getDeliveryMethods().get(0).getId();
+                                // For other services (AIRTIME, TV, MTN), prefer direct_topup
+                                boolean hasDirectTopup = validateResponse.getDeliveryMethods().stream()
+                                    .anyMatch(dm -> "direct_topup".equals(dm.getId()));
+                                
+                                if (hasDirectTopup) {
+                                    deliveryMethodId = "direct_topup";
+                                } else {
+                                    // Use the first available delivery method
+                                    deliveryMethodId = validateResponse.getDeliveryMethods().get(0).getId();
+                                }
                             }
                         }
                         
@@ -1010,6 +1037,11 @@ public class EfashePaymentService {
             String cashbackAmount = transaction.getCustomerCashbackAmount() != null 
                 ? transaction.getCustomerCashbackAmount().toPlainString() : "0";
             
+            // Get customer account name (e.g., "MUHINZI ANDRE" for electricity, TIN owner for RRA)
+            String customerAccountName = transaction.getCustomerAccountName();
+            String ownerName = (customerAccountName != null && !customerAccountName.trim().isEmpty()) 
+                ? customerAccountName.trim() : null;
+            
             String message;
             
             // For ELECTRICITY service, include token information if available
@@ -1028,24 +1060,40 @@ public class EfashePaymentService {
                     }
                 }
                 
+                // Build message with owner name and token
+                String ownerInfo = ownerName != null ? " for " + ownerName : "";
+                
                 if (!tokenInfo.isEmpty()) {
                     message = String.format(
-                        "You Paid %s RWF for %s. Your token is: %s. Cashback: %s RWF. Thanks for using POCHI App",
+                        "You Paid %s RWF for %s%s. Your token is: %s. Cashback: %s RWF. Thanks for using POCHI App",
                         amount,
                         serviceName,
+                        ownerInfo,
                         tokenInfo,
                         cashbackAmount
                     );
                 } else {
-                    // No token available yet, use standard message
+                    // No token available yet
                     message = String.format(
-                        "You Paid %s, %s and your cash back is %s, Thanks for using POCHI App",
-                        serviceName,
+                        "You Paid %s RWF for %s%s. Cashback: %s RWF. Thanks for using POCHI App",
                         amount,
+                        serviceName,
+                        ownerInfo,
                         cashbackAmount
                     );
                 }
+            } else if (transaction.getServiceType() == EfasheServiceType.RRA) {
+                // For RRA, include owner name (TIN owner)
+                String ownerInfo = ownerName != null ? " for " + ownerName : "";
+                message = String.format(
+                    "You Paid %s RWF for %s%s. Cashback: %s RWF. Thanks for using POCHI App",
+                    amount,
+                    serviceName,
+                    ownerInfo,
+                    cashbackAmount
+                );
             } else {
+                // For other services (AIRTIME, TV, MTN)
                 message = String.format(
                     "You Paid %s, %s and your cash back is %s, Thanks for using POCHI App",
                     serviceName,

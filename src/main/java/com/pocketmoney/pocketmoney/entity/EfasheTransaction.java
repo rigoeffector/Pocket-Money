@@ -36,6 +36,9 @@ public class EfasheTransaction {
     @Column(name = "customer_account_number", nullable = false)
     private String customerAccountNumber;
 
+    @Column(name = "customer_account_name")
+    private String customerAccountName; // Customer account name (e.g., "MUHINZI ANDRE" for electricity, TIN owner for RRA)
+
     @Column(name = "amount", nullable = false, precision = 10, scale = 2)
     private BigDecimal amount;
 

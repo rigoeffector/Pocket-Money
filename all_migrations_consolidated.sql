@@ -333,6 +333,12 @@ ALTER TABLE efashe_transactions
 ADD COLUMN IF NOT EXISTS initial_mopay_status VARCHAR(50),
 ADD COLUMN IF NOT EXISTS initial_efashe_status VARCHAR(50);
 
+-- Add customer_account_name column for storing customer account name (e.g., "MUHINZI ANDRE" for electricity, TIN owner for RRA)
+ALTER TABLE efashe_transactions 
+ADD COLUMN IF NOT EXISTS customer_account_name VARCHAR(255);
+
+COMMENT ON COLUMN efashe_transactions.customer_account_name IS 'Customer account name (e.g., "MUHINZI ANDRE" for electricity, TIN owner for RRA)';
+
 COMMIT;
 
 -- ===================================================================
