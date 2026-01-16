@@ -20,7 +20,16 @@ public class EfasheInitiateRequest {
     
     @NotNull(message = "Phone number is required")
     @NotBlank(message = "Phone number cannot be blank")
-    private String phone; // DEBIT - customer phone
+    private String phone; // DEBIT - customer phone for MoPay payment collection
+    
+    /**
+     * Customer account number for the service type:
+     * - AIRTIME/MTN: Phone number (optional, will use phone if not provided)
+     * - TV: Decoder number (required)
+     * - RRA: TIN number (required)
+     * - ELECTRICITY: Cashpower number (required)
+     */
+    private String customerAccountNumber;
     
     private String payment_mode = "MOBILE";
     

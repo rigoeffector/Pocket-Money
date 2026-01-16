@@ -31,8 +31,28 @@ public class EfasheController {
     }
 
     /**
-     * Initiate EFASHE payment with MoPay (Admin only)
+     * Initiate EFASHE payment with MoPay
      * POST /api/efashe/initiate
+     * 
+     * Request body fields:
+     *   - amount: Transaction amount (required)
+     *   - phone: Customer phone number for MoPay payment collection (required)
+     *   - serviceType: Service type - AIRTIME, MTN, RRA, TV, ELECTRICITY (required)
+     *   - customerAccountNumber: Account number for the service (optional for AIRTIME/MTN, required for TV/RRA/ELECTRICITY)
+     *     - AIRTIME/MTN: Phone number (optional, will use phone if not provided)
+     *     - TV: Decoder number (required)
+     *     - RRA: TIN number (required)
+     *     - ELECTRICITY: Cashpower number (required)
+     *   - currency: Currency code (default: RWF)
+     *   - payment_mode: Payment mode (default: MOBILE)
+     *   - message: Optional message
+     *   - callback_url: Optional callback URL
+     * 
+     * Examples:
+     *   AIRTIME: { "amount": 1000, "phone": "250784638201", "serviceType": "AIRTIME" }
+     *   TV: { "amount": 2000, "phone": "250784638201", "serviceType": "TV", "customerAccountNumber": "DEC123456789" }
+     *   RRA: { "amount": 5000, "phone": "250784638201", "serviceType": "RRA", "customerAccountNumber": "TIN123456789" }
+     *   ELECTRICITY: { "amount": 3000, "phone": "250784638201", "serviceType": "ELECTRICITY", "customerAccountNumber": "1234567890123" }
      */
     @PostMapping("/initiate")
     public ResponseEntity<ApiResponse<EfasheInitiateResponse>> initiatePayment(
@@ -46,7 +66,7 @@ public class EfasheController {
                     .body(ApiResponse.error(e.getMessage()));
         }
     }
-
+    
     /**
      * Check EFASHE transaction status using MoPay transaction ID
      * GET /api/efashe/status/{transactionId}
@@ -64,7 +84,7 @@ public class EfasheController {
                     .body(ApiResponse.error(e.getMessage()));
         }
     }
-
+    
     /**
      * Get EFASHE transactions with optional filtering by service type, phone number, and date range
      * GET /api/efashe/transactions

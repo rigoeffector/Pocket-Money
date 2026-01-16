@@ -297,6 +297,19 @@ CREATE TABLE IF NOT EXISTS efashe_transactions (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Drop existing check constraint if it exists and recreate with ELECTRICITY
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'efashe_transactions_service_type_check') THEN
+        ALTER TABLE efashe_transactions DROP CONSTRAINT efashe_transactions_service_type_check;
+    END IF;
+END $$;
+
+-- Add check constraint to allow all service types including ELECTRICITY
+ALTER TABLE efashe_transactions 
+ADD CONSTRAINT efashe_transactions_service_type_check 
+CHECK (service_type IN ('AIRTIME', 'RRA', 'TV', 'MTN', 'ELECTRICITY'));
+
 -- Create indexes for faster lookups
 CREATE INDEX IF NOT EXISTS idx_efashe_transactions_transaction_id ON efashe_transactions(transaction_id);
 CREATE INDEX IF NOT EXISTS idx_efashe_transactions_service_type ON efashe_transactions(service_type);

@@ -54,9 +54,45 @@ public class EfashePaymentService {
         this.entityManager = entityManager;
     }
 
+    /**
+     * Validate customerAccountNumber based on service type
+     * - AIRTIME/MTN: Optional (will use phone if not provided)
+     * - TV: Required (Decoder number)
+     * - RRA: Required (TIN number)
+     * - ELECTRICITY: Required (Cashpower number)
+     */
+    private void validateCustomerAccountNumber(EfasheInitiateRequest request) {
+        EfasheServiceType serviceType = request.getServiceType();
+        String customerAccountNumber = request.getCustomerAccountNumber();
+        
+        if (serviceType == EfasheServiceType.TV || 
+            serviceType == EfasheServiceType.RRA || 
+            serviceType == EfasheServiceType.ELECTRICITY) {
+            
+            if (customerAccountNumber == null || customerAccountNumber.trim().isEmpty()) {
+                String accountType = serviceType == EfasheServiceType.TV ? "Decoder number" :
+                                   serviceType == EfasheServiceType.RRA ? "TIN number" :
+                                   "Cashpower number";
+                throw new RuntimeException(accountType + " (customerAccountNumber) is required for service type: " + serviceType);
+            }
+            
+            logger.info("Validated customerAccountNumber for {}: {}", serviceType, customerAccountNumber);
+        } else if (serviceType == EfasheServiceType.AIRTIME || serviceType == EfasheServiceType.MTN) {
+            // Optional for AIRTIME/MTN - will use phone if not provided
+            if (customerAccountNumber != null && !customerAccountNumber.trim().isEmpty()) {
+                logger.info("Using provided customerAccountNumber for {}: {}", serviceType, customerAccountNumber);
+            } else {
+                logger.info("customerAccountNumber not provided for {}, will derive from phone", serviceType);
+            }
+        }
+    }
+
     public EfasheInitiateResponse initiatePayment(EfasheInitiateRequest request) {
-        logger.info("Initiating EFASHE payment - Service: {}, Amount: {}, Phone: {}", 
-            request.getServiceType(), request.getAmount(), request.getPhone());
+        logger.info("Initiating EFASHE payment - Service: {}, Amount: {}, Phone: {}, CustomerAccountNumber: {}", 
+            request.getServiceType(), request.getAmount(), request.getPhone(), request.getCustomerAccountNumber());
+
+        // Validate customerAccountNumber based on service type
+        validateCustomerAccountNumber(request);
 
         // Generate transaction ID dynamically starting with "EFASHE"
         String transactionId = generateEfasheTransactionId();
@@ -166,13 +202,31 @@ public class EfashePaymentService {
         transaction.setTransactionId(transactionId);
         transaction.setServiceType(request.getServiceType());
         transaction.setCustomerPhone(normalizedCustomerPhone);
-        // Convert customer phone to account number format for EFASHE
-        // Remove 250 prefix and add 0 prefix: 250784638201 -> 0784638201
-        String customerAccountNumber = normalizedCustomerPhone.startsWith("250") 
-            ? "0" + normalizedCustomerPhone.substring(3) 
-            : (normalizedCustomerPhone.startsWith("0") ? normalizedCustomerPhone : "0" + normalizedCustomerPhone);
+        
+        // Determine customer account number based on service type
+        String customerAccountNumber;
+        if (request.getCustomerAccountNumber() != null && !request.getCustomerAccountNumber().trim().isEmpty()) {
+            // Use provided customerAccountNumber (for TV, RRA, ELECTRICITY)
+            customerAccountNumber = request.getCustomerAccountNumber().trim();
+            logger.info("Using provided customer account number: {} for service type: {}", customerAccountNumber, request.getServiceType());
+        } else {
+            // For AIRTIME/MTN, derive from phone number
+            // Remove 250 prefix and add 0 prefix: 250784638201 -> 0784638201
+            if (request.getServiceType() == EfasheServiceType.AIRTIME || request.getServiceType() == EfasheServiceType.MTN) {
+                customerAccountNumber = normalizedCustomerPhone.startsWith("250") 
+                    ? "0" + normalizedCustomerPhone.substring(3) 
+                    : (normalizedCustomerPhone.startsWith("0") ? normalizedCustomerPhone : "0" + normalizedCustomerPhone);
+                logger.info("Derived customer account number from phone: {} -> {} for service type: {}", 
+                    normalizedCustomerPhone, customerAccountNumber, request.getServiceType());
+            } else {
+                // For other service types (TV, RRA, ELECTRICITY), customerAccountNumber is required
+                throw new RuntimeException("customerAccountNumber is required for service type: " + request.getServiceType() + 
+                    ". Please provide Decoder number (TV), TIN number (RRA), or Cashpower number (ELECTRICITY)");
+            }
+        }
+        
         transaction.setCustomerAccountNumber(customerAccountNumber);
-        logger.info("Customer account number for EFASHE: {} (from phone: {})", customerAccountNumber, normalizedCustomerPhone);
+        logger.info("Customer account number for EFASHE: {} (Service: {})", customerAccountNumber, request.getServiceType());
         transaction.setAmount(amount);
         transaction.setCurrency(request.getCurrency());
         transaction.setMopayTransactionId(moPayResponse != null ? moPayResponse.getTransactionId() : null);
