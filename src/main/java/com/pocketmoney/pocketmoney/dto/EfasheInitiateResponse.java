@@ -10,7 +10,7 @@ public class EfasheInitiateResponse {
     private String transactionId;
     private EfasheServiceType serviceType;
     private BigDecimal amount;
-    private Long customerPhone;
+    private String customerPhone;
     private MoPayResponse moPayResponse;
     private String fullAmountPhone;
     private String cashbackPhone;

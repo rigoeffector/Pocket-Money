@@ -171,7 +171,7 @@ public class PaymentService {
 
         // Check if this is a merchant-specific top-up
         Receiver receiver = null;
-        Long transferPhone;
+        String transferPhone;
         boolean isMerchantTopUp = false;
         
         if (request.getReceiverId() != null) {
@@ -188,20 +188,20 @@ public class PaymentService {
             
             // Use merchant's MoMo account
             String normalizedMomoPhone = normalizePhoneTo12Digits(receiver.getMomoAccountPhone());
-            transferPhone = Long.parseLong(normalizedMomoPhone);
+            transferPhone = normalizedMomoPhone;
             isMerchantTopUp = true;
         } else {
             // Use default admin phone for global top-up
-            transferPhone = 250794230137L;
+            transferPhone = "250794230137";
         }
 
         // Create MoPay initiate request
         MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
         moPayRequest.setAmount(request.getAmount());
         moPayRequest.setCurrency("RWF");
-        // Normalize phone to 12 digits and convert to Long (MoPay API requires 12 digits)
+        // Normalize phone to 12 digits
         String normalizedPayerPhone = normalizePhoneTo12Digits(request.getPhone());
-        moPayRequest.setPhone(Long.parseLong(normalizedPayerPhone));
+        moPayRequest.setPhone(normalizedPayerPhone);
         moPayRequest.setPayment_mode("MOBILE");
         moPayRequest.setMessage(request.getMessage() != null ? request.getMessage() : 
             (isMerchantTopUp ? "Top up to " + receiver.getCompanyName() : "Top up to pocket money card"));
@@ -209,7 +209,9 @@ public class PaymentService {
         // Create transfer to receiver (merchant's MoMo account or default admin)
         MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
         transfer.setAmount(request.getAmount());
-        transfer.setPhone(transferPhone);
+        // transferPhone is String, convert to Long
+        Long transferPhoneLong = Long.parseLong(transferPhone);
+        transfer.setPhone(transferPhoneLong);
         transfer.setMessage(request.getMessage() != null ? request.getMessage() : 
             (isMerchantTopUp ? "Top up to " + receiver.getCompanyName() : "Top up to pocket money card"));
         moPayRequest.setTransfers(java.util.List.of(transfer));
@@ -433,7 +435,7 @@ public class PaymentService {
             moPayRequest.setAmount(request.getAmount());
             moPayRequest.setCurrency("RWF");
             String normalizedPayerPhone = normalizePhoneTo12Digits(request.getPhone());
-            moPayRequest.setPhone(Long.parseLong(normalizedPayerPhone));
+            moPayRequest.setPhone(normalizedPayerPhone);
             moPayRequest.setPayment_mode("MOBILE");
             moPayRequest.setMessage(request.getMessage() != null ? request.getMessage() : 
                 "Top up to " + merchant.getCompanyName());
@@ -1206,9 +1208,8 @@ public class PaymentService {
             throw new RuntimeException("Normalized payer phone must contain only digits. Got: '" + normalizedPayerPhone + "'");
         }
         
-        Long payerPhoneLong = Long.parseLong(normalizedPayerPhone);
-        logger.info("Setting payer phone in MoPay request to: {} (Long value)", payerPhoneLong);
-        moPayRequest.setPhone(payerPhoneLong);
+        logger.info("Setting payer phone in MoPay request to: {} (String value)", normalizedPayerPhone);
+        moPayRequest.setPhone(normalizedPayerPhone);
         moPayRequest.setPayment_mode("MOBILE");
         moPayRequest.setMessage(request.getMessage() != null ? request.getMessage() : "Payment to " + receiver.getCompanyName());
         
@@ -1256,10 +1257,9 @@ public class PaymentService {
             throw new RuntimeException("Normalized receiving phone must contain only digits. Got: '" + normalizedReceivingPhone + "'");
         }
         
-        Long receivingPhoneLong = Long.parseLong(normalizedReceivingPhone);
         logger.info("Setting receiving phone in transfer to: {} (Long value), Amount: {} (payment {} minus bonus {} minus commission {})", 
-                receivingPhoneLong, receiverAmount, paymentAmount, userBonusAmount, commissionAmount);
-        transfer.setPhone(receivingPhoneLong);
+                normalizedReceivingPhone, receiverAmount, paymentAmount, userBonusAmount, commissionAmount);
+        transfer.setPhone(Long.parseLong(normalizedReceivingPhone));
         String payerName = user != null ? user.getFullNames() : "Guest User";
         transfer.setMessage("Payment from " + payerName + " to " + receiver.getCompanyName());
         
@@ -1268,7 +1268,7 @@ public class PaymentService {
         transfers.add(transfer);
         
         logger.info("Added receiver transfer (to {} phone) - Amount: {}, Phone: {}", 
-                isReceiverFlexible ? "receiver's MoMo account" : "default admin", receiverAmount, receivingPhoneLong);
+                isReceiverFlexible ? "receiver's MoMo account" : "default admin", receiverAmount, normalizedReceivingPhone);
         
         // Add transfer back to payer with user bonus (similar to /api/payments/pay)
         logger.info("Checking if user bonus should be added - User bonus amount: {}, Is greater than zero: {}", 
@@ -1277,10 +1277,10 @@ public class PaymentService {
         if (userBonusAmount.compareTo(BigDecimal.ZERO) > 0) {
             MoPayInitiateRequest.Transfer bonusTransfer = new MoPayInitiateRequest.Transfer();
             bonusTransfer.setAmount(userBonusAmount);
-            bonusTransfer.setPhone(payerPhoneLong);
+            bonusTransfer.setPhone(Long.parseLong(normalizedPayerPhone));
             bonusTransfer.setMessage("User bonus for payment to " + receiver.getCompanyName());
             transfers.add(bonusTransfer);
-            logger.info("✅ Added user bonus transfer back to payer - Amount: {}, Phone: {}", userBonusAmount, payerPhoneLong);
+            logger.info("✅ Added user bonus transfer back to payer - Amount: {}, Phone: {}", userBonusAmount, normalizedPayerPhone);
         } else {
             logger.warn("⚠️ User bonus amount is zero or negative, NOT adding bonus transfer. Amount: {}", userBonusAmount);
         }
@@ -1303,14 +1303,12 @@ public class PaymentService {
                 throw new RuntimeException("Normalized commission phone must contain only digits. Got: '" + normalizedCommissionPhone + "'");
             }
             
-            Long commissionPhoneLong = Long.parseLong(normalizedCommissionPhone);
-            
             MoPayInitiateRequest.Transfer commissionTransfer = new MoPayInitiateRequest.Transfer();
             commissionTransfer.setAmount(commissionAmount);
-            commissionTransfer.setPhone(commissionPhoneLong);
+            commissionTransfer.setPhone(Long.parseLong(normalizedCommissionPhone));
             commissionTransfer.setMessage("Commission for payment to " + receiver.getCompanyName());
             transfers.add(commissionTransfer);
-            logger.info("✅ Added commission transfer to commissioner - Amount: {}, Phone: {}", commissionAmount, commissionPhoneLong);
+            logger.info("✅ Added commission transfer to commissioner - Amount: {}, Phone: {}", commissionAmount, normalizedCommissionPhone);
         } else {
             logger.info("⚠️ Commission amount is zero or commission phone not configured, NOT adding commission transfer.");
         }

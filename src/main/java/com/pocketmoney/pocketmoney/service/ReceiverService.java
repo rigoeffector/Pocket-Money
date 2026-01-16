@@ -346,7 +346,7 @@ public class ReceiverService {
                     
                     // Normalize admin phone to 12 digits
                     String normalizedAdminPhone = normalizePhoneTo12Digits(request.getAdminPhone());
-                    moPayRequest.setPhone(Long.parseLong(normalizedAdminPhone));
+                    moPayRequest.setPhone(normalizedAdminPhone);
                     moPayRequest.setPayment_mode("MOBILE");
                     moPayRequest.setMessage("Balance assignment to " + receiver.getCompanyName());
                     
@@ -543,7 +543,7 @@ public class ReceiverService {
         // Normalize admin phone to 12 digits
         String normalizedAdminPhone = normalizePhoneTo12Digits(request.getAdminPhone());
         logger.info("Normalized admin phone: {}", normalizedAdminPhone);
-        moPayRequest.setPhone(Long.parseLong(normalizedAdminPhone));
+        moPayRequest.setPhone(normalizedAdminPhone);
         moPayRequest.setPayment_mode("MOBILE");
         moPayRequest.setMessage("Balance assignment to " + receiver.getCompanyName());
         

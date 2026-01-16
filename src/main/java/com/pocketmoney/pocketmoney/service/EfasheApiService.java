@@ -302,6 +302,11 @@ public class EfasheApiService {
                 executeResponse != null ? executeResponse.getRetryAfterSecs() : "N/A",
                 executeResponse != null ? executeResponse.getStatus() : "N/A");
             
+            // Store HTTP status code in response for checking in service layer
+            if (executeResponse != null) {
+                executeResponse.setHttpStatusCode(httpStatusCode);
+            }
+            
             return executeResponse;
         } catch (HttpClientErrorException e) {
             int statusCode = e.getStatusCode().value();
@@ -324,7 +329,12 @@ public class EfasheApiService {
                             entity,
                             String.class
                     );
-                    return parseExecuteResponse(retryResponse.getBody());
+                    EfasheExecuteResponse retryExecuteResponse = parseExecuteResponse(retryResponse.getBody());
+                    // Set HTTP status code from retry response
+                    if (retryExecuteResponse != null) {
+                        retryExecuteResponse.setHttpStatusCode(retryResponse.getStatusCode().value());
+                    }
+                    return retryExecuteResponse;
                 } catch (Exception retryException) {
                     logger.error("EFASHE execute retry failed: ", retryException);
                     throw new RuntimeException("EFASHE API authentication failed after retry. Please verify API credentials.");
@@ -361,18 +371,30 @@ public class EfasheApiService {
     public EfashePollStatusResponse pollTransactionStatus(String pollEndpoint) {
         // pollEndpoint should be relative path like "/v2/trx/849d5438-fe49-4c11-b959-dac800d187dd/status/"
         // or full URL
+        // NOTE: efasheApiUrl already ends with "/rw/v2", so if pollEndpoint starts with "/v2/",
+        // we need to remove the duplicate "/v2" prefix
         String url;
         if (pollEndpoint.startsWith("http")) {
             url = pollEndpoint;
         } else if (pollEndpoint.startsWith("/")) {
-            url = efasheApiUrl + pollEndpoint;
+            // Remove leading slash if pollEndpoint starts with "/v2/" to avoid duplicate
+            String cleanEndpoint = pollEndpoint;
+            if (pollEndpoint.startsWith("/v2/")) {
+                // efasheApiUrl is like "https://sb-api.efashe.com/rw/v2"
+                // pollEndpoint is like "/v2/trx/...", so we need "/trx/..." instead
+                cleanEndpoint = pollEndpoint.substring(3); // Remove "/v2" -> "/trx/..."
+            }
+            url = efasheApiUrl + cleanEndpoint;
         } else {
             url = efasheApiUrl + "/" + pollEndpoint;
         }
         
         logger.info("Polling EFASHE transaction status - Endpoint: {}", url);
         
-        HttpHeaders headers = buildHeadersWithToken();
+        // Poll status endpoint does NOT require token authentication (as per user's previous note)
+        // Use headers without token
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(org.springframework.http.MediaType.APPLICATION_JSON);
         HttpEntity<String> entity = new HttpEntity<>(headers);
 
         try {
@@ -412,10 +434,18 @@ public class EfasheApiService {
                 throw new RuntimeException("Failed to parse EFASHE poll status response: " + e.getMessage());
             }
             
-            logger.info("EFASHE poll status response parsed - Status: {}, TrxId: {}, Message: {}", 
+            logger.info("EFASHE poll status response parsed - Status: '{}', TrxId: {}, Message: {}", 
                 pollResponse != null ? pollResponse.getStatus() : "N/A",
                 pollResponse != null ? pollResponse.getTrxId() : "N/A",
                 pollResponse != null ? pollResponse.getMessage() : "N/A");
+            
+            // Log the raw status value for debugging
+            if (pollResponse != null && pollResponse.getStatus() != null) {
+                logger.info("EFASHE poll status raw value: '{}' (length: {}, equals SUCCESS: {})", 
+                    pollResponse.getStatus(), 
+                    pollResponse.getStatus().length(),
+                    "SUCCESS".equalsIgnoreCase(pollResponse.getStatus().trim()));
+            }
             
             return pollResponse;
         } catch (HttpClientErrorException e) {

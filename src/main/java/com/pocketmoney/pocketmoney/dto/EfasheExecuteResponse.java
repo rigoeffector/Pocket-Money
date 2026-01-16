@@ -29,5 +29,8 @@ public class EfasheExecuteResponse {
     
     @JsonProperty("amount")
     private Double amount;
+    
+    // HTTP status code from the execute API call (200 = success)
+    private Integer httpStatusCode;
 }
 

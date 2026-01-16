@@ -19,7 +19,8 @@ public class EfasheInitiateRequest {
     private String currency = "RWF";
     
     @NotNull(message = "Phone number is required")
-    private Long phone; // DEBIT - customer phone
+    @NotBlank(message = "Phone number cannot be blank")
+    private String phone; // DEBIT - customer phone
     
     private String payment_mode = "MOBILE";
     

@@ -14,7 +14,7 @@ public class MoPayInitiateRequest {
     
     private BigDecimal amount;
     private String currency = "RWF";
-    private Long phone; // DEBIT - must be number, not string
+    private String phone; // DEBIT - phone as string (will be converted to Long for MoPay API)
     private String payment_mode = "MOBILE";
     private String message;
     private String callback_url;
@@ -26,7 +26,7 @@ public class MoPayInitiateRequest {
         private String transaction_id;
         
         private BigDecimal amount;
-        private Long phone; // RECEIVER - must be number, not string
+        private Long phone; // RECEIVER - phone as number (MoPay API requires number, not string)
         private String message;
     }
 }
