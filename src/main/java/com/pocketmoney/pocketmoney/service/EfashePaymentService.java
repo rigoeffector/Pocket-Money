@@ -253,7 +253,7 @@ public class EfashePaymentService {
         // Initiate payment with MoPay - no need to set transaction_id, MoPay will generate its own
         // This matches PaymentService behavior and prevents duplicate ID rejections
         MoPayResponse moPayResponse = moPayService.initiatePayment(moPayRequest);
-        
+
         // Store transaction record in database for later status checking
         // ALWAYS create a NEW transaction record for each initiate request
         // Use MoPay's transaction ID as the primary identifier
@@ -337,6 +337,236 @@ public class EfashePaymentService {
     }
 
     /**
+     * Initiate EFASHE payment for others (buying airtime for another person)
+     * This method allows buying airtime for another person:
+     * - phone: used for MoPay debit (the person paying)
+     * - anotherPhoneNumber: used for EFASHE validate (the person receiving airtime)
+     * 
+     * Only works for AIRTIME service type
+     */
+    public EfasheInitiateResponse initiatePaymentForOther(EfasheInitiateForOtherRequest request) {
+        logger.info("Initiating EFASHE payment for other - Service: {}, Amount: {}, Payer Phone: {}, Recipient Phone: {}", 
+            request.getServiceType(), request.getAmount(), request.getPhone(), request.getAnotherPhoneNumber());
+
+        // Validate that service type is AIRTIME
+        if (request.getServiceType() != EfasheServiceType.AIRTIME) {
+            throw new RuntimeException("This endpoint only supports AIRTIME service type");
+        }
+
+        // Get EFASHE settings for the service type
+        EfasheSettingsResponse settingsResponse = efasheSettingsService.getSettingsByServiceType(request.getServiceType());
+
+        BigDecimal amount = request.getAmount();
+        
+        // Normalize payer phone (for MoPay debit)
+        String normalizedPayerPhone = normalizePhoneTo12Digits(request.getPhone());
+        
+        // Normalize recipient phone (for EFASHE validate)
+        String normalizedRecipientPhone = normalizePhoneTo12Digits(request.getAnotherPhoneNumber());
+        
+        // Convert recipient phone to account number format for EFASHE validate
+        // Remove 250 prefix and add 0 prefix: 250784638201 -> 0784638201
+        String customerAccountNumber = normalizedRecipientPhone.startsWith("250") 
+            ? "0" + normalizedRecipientPhone.substring(3) 
+            : (normalizedRecipientPhone.startsWith("0") ? normalizedRecipientPhone : "0" + normalizedRecipientPhone);
+        
+        logger.info("Buying for other - Payer Phone (MoPay): {}, Recipient Phone (EFASHE): {}, Account Number: {}", 
+            normalizedPayerPhone, normalizedRecipientPhone, customerAccountNumber);
+
+        // ===================================================================
+        // STEP 1: Validate with EFASHE BEFORE initiating MoPay
+        // Use recipient phone for validate
+        // ===================================================================
+        logger.info("=== STEP 1: Validating with EFASHE (recipient phone) BEFORE MoPay initiation ===");
+        EfasheValidateRequest validateRequest = new EfasheValidateRequest();
+        validateRequest.setVerticalId(getVerticalId(request.getServiceType()));
+        validateRequest.setCustomerAccountNumber(customerAccountNumber);
+        
+        logger.info("Calling EFASHE validate - Vertical: {}, Customer Account Number (recipient): {}", 
+            validateRequest.getVerticalId(), validateRequest.getCustomerAccountNumber());
+        
+        EfasheValidateResponse validateResponse = efasheApiService.validateAccount(validateRequest);
+        
+        // Validate MUST succeed before proceeding with MoPay
+        if (validateResponse == null || validateResponse.getTrxId() == null || validateResponse.getTrxId().trim().isEmpty()) {
+            String errorMsg = "EFASHE validation failed - Invalid recipient account or service unavailable";
+            if (validateResponse != null && validateResponse.getTrxResult() != null) {
+                errorMsg = "EFASHE validation failed: " + validateResponse.getTrxResult();
+            }
+            logger.error("EFASHE validation failed - Cannot proceed with MoPay. Recipient Account: {}, Service: {}", 
+                customerAccountNumber, request.getServiceType());
+            throw new RuntimeException(errorMsg);
+        }
+        
+        logger.info("EFASHE validation successful - TrxId: {}, Recipient Account: {}", 
+            validateResponse.getTrxId(), customerAccountNumber);
+        
+        // Store customer account name if available
+        String customerAccountName = null;
+        if (validateResponse.getCustomerAccountName() != null && !validateResponse.getCustomerAccountName().trim().isEmpty()) {
+            customerAccountName = validateResponse.getCustomerAccountName().trim();
+            logger.info("Recipient Account Name from validate: {}", customerAccountName);
+        }
+        
+        // Determine delivery method from validate response
+        String deliveryMethodId = "direct_topup"; // Default for AIRTIME
+        if (validateResponse.getDeliveryMethods() != null && !validateResponse.getDeliveryMethods().isEmpty()) {
+            boolean hasDirectTopup = validateResponse.getDeliveryMethods().stream()
+                .anyMatch(dm -> "direct_topup".equals(dm.getId()));
+            
+            if (hasDirectTopup) {
+                deliveryMethodId = "direct_topup";
+            } else {
+                deliveryMethodId = validateResponse.getDeliveryMethods().get(0).getId();
+            }
+        }
+        
+        logger.info("=== EFASHE Validation Complete - Proceeding with MoPay Initiation (payer phone) ===");
+
+        // ===================================================================
+        // STEP 2: Proceed with MoPay initiation using PAYER phone
+        // ===================================================================
+        BigDecimal agentCommissionPercent = settingsResponse.getAgentCommissionPercentage();
+        BigDecimal customerCashbackPercent = settingsResponse.getCustomerCashbackPercentage();
+        BigDecimal besoftSharePercent = settingsResponse.getBesoftSharePercentage();
+
+        // Calculate amounts based on percentages and round to whole numbers (MoPay requirement)
+        BigDecimal customerCashbackAmount = amount.multiply(customerCashbackPercent)
+            .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP)
+            .setScale(0, RoundingMode.HALF_UP);
+        BigDecimal agentCommissionAmount = amount.multiply(agentCommissionPercent)
+            .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP)
+            .setScale(0, RoundingMode.HALF_UP);
+        BigDecimal besoftShareAmount = amount.multiply(besoftSharePercent)
+            .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP)
+            .setScale(0, RoundingMode.HALF_UP);
+
+        BigDecimal fullAmountPhoneReceives = amount.subtract(customerCashbackAmount)
+            .subtract(besoftShareAmount)
+            .setScale(0, RoundingMode.HALF_UP);
+
+        logger.info("Amount breakdown - Total: {}, Customer Cashback: {}, Besoft Share: {}, Agent Commission: {}, Full Amount Phone (remaining after cashback and besoft): {}",
+            amount, customerCashbackAmount, besoftShareAmount, agentCommissionAmount, fullAmountPhoneReceives);
+
+        if (fullAmountPhoneReceives.compareTo(BigDecimal.ZERO) < 0) {
+            throw new RuntimeException("Invalid percentage configuration: Total percentages exceed 100%. Full amount phone would receive negative amount: " + fullAmountPhoneReceives);
+        }
+
+        // Build MoPay request - Use PAYER phone for debit
+        MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
+        moPayRequest.setAmount(amount);
+        moPayRequest.setCurrency(request.getCurrency());
+        moPayRequest.setPhone(normalizedPayerPhone); // PAYER phone for MoPay debit
+        moPayRequest.setPayment_mode(request.getPayment_mode());
+        moPayRequest.setMessage(request.getMessage() != null ? request.getMessage() : 
+            "EFASHE " + request.getServiceType() + " payment for other");
+        moPayRequest.setCallback_url(request.getCallback_url());
+
+        // Build transfers array
+        List<MoPayInitiateRequest.Transfer> transfers = new ArrayList<>();
+
+        // Transfer 1: Full Amount Phone Number
+        MoPayInitiateRequest.Transfer transfer1 = new MoPayInitiateRequest.Transfer();
+        transfer1.setAmount(fullAmountPhoneReceives);
+        String normalizedFullAmountPhone = normalizePhoneTo12Digits(settingsResponse.getFullAmountPhoneNumber());
+        transfer1.setPhone(Long.parseLong(normalizedFullAmountPhone));
+        transfer1.setMessage("EFASHE " + request.getServiceType() + " - Full amount");
+        transfers.add(transfer1);
+        
+        // Transfer 2: Customer Cashback - send to PAYER (the person who paid)
+        if (customerCashbackAmount.compareTo(BigDecimal.ZERO) > 0) {
+            MoPayInitiateRequest.Transfer transfer2 = new MoPayInitiateRequest.Transfer();
+            transfer2.setAmount(customerCashbackAmount);
+            transfer2.setPhone(Long.parseLong(normalizedPayerPhone)); // PAYER gets cashback
+            transfer2.setMessage("EFASHE " + request.getServiceType() + " - Customer cashback");
+            transfers.add(transfer2);
+        }
+        
+        // Transfer 3: Besoft Share
+        if (besoftShareAmount.compareTo(BigDecimal.ZERO) > 0) {
+            String normalizedCashbackPhone = normalizePhoneTo12Digits(settingsResponse.getCashbackPhoneNumber());
+            MoPayInitiateRequest.Transfer transfer3 = new MoPayInitiateRequest.Transfer();
+            transfer3.setAmount(besoftShareAmount);
+            transfer3.setPhone(Long.parseLong(normalizedCashbackPhone));
+            transfer3.setMessage("EFASHE " + request.getServiceType() + " - Besoft share");
+            transfers.add(transfer3);
+        }
+
+        moPayRequest.setTransfers(transfers);
+
+        // Initiate payment with MoPay using PAYER phone
+        MoPayResponse moPayResponse = moPayService.initiatePayment(moPayRequest);
+        
+        String mopayTransactionId = moPayResponse != null && moPayResponse.getTransactionId() != null 
+            ? moPayResponse.getTransactionId() : null;
+        
+        if (mopayTransactionId == null || mopayTransactionId.isEmpty()) {
+            throw new RuntimeException("MoPay did not return a transaction ID. Payment initiation may have failed.");
+        }
+        
+        EfasheTransaction transaction = new EfasheTransaction();
+        transaction.setTransactionId(mopayTransactionId);
+        transaction.setServiceType(request.getServiceType());
+        transaction.setCustomerPhone(normalizedPayerPhone); // Store payer phone (for MoPay)
+        transaction.setCustomerAccountNumber(customerAccountNumber); // Store recipient account number (for EFASHE)
+        
+        // Store validate response data
+        transaction.setTrxId(validateResponse.getTrxId());
+        if (customerAccountName != null) {
+            transaction.setCustomerAccountName(customerAccountName); // Recipient name
+        }
+        transaction.setDeliveryMethodId(deliveryMethodId);
+        
+        transaction.setAmount(amount);
+        transaction.setCurrency(request.getCurrency());
+        transaction.setMopayTransactionId(mopayTransactionId);
+        
+        String initialMopayStatus = moPayResponse != null && moPayResponse.getStatus() != null 
+            ? moPayResponse.getStatus().toString() : "PENDING";
+        transaction.setInitialMopayStatus(initialMopayStatus);
+        transaction.setInitialEfasheStatus("PENDING");
+        transaction.setMopayStatus(initialMopayStatus);
+        transaction.setEfasheStatus("PENDING");
+        
+        transaction.setMessage(moPayRequest.getMessage());
+        
+        if ("sms".equals(deliveryMethodId)) {
+            transaction.setDeliverTo(normalizedRecipientPhone); // Recipient phone for SMS delivery
+            logger.info("Delivery method is SMS, setting deliverTo to recipient phone: {}", normalizedRecipientPhone);
+        }
+        
+        transaction.setCustomerCashbackAmount(customerCashbackAmount);
+        transaction.setBesoftShareAmount(besoftShareAmount);
+        transaction.setFullAmountPhone(normalizePhoneTo12Digits(settingsResponse.getFullAmountPhoneNumber()));
+        transaction.setCashbackPhone(normalizePhoneTo12Digits(settingsResponse.getCashbackPhoneNumber()));
+        transaction.setCashbackSent(true);
+        
+        efasheTransactionRepository.save(transaction);
+        logger.info("Saved EFASHE transaction record (buying for other) - MoPay Transaction ID: {}, Payer: {}, Recipient: {}", 
+            mopayTransactionId, normalizedPayerPhone, normalizedRecipientPhone);
+
+        // Build response
+        EfasheInitiateResponse response = new EfasheInitiateResponse();
+        response.setTransactionId(mopayTransactionId);
+        response.setServiceType(request.getServiceType());
+        response.setAmount(amount);
+        response.setCustomerPhone(normalizedPayerPhone); // Payer phone in response
+        response.setCustomerAccountName(customerAccountName); // Recipient name
+        response.setMoPayResponse(moPayResponse);
+        response.setFullAmountPhone(normalizedFullAmountPhone);
+        response.setCashbackPhone(normalizePhoneTo12Digits(settingsResponse.getCashbackPhoneNumber()));
+        response.setCustomerCashbackAmount(customerCashbackAmount);
+        response.setAgentCommissionAmount(agentCommissionAmount);
+        response.setBesoftShareAmount(besoftShareAmount);
+        response.setFullAmountPhoneReceives(fullAmountPhoneReceives);
+
+        logger.info("EFASHE payment initiated successfully for other - MoPay Transaction ID: {}, Payer: {}, Recipient: {}", 
+            mopayTransactionId, normalizedPayerPhone, normalizedRecipientPhone);
+
+        return response;
+    }
+
+    /**
      * Check the status of an EFASHE transaction using MoPay transaction ID
      * If status is SUCCESS (200), automatically triggers EFASHE validate and execute
      * @param transactionId The MoPay transaction ID (used as primary identifier)
@@ -401,11 +631,11 @@ public class EfashePaymentService {
                     logger.info("Using stored trxId from validate (done during initiate) - TrxId: {}", trxId);
                     
                     // Execute EFASHE transaction using stored trxId and delivery method info
-                    EfasheExecuteRequest executeRequest = new EfasheExecuteRequest();
+                        EfasheExecuteRequest executeRequest = new EfasheExecuteRequest();
                     executeRequest.setTrxId(trxId);
-                    executeRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
-                    executeRequest.setAmount(transaction.getAmount());
-                    executeRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
+                        executeRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
+                        executeRequest.setAmount(transaction.getAmount());
+                        executeRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
                     
                     // Use stored delivery method and deliverTo (already determined during initiate)
                     String deliveryMethodId = transaction.getDeliveryMethodId();
@@ -429,12 +659,12 @@ public class EfashePaymentService {
                             logger.info("No stored deliverTo, using customer phone: {}", customerPhone);
                         }
                     }
-                    // deliverTo and callBack are optional for direct_topup
-                    
+                        // deliverTo and callBack are optional for direct_topup
+                        
                     logger.info("Calling EFASHE execute - TrxId: {}, Amount: {}, Account: {}, DeliveryMethod: {}", 
                         executeRequest.getTrxId(), executeRequest.getAmount(), executeRequest.getCustomerAccountNumber(), 
                         executeRequest.getDeliveryMethodId());
-                    executeResponse = efasheApiService.executeTransaction(executeRequest);
+                        executeResponse = efasheApiService.executeTransaction(executeRequest);
                         
                         if (executeResponse != null) {
                             // EFASHE execute returns async response with pollEndpoint
@@ -498,9 +728,9 @@ public class EfashePaymentService {
                                 (executeResponse.getHttpStatusCode() == 200 || executeResponse.getHttpStatusCode() == 202)) {
                                 // Only override message if not already set for ELECTRICITY
                                 if (transaction.getServiceType() != EfasheServiceType.ELECTRICITY || transaction.getMessage() == null) {
-                                    transaction.setEfasheStatus("SUCCESS");
-                                    transaction.setMessage(executeResponse.getMessage() != null ? executeResponse.getMessage() : 
-                                        "EFASHE transaction executed successfully (HTTP " + executeResponse.getHttpStatusCode() + ")");
+                                transaction.setEfasheStatus("SUCCESS");
+                                transaction.setMessage(executeResponse.getMessage() != null ? executeResponse.getMessage() : 
+                                    "EFASHE transaction executed successfully (HTTP " + executeResponse.getHttpStatusCode() + ")");
                                 } else {
                                     transaction.setEfasheStatus("SUCCESS");
                                 }
@@ -602,7 +832,7 @@ public class EfashePaymentService {
                                                 
                                                 transaction.setMessage(messageBuilder.toString());
                                             } else {
-                                                transaction.setMessage(pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction completed successfully");
+                                            transaction.setMessage(pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction completed successfully");
                                             }
                                             
                                             logger.info("EFASHE transaction SUCCESS confirmed from poll - Status: '{}'", trimmedStatus);
@@ -1195,11 +1425,11 @@ public class EfashePaymentService {
             } else {
                 // For other services (AIRTIME, TV, MTN)
                 message = String.format(
-                    "You Paid %s, %s and your cash back is %s, Thanks for using POCHI App",
-                    serviceName,
-                    amount,
-                    cashbackAmount
-                );
+                "You Paid %s, %s and your cash back is %s, Thanks for using POCHI App",
+                serviceName,
+                amount,
+                cashbackAmount
+            );
             }
             
             // Use the same phone format as PaymentService (12 digits with 250)

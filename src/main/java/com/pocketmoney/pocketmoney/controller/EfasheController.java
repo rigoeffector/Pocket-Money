@@ -2,6 +2,7 @@ package com.pocketmoney.pocketmoney.controller;
 
 import com.pocketmoney.pocketmoney.dto.ApiResponse;
 import com.pocketmoney.pocketmoney.dto.EfasheInitiateRequest;
+import com.pocketmoney.pocketmoney.dto.EfasheInitiateForOtherRequest;
 import com.pocketmoney.pocketmoney.dto.EfasheInitiateResponse;
 import com.pocketmoney.pocketmoney.dto.EfasheStatusResponse;
 import com.pocketmoney.pocketmoney.dto.EfasheTransactionResponse;
@@ -31,7 +32,7 @@ public class EfasheController {
     }
 
     /**
-     * Initiate EFASHE payment with MoPay (Admin only)
+     * Initiate EFASHE payment with MoPay
      * POST /api/efashe/initiate
      */
     @PostMapping("/initiate")
@@ -42,6 +43,35 @@ public class EfasheController {
             return ResponseEntity.ok(ApiResponse.success("EFASHE payment initiated successfully", response));
         } catch (RuntimeException e) {
             logger.error("Error initiating EFASHE payment: ", e);
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    /**
+     * Initiate EFASHE payment for others (buying airtime for another person)
+     * POST /api/efashe/initiate-for-other
+     * 
+     * This endpoint allows buying airtime for another person:
+     * - phone: used for MoPay debit (the person paying)
+     * - anotherPhoneNumber: used for EFASHE validate (the person receiving airtime)
+     * 
+     * Only works for AIRTIME service type
+     */
+    @PostMapping("/initiate-for-other")
+    public ResponseEntity<ApiResponse<EfasheInitiateResponse>> initiatePaymentForOther(
+            @Valid @RequestBody EfasheInitiateForOtherRequest request) {
+        try {
+            // Validate that service type is AIRTIME
+            if (request.getServiceType() != EfasheServiceType.AIRTIME) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                        .body(ApiResponse.error("This endpoint only supports AIRTIME service type"));
+            }
+            
+            EfasheInitiateResponse response = efashePaymentService.initiatePaymentForOther(request);
+            return ResponseEntity.ok(ApiResponse.success("EFASHE payment initiated successfully for other person", response));
+        } catch (RuntimeException e) {
+            logger.error("Error initiating EFASHE payment for other: ", e);
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.error(e.getMessage()));
         }
