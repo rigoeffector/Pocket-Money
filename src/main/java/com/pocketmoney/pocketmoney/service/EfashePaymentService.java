@@ -323,6 +323,8 @@ public class EfashePaymentService {
         // Include customer account name from validate response
         response.setCustomerAccountName(customerAccountName);
         response.setMoPayResponse(moPayResponse);
+        // Include complete EFASHE validate response
+        response.setEfasheValidateResponse(validateResponse);
         // Return normalized phone numbers in response (12 digits with 250 prefix)
         response.setFullAmountPhone(normalizedFullAmountPhone);
         response.setCashbackPhone(normalizePhoneTo12Digits(settingsResponse.getCashbackPhoneNumber()));
@@ -553,6 +555,8 @@ public class EfashePaymentService {
         response.setCustomerPhone(normalizedPayerPhone); // Payer phone in response
         response.setCustomerAccountName(customerAccountName); // Recipient name
         response.setMoPayResponse(moPayResponse);
+        // Include complete EFASHE validate response
+        response.setEfasheValidateResponse(validateResponse);
         response.setFullAmountPhone(normalizedFullAmountPhone);
         response.setCashbackPhone(normalizePhoneTo12Digits(settingsResponse.getCashbackPhoneNumber()));
         response.setCustomerCashbackAmount(customerCashbackAmount);
@@ -1569,6 +1573,10 @@ public class EfashePaymentService {
             queryBuilder.append("AND t.createdAt <= :toDate ");
         }
         
+        // Exclude PENDING transactions - only show SUCCESS or FAILED
+        // Exclude if MoPay status is NULL or PENDING (transaction still in progress)
+        queryBuilder.append("AND t.mopayStatus IS NOT NULL AND t.mopayStatus != 'PENDING' ");
+        
         queryBuilder.append("ORDER BY t.createdAt DESC");
         
         // Create query
@@ -1604,6 +1612,10 @@ public class EfashePaymentService {
         if (toDate != null) {
             countQueryBuilder.append("AND t.createdAt <= :toDate ");
         }
+        
+        // Exclude PENDING transactions - only show SUCCESS or FAILED
+        // Exclude if MoPay status is NULL or PENDING (transaction still in progress)
+        countQueryBuilder.append("AND t.mopayStatus IS NOT NULL AND t.mopayStatus != 'PENDING' ");
         
         Query countQuery = entityManager.createQuery(countQueryBuilder.toString(), Long.class);
         

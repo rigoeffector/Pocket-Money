@@ -13,6 +13,7 @@ public class EfasheInitiateResponse {
     private String customerPhone;
     private String customerAccountName; // Customer account name from validate (e.g., "MUHINZI ANDRE" for electricity, TIN owner for RRA)
     private MoPayResponse moPayResponse;
+    private EfasheValidateResponse efasheValidateResponse; // Complete EFASHE validate response
     private String fullAmountPhone;
     private String cashbackPhone;
     private BigDecimal customerCashbackAmount;
