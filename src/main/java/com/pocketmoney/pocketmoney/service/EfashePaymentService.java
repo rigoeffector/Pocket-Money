@@ -441,23 +441,54 @@ public class EfashePaymentService {
                             transaction.setPollEndpoint(executeResponse.getPollEndpoint());
                             transaction.setRetryAfterSecs(executeResponse.getRetryAfterSecs());
                             
-                            // For ELECTRICITY service, extract and store token information if available
+                            // For ELECTRICITY service, extract and store token and KWH information if available
                             if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
                                 String token = executeResponse.getToken();
-                                if (token != null && !token.isEmpty()) {
-                                    // Store token in message field (since we don't have a separate token field)
-                                    // Token will be included in WhatsApp message
-                                    String existingMessage = executeResponse.getMessage() != null ? executeResponse.getMessage() : "";
-                                    String messageWithToken = existingMessage + (existingMessage.isEmpty() ? "" : " | ") + "Token: " + token;
-                                    transaction.setMessage(messageWithToken);
-                                    logger.info("ELECTRICITY service - Token received: {}", token);
-                                } else {
-                                    // Check if token is in message
-                                    if (executeResponse.getMessage() != null && executeResponse.getMessage().contains("token")) {
-                                        logger.info("ELECTRICITY service - Token information may be in message: {}", executeResponse.getMessage());
+                                String kwh = null;
+                                
+                                // Try to extract KWH from extraInfo if available
+                                if (executeResponse.getExtraInfo() != null) {
+                                    try {
+                                        // extraInfo might be a Map or JSON object
+                                        if (executeResponse.getExtraInfo() instanceof java.util.Map) {
+                                            @SuppressWarnings("unchecked")
+                                            java.util.Map<String, Object> extraInfoMap = (java.util.Map<String, Object>) executeResponse.getExtraInfo();
+                                            if (extraInfoMap.containsKey("kwh") || extraInfoMap.containsKey("KWH") || extraInfoMap.containsKey("kWh")) {
+                                                Object kwhObj = extraInfoMap.getOrDefault("kwh", extraInfoMap.getOrDefault("KWH", extraInfoMap.get("kWh")));
+                                                if (kwhObj != null) {
+                                                    kwh = kwhObj.toString();
+                                                    logger.info("ELECTRICITY service - KWH extracted from extraInfo: {}", kwh);
+                                                }
+                                            }
+                                        }
+                                    } catch (Exception e) {
+                                        logger.debug("Error extracting KWH from extraInfo: {}", e.getMessage());
                                     }
-                                    transaction.setMessage(executeResponse.getMessage());
                                 }
+                                
+                                // Build message with token and KWH
+                                String existingMessage = executeResponse.getMessage() != null ? executeResponse.getMessage() : "";
+                                StringBuilder messageBuilder = new StringBuilder(existingMessage);
+                                
+                                if (token != null && !token.isEmpty()) {
+                                    if (messageBuilder.length() > 0) {
+                                        messageBuilder.append(" | ");
+                                    }
+                                    messageBuilder.append("Token: ").append(token);
+                                    logger.info("ELECTRICITY service - Token received: {}", token);
+                                }
+                                
+                                if (kwh != null && !kwh.isEmpty()) {
+                                    if (messageBuilder.length() > 0) {
+                                        messageBuilder.append(" | ");
+                                    }
+                                    messageBuilder.append("KWH: ").append(kwh);
+                                    logger.info("ELECTRICITY service - KWH received: {}", kwh);
+                                }
+                                
+                                transaction.setMessage(messageBuilder.toString());
+                            } else {
+                                transaction.setMessage(executeResponse.getMessage());
                             }
                             
                             // If /vend/execute returns HTTP 200 or 202, set status to SUCCESS immediately
@@ -525,25 +556,51 @@ public class EfashePaymentService {
                                         if (trimmedStatus != null && "SUCCESS".equalsIgnoreCase(trimmedStatus)) {
                                             transaction.setEfasheStatus("SUCCESS");
                                             
-                                            // For ELECTRICITY service, extract and store token information if available
+                                            // For ELECTRICITY service, extract and store token and KWH information if available
                                             if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
                                                 String token = pollResponse.getToken();
                                                 String pollMessage = pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction completed successfully";
+                                                String kwh = null;
                                                 
-                                                if (token != null && !token.isEmpty()) {
-                                                    // Store token in message field
-                                                    String messageWithToken = pollMessage + " | Token: " + token;
-                                                    transaction.setMessage(messageWithToken);
-                                                    logger.info("ELECTRICITY service - Token received from poll: {}", token);
-                                                } else {
-                                                    // Check if token is in message
-                                                    if (pollMessage != null && pollMessage.toLowerCase().contains("token")) {
-                                                        logger.info("ELECTRICITY service - Token information may be in poll message: {}", pollMessage);
-                                                        transaction.setMessage(pollMessage);
-                                                    } else {
-                                                        transaction.setMessage(pollMessage);
+                                                // Try to extract KWH from extraInfo if available
+                                                if (pollResponse.getExtraInfo() != null) {
+                                                    try {
+                                                        if (pollResponse.getExtraInfo() instanceof java.util.Map) {
+                                                            @SuppressWarnings("unchecked")
+                                                            java.util.Map<String, Object> extraInfoMap = (java.util.Map<String, Object>) pollResponse.getExtraInfo();
+                                                            if (extraInfoMap.containsKey("kwh") || extraInfoMap.containsKey("KWH") || extraInfoMap.containsKey("kWh")) {
+                                                                Object kwhObj = extraInfoMap.getOrDefault("kwh", extraInfoMap.getOrDefault("KWH", extraInfoMap.get("kWh")));
+                                                                if (kwhObj != null) {
+                                                                    kwh = kwhObj.toString();
+                                                                    logger.info("ELECTRICITY service - KWH extracted from poll extraInfo: {}", kwh);
+                                                                }
+                                                            }
+                                                        }
+                                                    } catch (Exception e) {
+                                                        logger.debug("Error extracting KWH from poll extraInfo: {}", e.getMessage());
                                                     }
                                                 }
+                                                
+                                                // Build message with token and KWH
+                                                StringBuilder messageBuilder = new StringBuilder(pollMessage);
+                                                
+                                                if (token != null && !token.isEmpty()) {
+                                                    if (messageBuilder.length() > 0) {
+                                                        messageBuilder.append(" | ");
+                                                    }
+                                                    messageBuilder.append("Token: ").append(token);
+                                                    logger.info("ELECTRICITY service - Token received from poll: {}", token);
+                                                }
+                                                
+                                                if (kwh != null && !kwh.isEmpty()) {
+                                                    if (messageBuilder.length() > 0) {
+                                                        messageBuilder.append(" | ");
+                                                    }
+                                                    messageBuilder.append("KWH: ").append(kwh);
+                                                    logger.info("ELECTRICITY service - KWH received from poll: {}", kwh);
+                                                }
+                                                
+                                                transaction.setMessage(messageBuilder.toString());
                                             } else {
                                                 transaction.setMessage(pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction completed successfully");
                                             }
@@ -1376,6 +1433,10 @@ public class EfashePaymentService {
         response.setServiceType(transaction.getServiceType());
         response.setCustomerPhone(transaction.getCustomerPhone());
         response.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
+        
+        // Set customer account name (available for all service types)
+        response.setCustomerAccountName(transaction.getCustomerAccountName());
+        
         response.setAmount(transaction.getAmount());
         response.setCurrency(transaction.getCurrency());
         response.setTrxId(transaction.getTrxId());
@@ -1393,9 +1454,73 @@ public class EfashePaymentService {
         response.setFullAmountPhone(transaction.getFullAmountPhone());
         response.setCashbackPhone(transaction.getCashbackPhone());
         response.setCashbackSent(transaction.getCashbackSent());
+        
+        // Extract service-specific information
+        if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
+            // Extract token and KWH from message for ELECTRICITY
+            String message = transaction.getMessage();
+            if (message != null) {
+                // Extract token (format: "Token: XXXXX" or "token: XXXXX")
+                if (message.contains("Token:") || message.contains("token:")) {
+                    String[] tokenParts = message.split("(?i)Token:");
+                    if (tokenParts.length > 1) {
+                        String tokenValue = tokenParts[1].trim();
+                        // Remove any additional text after token (e.g., " | " separator)
+                        if (tokenValue.contains(" | ")) {
+                            tokenValue = tokenValue.split(" \\| ")[0];
+                        }
+                        response.setToken(tokenValue);
+                    }
+                }
+                
+                // Try to extract KWH from message (common patterns: "KWH: XX", "kWh: XX", "XX KWH")
+                // KWH might be in the message or execute response
+                if (message.toLowerCase().contains("kwh") || message.toLowerCase().contains("kwh")) {
+                    // Try to extract KWH value
+                    String kwhValue = extractKwhFromMessage(message);
+                    if (kwhValue != null && !kwhValue.isEmpty()) {
+                        response.setKwh(kwhValue);
+                    }
+                }
+            }
+        } else if (transaction.getServiceType() == EfasheServiceType.TV) {
+            // For TV, decoder number is the customer account number
+            response.setDecoderNumber(transaction.getCustomerAccountNumber());
+        }
+        
         response.setCreatedAt(transaction.getCreatedAt());
         response.setUpdatedAt(transaction.getUpdatedAt());
         return response;
+    }
+    
+    /**
+     * Extract KWH value from message string
+     * Looks for patterns like "KWH: 50", "50 KWH", "kWh: 50", etc.
+     */
+    private String extractKwhFromMessage(String message) {
+        if (message == null || message.isEmpty()) {
+            return null;
+        }
+        
+        try {
+            // Pattern 1: "KWH: XX" or "kWh: XX"
+            java.util.regex.Pattern pattern1 = java.util.regex.Pattern.compile("(?i)kwh[\\s:]+(\\d+(?:\\.\\d+)?)");
+            java.util.regex.Matcher matcher1 = pattern1.matcher(message);
+            if (matcher1.find()) {
+                return matcher1.group(1);
+            }
+            
+            // Pattern 2: "XX KWH" or "XX kWh"
+            java.util.regex.Pattern pattern2 = java.util.regex.Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*(?i)kwh");
+            java.util.regex.Matcher matcher2 = pattern2.matcher(message);
+            if (matcher2.find()) {
+                return matcher2.group(1);
+            }
+        } catch (Exception e) {
+            logger.debug("Error extracting KWH from message: {}", e.getMessage());
+        }
+        
+        return null;
     }
 }
 

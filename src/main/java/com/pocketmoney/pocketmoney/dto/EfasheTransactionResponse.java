@@ -18,6 +18,7 @@ public class EfasheTransactionResponse {
     private EfasheServiceType serviceType;
     private String customerPhone;
     private String customerAccountNumber;
+    private String customerAccountName; // Customer account name (e.g., "MUHINZI ANDRE" for electricity, TIN owner for RRA)
     private BigDecimal amount;
     private String currency;
     private String trxId;
@@ -35,6 +36,12 @@ public class EfasheTransactionResponse {
     private String fullAmountPhone;
     private String cashbackPhone;
     private Boolean cashbackSent;
+    
+    // Service-specific information
+    private String token; // Token number for ELECTRICITY
+    private String kwh; // KWH units for ELECTRICITY
+    private String decoderNumber; // Decoder number for TV (same as customerAccountNumber)
+    
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }
