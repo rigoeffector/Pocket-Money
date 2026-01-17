@@ -1,6 +1,5 @@
 package com.pocketmoney.pocketmoney.service;
 
-import com.pocketmoney.pocketmoney.dto.SmsRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -8,7 +7,9 @@ import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @Service
 public class MessagingService {
@@ -18,7 +19,7 @@ public class MessagingService {
     @Value("${sms.api.url:https://swiftqom.io/api/dev}")
     private String smsApiUrl;
 
-    @Value("${sms.api.key:}")
+    @Value("${sms.api.key:SWQRyoqZr2FhTYpll3m7etmKLhgrDTuUEGLDHjWgx5CSV2DFFavXjQODVzBhqjqL}")
     private String smsApiKey;
 
     private final RestTemplate restTemplate;
@@ -27,51 +28,72 @@ public class MessagingService {
         this.restTemplate = restTemplate;
     }
 
+    /**
+     * Send SMS to a single phone number using Swift.com API
+     * Uses the same pattern as the example SmsService
+     */
     public void sendSms(String message, String phoneNumber) {
-        sendBulkSms(message, java.util.List.of(phoneNumber));
+        if (phoneNumber == null || phoneNumber.trim().isEmpty() || message == null || message.trim().isEmpty()) {
+            logger.warn("Invalid SMS parameters: phoneNumber={}, message={}", phoneNumber, message);
+            return;
+        }
+
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.set("X-API-KEY", smsApiKey);
+            headers.setContentType(MediaType.APPLICATION_JSON);
+
+            Map<String, String> body = new HashMap<>();
+            body.put("sender_id", "swiftqom");
+            // body.put("sender_id", "Besoft");
+            body.put("phone", phoneNumber.trim());
+            body.put("message", message.trim());
+
+            HttpEntity<Map<String, String>> request = new HttpEntity<>(body, headers);
+
+            logger.info("Sending SMS to {} via Swift.com API", phoneNumber);
+            logger.debug("SMS URL: {}, Message length: {}", smsApiUrl + "/api/v1/send_sms", message.length());
+
+            ResponseEntity<Map<String, Object>> response = restTemplate.exchange(
+                    smsApiUrl + "/api/v1/send_sms",
+                    HttpMethod.POST,
+                    request,
+                    (Class<Map<String, Object>>)(Class<?>)Map.class
+            );
+
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                logger.info("SMS sent successfully via Swift.com to {}. Response: {}", phoneNumber, response.getBody());
+            } else {
+                logger.error("Failed to send SMS via Swift.com to {}: Status={}", phoneNumber, response.getStatusCode());
+            }
+
+        } catch (Exception e) {
+            logger.error("Error sending SMS via Swift.com API to {}: {}", phoneNumber, e.getMessage(), e);
+            // Don't throw exception - SMS failure shouldn't break the main flow
+        }
     }
 
+    /**
+     * Send bulk SMS to multiple phone numbers
+     * For now, sends SMS individually to each phone number
+     * (Can be optimized later if Swift.com supports true bulk SMS endpoint)
+     */
     public void sendBulkSms(String message, List<String> phoneNumbers) {
         if (phoneNumbers == null || phoneNumbers.isEmpty()) {
             logger.warn("No phone numbers provided for SMS");
             return;
         }
 
-        try {
-            // Use SwiftQOM API endpoint for SMS
-            String url = smsApiUrl + "/sms/bulk-json";
-            
-            SmsRequest request = new SmsRequest();
-            request.setMessage(message);
-            request.setPhoneNumbers(phoneNumbers);
+        logger.info("Sending bulk SMS to {} recipient(s) via Swift.com API", phoneNumbers.size());
 
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            // Add API key to headers
-            if (smsApiKey != null && !smsApiKey.trim().isEmpty()) {
-                headers.set("X-API-Key", smsApiKey);
-                // Also try Authorization header as alternative
-                headers.set("Authorization", "Bearer " + smsApiKey);
+        // Send SMS to each phone number individually
+        for (String phoneNumber : phoneNumbers) {
+            if (phoneNumber != null && !phoneNumber.trim().isEmpty()) {
+                sendSms(message, phoneNumber);
             }
-
-            HttpEntity<SmsRequest> entity = new HttpEntity<>(request, headers);
-
-            logger.info("Sending SMS to {} recipient(s) via SwiftQOM API", phoneNumbers.size());
-            logger.debug("SMS URL: {}, Message length: {}, PhoneNumbers: {}", url, message.length(), phoneNumbers);
-            
-            ResponseEntity<String> response = restTemplate.exchange(
-                    url,
-                    HttpMethod.POST,
-                    entity,
-                    String.class
-            );
-            
-            logger.info("SMS sent successfully via SwiftQOM. Response status: {}", response.getStatusCode());
-            logger.debug("SMS response body: {}", response.getBody());
-        } catch (Exception e) {
-            logger.error("Error sending SMS via SwiftQOM API: ", e);
-            // Don't throw exception - SMS failure shouldn't break the main flow
         }
+
+        logger.info("Completed bulk SMS sending to {} recipient(s)", phoneNumbers.size());
     }
 }
 

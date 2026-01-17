@@ -320,6 +320,8 @@ public class EfashePaymentService {
         response.setAmount(amount);
         // Set normalized phone as string in response
         response.setCustomerPhone(normalizedCustomerPhone);
+        // Include customer account name from validate response
+        response.setCustomerAccountName(customerAccountName);
         response.setMoPayResponse(moPayResponse);
         // Return normalized phone numbers in response (12 digits with 250 prefix)
         response.setFullAmountPhone(normalizedFullAmountPhone);

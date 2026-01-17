@@ -11,6 +11,7 @@ public class EfasheInitiateResponse {
     private EfasheServiceType serviceType;
     private BigDecimal amount;
     private String customerPhone;
+    private String customerAccountName; // Customer account name from validate (e.g., "MUHINZI ANDRE" for electricity, TIN owner for RRA)
     private MoPayResponse moPayResponse;
     private String fullAmountPhone;
     private String cashbackPhone;
