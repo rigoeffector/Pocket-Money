@@ -209,8 +209,8 @@ public class EfashePaymentService {
         // Customer gets cashback back and Bepay phone gets their share
         // Agent Commission is included in the full amount phone's portion
             fullAmountPhoneReceives = amount.subtract(customerCashbackAmount)
-                .subtract(besoftShareAmount)
-                .setScale(0, RoundingMode.HALF_UP); // Round to whole number
+            .subtract(besoftShareAmount)
+            .setScale(0, RoundingMode.HALF_UP); // Round to whole number
 
         logger.info("Amount breakdown - Total: {}, Customer Cashback: {}, Bepay Share: {}, Agent Commission: {}, Full Amount Phone (remaining after cashback and bepay): {}",
             amount, customerCashbackAmount, besoftShareAmount, agentCommissionAmount, fullAmountPhoneReceives);
@@ -660,10 +660,12 @@ public class EfashePaymentService {
         EfasheTransaction transaction = transactionOpt
             .orElseThrow(() -> new RuntimeException("EFASHE transaction not found with ID: " + transactionId + " (tried both EFASHE and MoPay IDs)"));
         
-        logger.info("Found existing transaction - ID: {}, EFASHE Transaction ID: {}, MoPay Transaction ID: {}, Current MoPay Status: {}, Current EFASHE Status: {}, Initial MoPay Status: {}, Initial EFASHE Status: {}", 
+        logger.info("Found existing transaction - ID: {}, EFASHE Transaction ID: {}, MoPay Transaction ID: {}, Current MoPay Status: {}, Current EFASHE Status: {}, Initial MoPay Status: {}, Initial EFASHE Status: {}, PollEndpoint: {}, RetryAfterSecs: {}", 
             transaction.getId(), transaction.getTransactionId(), transaction.getMopayTransactionId(), 
             transaction.getMopayStatus(), transaction.getEfasheStatus(), 
-            transaction.getInitialMopayStatus(), transaction.getInitialEfasheStatus());
+            transaction.getInitialMopayStatus(), transaction.getInitialEfasheStatus(),
+            transaction.getPollEndpoint() != null ? transaction.getPollEndpoint() : "NULL",
+            transaction.getRetryAfterSecs());
         
         // Use the actual MoPay transaction ID from the transaction record for checking MoPay status
         // The transactionId parameter might be either EFASHE or MoPay ID, but we need the actual MoPay ID for the API call
@@ -698,7 +700,33 @@ public class EfashePaymentService {
             boolean isSuccess = (statusCode != null && (statusCode == 200 || statusCode == 201)) 
                 || (moPayResponse.getSuccess() != null && moPayResponse.getSuccess());
             
-            if (isSuccess && !"SUCCESS".equalsIgnoreCase(transaction.getEfasheStatus())) {
+            // Log current state for debugging
+            logger.info("Status check decision - MoPay SUCCESS: {}, EFASHE Status: {}, PollEndpoint: {}, CashbackSent: {}", 
+                isSuccess, transaction.getEfasheStatus(), 
+                transaction.getPollEndpoint() != null ? transaction.getPollEndpoint() : "NULL",
+                transaction.getCashbackSent());
+            
+            // If EFASHE is already FAILED with a pollEndpoint and MoPay is SUCCESS, try polling instead of executing
+            if (isSuccess && "FAILED".equalsIgnoreCase(transaction.getEfasheStatus()) 
+                && transaction.getPollEndpoint() != null 
+                && !transaction.getPollEndpoint().isEmpty()) {
+                
+                logger.info("MoPay is SUCCESS and EFASHE is FAILED with pollEndpoint - Retrying automatic polling instead of executing - PollEndpoint: {}", 
+                    transaction.getPollEndpoint());
+                
+                Integer retryAfterSecs = transaction.getRetryAfterSecs() != null && transaction.getRetryAfterSecs() > 0 
+                    ? transaction.getRetryAfterSecs() : 10;
+                
+                boolean pollSuccess = pollUntilSuccess(transaction, transaction.getPollEndpoint(), retryAfterSecs);
+                
+                if (pollSuccess) {
+                    logger.info("✅ Retry polling completed - Transaction ID: {}, EFASHE Status: SUCCESS", 
+                        transaction.getTransactionId());
+                } else {
+                    logger.warn("⚠️ Retry polling completed but status is still not SUCCESS - Transaction ID: {}, Status: {}", 
+                        transaction.getTransactionId(), transaction.getEfasheStatus());
+                }
+            } else if (isSuccess && !"SUCCESS".equalsIgnoreCase(transaction.getEfasheStatus())) {
                 logger.info("MoPay transaction SUCCESS detected (status: {}, success: {}). Triggering EFASHE execute...", 
                     statusCode, moPayResponse.getSuccess());
                 
@@ -900,6 +928,31 @@ public class EfashePaymentService {
                     logger.error("Error executing EFASHE transaction after MoPay SUCCESS: ", e);
                     e.printStackTrace();
                 }
+                
+                // After execute attempt (success or failure), check if we need to retry polling for FAILED status
+                // This handles cases where execute failed but we have a pollEndpoint to retry
+                // Note: We retry even if cashback is sent, because EFASHE might have failed after cashback was sent
+                if ("FAILED".equalsIgnoreCase(transaction.getEfasheStatus()) 
+                    && transaction.getPollEndpoint() != null 
+                    && !transaction.getPollEndpoint().isEmpty()
+                    && isSuccess) { // Only retry when MoPay is SUCCESS
+                    
+                    logger.info("MoPay is SUCCESS and EFASHE is FAILED after execute attempt - Retrying automatic polling - PollEndpoint: {}", 
+                        transaction.getPollEndpoint());
+                    
+                    Integer retryAfterSecs = transaction.getRetryAfterSecs() != null && transaction.getRetryAfterSecs() > 0 
+                        ? transaction.getRetryAfterSecs() : 10;
+                    
+                    boolean pollSuccess = pollUntilSuccess(transaction, transaction.getPollEndpoint(), retryAfterSecs);
+                    
+                    if (pollSuccess) {
+                        logger.info("✅ Retry polling completed after execute failure - Transaction ID: {}, EFASHE Status: SUCCESS", 
+                            transaction.getTransactionId());
+                    } else {
+                        logger.warn("⚠️ Retry polling completed but status is still not SUCCESS - Transaction ID: {}, Status: {}", 
+                            transaction.getTransactionId(), transaction.getEfasheStatus());
+                    }
+                }
             } else {
                 logger.info("MoPay transaction not yet SUCCESS or already processed - Status: {}, EFASHE Status: {}", 
                     statusCode, transaction.getEfasheStatus());
@@ -907,10 +960,10 @@ public class EfashePaymentService {
                 // If EFASHE is PENDING with pollEndpoint and MoPay is SUCCESS, use automatic retry polling
                 // NOTE: If /vend/execute returned HTTP 200, status is already SUCCESS, so we don't poll
                 // Only poll if status is still PENDING and we have a pollEndpoint
+                // Note: We retry even if cashback is sent, because EFASHE status might still be PENDING
                 if ("PENDING".equalsIgnoreCase(transaction.getEfasheStatus()) 
                     && transaction.getPollEndpoint() != null 
                     && !transaction.getPollEndpoint().isEmpty()
-                    && (transaction.getCashbackSent() == null || !transaction.getCashbackSent())
                     && isSuccess) { // Only retry when MoPay is SUCCESS
                     
                     logger.info("MoPay is SUCCESS and EFASHE is PENDING - Starting automatic retry polling - PollEndpoint: {}", 
@@ -937,10 +990,10 @@ public class EfashePaymentService {
                 
                 // If EFASHE is FAILED with pollEndpoint and MoPay is SUCCESS, retry polling
                 // This handles cases where polling failed but the pollEndpoint is still valid
+                // Note: We retry even if cashback is sent, because EFASHE might have failed after cashback was sent
                 if ("FAILED".equalsIgnoreCase(transaction.getEfasheStatus()) 
                     && transaction.getPollEndpoint() != null 
                     && !transaction.getPollEndpoint().isEmpty()
-                    && (transaction.getCashbackSent() == null || !transaction.getCashbackSent())
                     && isSuccess) { // Only retry when MoPay is SUCCESS
                     
                     logger.info("MoPay is SUCCESS and EFASHE is FAILED - Retrying automatic polling - PollEndpoint: {}", 
@@ -1636,7 +1689,7 @@ public class EfashePaymentService {
                             "Bepay-Efashe-%s You Paid %s RWF for %s%s. Your token is: %s. KWH: %s. Cashback: %s RWF. Thanks for using Bepay POCHI App",
                             serviceName.toUpperCase(),
                             amount,
-                            serviceName,
+                serviceName,
                             ownerInfo,
                             tokenInfo,
                             kwhInfo,
@@ -1648,12 +1701,12 @@ public class EfashePaymentService {
                         message = String.format(
                             "Bepay-Efashe-%s You Paid %s RWF for %s%s. Your token is: %s. Cashback: %s RWF. Thanks for using Bepay POCHI App",
                             serviceName.toUpperCase(),
-                            amount,
+                amount,
                             serviceName,
                             ownerInfo,
                             tokenInfo,
-                            cashbackAmount
-                        );
+                cashbackAmount
+            );
                         logger.info("ELECTRICITY - WhatsApp/SMS message with token (KWH not available): {}", message);
                     }
                 } else {

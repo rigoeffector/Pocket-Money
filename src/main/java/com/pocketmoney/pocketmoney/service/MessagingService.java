@@ -39,10 +39,10 @@ public class MessagingService {
     private String besoftSender;
 
     // BEPAY SMS Configuration (for testing)
-    @Value("${sms.bepay.api.key:SWQcYaV1v5ZDPXlABkhvECKsiyskASwOk3gz6tUPoLarxpUcyeoUE5viI8U4pKJM}")
+    @Value("${sms.bepay.api.key:SWQj29yWXdjcjJMzhO3bkk6DNqxrpq6tJ9ZmB21SLZxGmuNhcPXIjVJSwlSeL4uD}")
     private String bepayApiKey;
 
-    @Value("${sms.bepay.sender.id:BEPAY}")
+    @Value("${sms.bepay.sender.id:besoftsms}")
     private String bepaySenderId;
 
     private final RestTemplate restTemplate;
