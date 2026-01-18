@@ -500,6 +500,7 @@ public class PdfExportService {
                 float currentY = pageHeight - margin;
                 
                 // Load and draw logo image (Top Right)
+                float logoY = pageHeight - margin; // Track logo Y position for stamp placement
                 try {
                     ClassPathResource logoResource = new ClassPathResource("images/LOGO.jpeg");
                     if (logoResource.exists()) {
@@ -513,10 +514,36 @@ public class PdfExportService {
                         
                         // Position logo at top right
                         float logoX = pageWidth - margin - logoWidth;
-                        float logoY = pageHeight - margin - logoHeight;
+                        logoY = pageHeight - margin - logoHeight;
                         
                         contentStream.drawImage(logoImage, logoX, logoY, logoWidth, logoHeight);
                         logger.info("Logo image added to PDF receipt - Size: {}x{}, Position: ({}, {})", logoWidth, logoHeight, logoX, logoY);
+                        
+                        // Load and draw stamp image (Below Logo, Top Right)
+                        try {
+                            ClassPathResource stampResource = new ClassPathResource("images/stamp.jpeg");
+                            if (stampResource.exists()) {
+                                InputStream stampInputStream = stampResource.getInputStream();
+                                PDImageXObject stampImage = PDImageXObject.createFromByteArray(document, stampInputStream.readAllBytes(), "STAMP");
+                                stampInputStream.close();
+                                
+                                // Stamp dimensions - scale to fit (max width 100, maintain aspect ratio)
+                                float stampWidth = 100;
+                                float stampHeight = (stampImage.getHeight() / stampImage.getWidth()) * stampWidth;
+                                
+                                // Position stamp below logo (same X alignment, with small gap)
+                                float stampX = logoX + (logoWidth - stampWidth) / 2; // Center stamp under logo
+                                float stampY = logoY - stampHeight - 5; // Position below logo with 5pt gap
+                                
+                                contentStream.drawImage(stampImage, stampX, stampY, stampWidth, stampHeight);
+                                logger.info("Stamp image added to PDF receipt - Size: {}x{}, Position: ({}, {})", stampWidth, stampHeight, stampX, stampY);
+                            } else {
+                                logger.warn("Stamp file not found at images/stamp.jpeg, skipping stamp");
+                            }
+                        } catch (Exception e) {
+                            logger.error("Error loading stamp image: ", e);
+                            // Continue without stamp if it fails to load
+                        }
                         
                         // Adjust currentY to account for logo height
                         currentY = logoY - 10; // Add some space below logo

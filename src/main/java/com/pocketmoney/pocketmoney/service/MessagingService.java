@@ -26,7 +26,7 @@ public class MessagingService {
     private String smsSenderId;
 
     // Bepay SMS Configuration (formerly BeSoft)
-    @Value("${sms.type:swiftqom}")
+    @Value("${sms.type:besoftsms}")
     private String smsType;
 
     @Value("${sms.type.password:}")
@@ -35,14 +35,14 @@ public class MessagingService {
     @Value("${sms.soft.url:http://api.rmlconnect.net:8080/bulksms/bulksms?type=0&dlr=1}")
     private String besoftSmsUrl;
 
-    @Value("${sms.sender:Bepay}")
+    @Value("${sms.sender:BEPAY}")
     private String besoftSender;
 
     // BEPAY SMS Configuration (for testing)
     @Value("${sms.bepay.api.key:SWQj29yWXdjcjJMzhO3bkk6DNqxrpq6tJ9ZmB21SLZxGmuNhcPXIjVJSwlSeL4uD}")
     private String bepayApiKey;
 
-    @Value("${sms.bepay.sender.id:besoftsms}")
+    @Value("${sms.bepay.sender.id:BEPAY}")
     private String bepaySenderId;
 
     private final RestTemplate restTemplate;
