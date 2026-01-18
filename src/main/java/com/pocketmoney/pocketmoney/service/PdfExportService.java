@@ -481,7 +481,7 @@ public class PdfExportService {
     }
     
     /**
-     * Generate PDF receipt for EFASHE transactions (RRA and TV only)
+     * Generate PDF receipt for EFASHE transactions (RRA, TV, and ELECTRICITY)
      * Format similar to invoice with company information, transaction details, and payment summary
      */
     public byte[] generateEfasheReceiptPdf(EfasheTransaction transaction) {
@@ -608,7 +608,7 @@ public class PdfExportService {
                 contentStream.beginText();
                 contentStream.setFont(PDType1Font.HELVETICA, 10);
                 contentStream.newLineAtOffset(margin, currentY);
-                contentStream.showText("TIN: " + tin);
+                contentStream.showText("Biller Number: " + tin);
                 contentStream.endText();
                 
                 currentY -= 14;
@@ -636,7 +636,7 @@ public class PdfExportService {
                 contentStream.beginText();
                 contentStream.setFont(PDType1Font.HELVETICA, 10);
                 contentStream.newLineAtOffset(margin, currentY);
-                contentStream.showText("Email: info@bepay.info");
+                contentStream.showText("Email: bepayapp@gmail.com");
                 contentStream.endText();
                 
                 currentY -= 14;
@@ -645,7 +645,7 @@ public class PdfExportService {
                 contentStream.beginText();
                 contentStream.setFont(PDType1Font.HELVETICA, 10);
                 contentStream.newLineAtOffset(margin, currentY);
-                contentStream.showText("Website: www.bepay.info");
+                contentStream.showText("Website: www.pochi.info");
                 contentStream.endText();
                 
                 currentY -= 14;
@@ -729,7 +729,14 @@ public class PdfExportService {
                 currentY -= 14;
                 
                 // Account/Meter Number Label
-                String accountLabel = transaction.getServiceType() == EfasheServiceType.RRA ? "TIN Number" : "Account/Decoder Number";
+                String accountLabel;
+                if (transaction.getServiceType() == EfasheServiceType.RRA) {
+                    accountLabel = "Biller Number";
+                } else if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
+                    accountLabel = "Meter Number";
+                } else {
+                    accountLabel = "Account/Decoder Number";
+                }
                 contentStream.beginText();
                 contentStream.setFont(PDType1Font.HELVETICA, 10);
                 contentStream.newLineAtOffset(margin, currentY);
@@ -737,6 +744,67 @@ public class PdfExportService {
                 contentStream.endText();
                 
                 currentY -= 14;
+                
+                // For ELECTRICITY, extract and display token and KWH if available
+                if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
+                    String message = transaction.getMessage();
+                    if (message != null && !message.trim().isEmpty()) {
+                        // Extract token from message (format: "Token: {token} | KWH: {kwh}")
+                        String token = null;
+                        String kwh = null;
+                        
+                        if (message.contains("Token:")) {
+                            String[] tokenParts = message.split("Token:");
+                            if (tokenParts.length > 1) {
+                                String tokenRaw = tokenParts[1].trim();
+                                if (tokenRaw.contains(" | ")) {
+                                    token = tokenRaw.split(" \\| ")[0].trim();
+                                } else if (tokenRaw.contains("KWH:")) {
+                                    token = tokenRaw.split("KWH:")[0].trim();
+                                } else {
+                                    token = tokenRaw.replaceAll("\\|", "").trim();
+                                }
+                            }
+                        }
+                        
+                        if (message.contains("KWH:")) {
+                            String[] kwhParts = message.split("KWH:");
+                            if (kwhParts.length > 1) {
+                                String kwhRaw = kwhParts[1].trim();
+                                if (kwhRaw.contains(" | ")) {
+                                    kwhRaw = kwhRaw.split(" \\| ")[0].trim();
+                                }
+                                // Format KWH to 1 decimal place
+                                try {
+                                    double kwhValue = Double.parseDouble(kwhRaw);
+                                    kwh = String.format("%.1f", kwhValue);
+                                } catch (NumberFormatException e) {
+                                    kwh = kwhRaw; // Use as-is if parsing fails
+                                }
+                            }
+                        }
+                        
+                        // Display Token if available
+                        if (token != null && !token.isEmpty()) {
+                            contentStream.beginText();
+                            contentStream.setFont(PDType1Font.HELVETICA_BOLD, 10);
+                            contentStream.newLineAtOffset(margin, currentY);
+                            contentStream.showText("Token: " + token);
+                            contentStream.endText();
+                            currentY -= 14;
+                        }
+                        
+                        // Display KWH if available
+                        if (kwh != null && !kwh.isEmpty()) {
+                            contentStream.beginText();
+                            contentStream.setFont(PDType1Font.HELVETICA, 10);
+                            contentStream.newLineAtOffset(margin, currentY);
+                            contentStream.showText("KWH: " + kwh);
+                            contentStream.endText();
+                            currentY -= 14;
+                        }
+                    }
+                }
                 
                 // Amount Paid
                 String amountStr = formatCurrency(transaction.getAmount() != null ? transaction.getAmount() : BigDecimal.ZERO);
@@ -779,7 +847,7 @@ public class PdfExportService {
                 contentStream.beginText();
                 contentStream.setFont(PDType1Font.HELVETICA, 10);
                 contentStream.newLineAtOffset(margin, currentY);
-                contentStream.showText("Thank you for using BEPAY Solutions");
+                contentStream.showText("Thank you for using BEPAY POCHI Solutions");
                 contentStream.endText();
                 
                 currentY -= 12;
@@ -787,7 +855,7 @@ public class PdfExportService {
                 contentStream.beginText();
                 contentStream.setFont(PDType1Font.HELVETICA, 9);
                 contentStream.newLineAtOffset(margin, currentY);
-                contentStream.showText("www.bepay.info | Support: +250 788 319 169");
+                contentStream.showText("www.pochi.info | Support: +250 794 201 373 | only WhatsApp: +250 788 319 169");
                 contentStream.endText();
                 
             } finally {

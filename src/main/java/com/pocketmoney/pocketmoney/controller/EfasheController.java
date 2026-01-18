@@ -200,11 +200,11 @@ public class EfasheController {
     }
 
     /**
-     * Export PDF receipt for successful RRA or TV transactions
+     * Export PDF receipt for successful RRA, TV, or ELECTRICITY transactions
      * GET /api/efashe/receipt/{transactionId}
      * 
      * Only works for:
-     *   - RRA and TV service types
+     *   - RRA, TV, and ELECTRICITY service types
      *   - SUCCESS transactions (both MoPay and EFASHE status must be SUCCESS)
      */
     @GetMapping("/receipt/{transactionId}")
@@ -219,9 +219,10 @@ public class EfasheController {
             
             var transaction = transactionOpt.get();
             
-            // Validate service type - only RRA and TV are allowed
+            // Validate service type - only RRA, TV, and ELECTRICITY are allowed
             if (transaction.getServiceType() != EfasheServiceType.RRA && 
-                transaction.getServiceType() != EfasheServiceType.TV) {
+                transaction.getServiceType() != EfasheServiceType.TV &&
+                transaction.getServiceType() != EfasheServiceType.ELECTRICITY) {
                 return ResponseEntity.status(HttpStatus.BAD_REQUEST).build();
             }
             
