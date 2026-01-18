@@ -12,7 +12,8 @@ import java.math.BigDecimal;
 public class EfasheInitiateRequest {
     // transaction_id is generated automatically - no need to provide
     
-    @NotNull(message = "Amount is required")
+    // Amount is optional for RRA service type, required for all other services
+    // Validation is handled in service layer based on serviceType
     @Positive(message = "Amount must be positive")
     private BigDecimal amount;
     

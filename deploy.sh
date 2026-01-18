@@ -263,7 +263,7 @@ apply_migrations() {
             
             echo ''
             echo 'Checking efashe_transactions table columns:'
-            psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c \"\\d efashe_transactions\" | grep -E '(full_amount_transaction_id|customer_cashback_transaction_id|besoft_share_transaction_id|initial_mopay_status|initial_efashe_status)' || echo 'Columns verification completed'
+            psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c \"\\d efashe_transactions\" | grep -E '(full_amount_transaction_id|customer_cashback_transaction_id|besoft_share_transaction_id|initial_mopay_status|initial_efashe_status|customer_account_name|validated|payment_mode|callback_url)' || echo 'Columns verification completed'
             
             echo ''
             echo 'Checking payment_categories for EFASHE:'

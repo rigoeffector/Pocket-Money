@@ -35,6 +35,7 @@ public class EfashePaymentService {
     private final EfasheApiService efasheApiService;
     private final EfasheTransactionRepository efasheTransactionRepository;
     private final WhatsAppService whatsAppService;
+    private final MessagingService messagingService;
     private final UserRepository userRepository;
     private final EntityManager entityManager;
 
@@ -43,6 +44,7 @@ public class EfashePaymentService {
                                  EfasheApiService efasheApiService,
                                  EfasheTransactionRepository efasheTransactionRepository,
                                  WhatsAppService whatsAppService,
+                                 MessagingService messagingService,
                                  UserRepository userRepository,
                                  EntityManager entityManager) {
         this.efasheSettingsService = efasheSettingsService;
@@ -50,6 +52,7 @@ public class EfashePaymentService {
         this.efasheApiService = efasheApiService;
         this.efasheTransactionRepository = efasheTransactionRepository;
         this.whatsAppService = whatsAppService;
+        this.messagingService = messagingService;
         this.userRepository = userRepository;
         this.entityManager = entityManager;
     }
@@ -57,6 +60,17 @@ public class EfashePaymentService {
     public EfasheInitiateResponse initiatePayment(EfasheInitiateRequest request) {
         logger.info("Initiating EFASHE payment - Service: {}, Amount: {}, Phone: {}", 
             request.getServiceType(), request.getAmount(), request.getPhone());
+
+        // Validate amount based on service type
+        // Amount is optional for RRA (will be taken from vendMin in validate response), required for all other services
+        if (request.getServiceType() != EfasheServiceType.RRA) {
+            if (request.getAmount() == null) {
+                throw new RuntimeException("Amount is required for service type: " + request.getServiceType());
+            }
+            if (request.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
+                throw new RuntimeException("Amount must be positive for service type: " + request.getServiceType());
+            }
+        }
 
         // Get EFASHE settings for the service type
         EfasheSettingsResponse settingsResponse = efasheSettingsService.getSettingsByServiceType(request.getServiceType());
@@ -121,6 +135,17 @@ public class EfashePaymentService {
             logger.info("Customer Account Name from validate: {}", customerAccountName);
         }
         
+        // For RRA service type, always use vendMin from validate response (ignore amount from request)
+        if (request.getServiceType() == EfasheServiceType.RRA) {
+            if (validateResponse.getVendMin() != null) {
+                amount = BigDecimal.valueOf(validateResponse.getVendMin());
+                logger.info("RRA service - Using vendMin from validate response: {} (ignoring amount from request: {})", 
+                    amount, request.getAmount());
+            } else {
+                throw new RuntimeException("RRA service requires vendMin from validate response, but it is not available");
+            }
+        }
+        
         // Determine delivery method from validate response
         String deliveryMethodId = "direct_topup"; // Default
         if (validateResponse.getDeliveryMethods() != null && !validateResponse.getDeliveryMethods().isEmpty()) {
@@ -152,35 +177,40 @@ public class EfashePaymentService {
             }
         }
         
-        logger.info("=== EFASHE Validation Complete - Proceeding with MoPay Initiation ===");
+        logger.info("=== EFASHE Validation Complete - Storing transaction with validated=INITIAL ===");
 
         // ===================================================================
-        // STEP 2: Proceed with MoPay initiation (validate passed)
+        // STEP 2: Store transaction with validated=INITIAL (MoPay will be called later via /process endpoint)
         // ===================================================================
+        // Amount is now set: either from request or from vendMin (for RRA)
+        // Calculate amounts based on percentages
+        BigDecimal customerCashbackAmount = BigDecimal.ZERO;
+        BigDecimal agentCommissionAmount = BigDecimal.ZERO;
+        BigDecimal besoftShareAmount = BigDecimal.ZERO;
+        BigDecimal fullAmountPhoneReceives = BigDecimal.ZERO;
+        
+        if (amount != null) {
+            // Calculate amounts based on percentages and round to whole numbers (MoPay requirement)
         BigDecimal agentCommissionPercent = settingsResponse.getAgentCommissionPercentage();
         BigDecimal customerCashbackPercent = settingsResponse.getCustomerCashbackPercentage();
         BigDecimal besoftSharePercent = settingsResponse.getBesoftSharePercentage();
 
-        // Calculate amounts based on percentages and round to whole numbers (MoPay requirement)
-        BigDecimal customerCashbackAmount = amount.multiply(customerCashbackPercent)
+            customerCashbackAmount = amount.multiply(customerCashbackPercent)
             .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP)
             .setScale(0, RoundingMode.HALF_UP); // Round to whole number
-        BigDecimal agentCommissionAmount = amount.multiply(agentCommissionPercent)
+            agentCommissionAmount = amount.multiply(agentCommissionPercent)
             .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP)
             .setScale(0, RoundingMode.HALF_UP); // Round to whole number
-        BigDecimal besoftShareAmount = amount.multiply(besoftSharePercent)
+            besoftShareAmount = amount.multiply(besoftSharePercent)
             .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP)
             .setScale(0, RoundingMode.HALF_UP); // Round to whole number
 
         // Full amount phone receives: amount - (customerCashback + besoftShare)
         // Customer gets cashback back and Besoft phone gets their share
         // Agent Commission is included in the full amount phone's portion
-        BigDecimal fullAmountPhoneReceives = amount.subtract(customerCashbackAmount)
+            fullAmountPhoneReceives = amount.subtract(customerCashbackAmount)
             .subtract(besoftShareAmount)
             .setScale(0, RoundingMode.HALF_UP); // Round to whole number
-
-        // No need to generate transaction IDs - MoPay will generate its own unique IDs
-        // We'll use MoPay's transaction ID as the primary identifier
 
         logger.info("Amount breakdown - Total: {}, Customer Cashback: {}, Besoft Share: {}, Agent Commission: {}, Full Amount Phone (remaining after cashback and besoft): {}",
             amount, customerCashbackAmount, besoftShareAmount, agentCommissionAmount, fullAmountPhoneReceives);
@@ -188,84 +218,18 @@ public class EfashePaymentService {
         // Validate that fullAmountPhoneReceives is not negative
         if (fullAmountPhoneReceives.compareTo(BigDecimal.ZERO) < 0) {
             throw new RuntimeException("Invalid percentage configuration: Total percentages exceed 100%. Full amount phone would receive negative amount: " + fullAmountPhoneReceives);
+            }
+        } else {
+            logger.info("RRA service - Amount is null, skipping amount calculations");
         }
 
-        // Build MoPay request - DON'T set transaction_id, let MoPay generate its own (like PaymentService does)
-        // This prevents MoPay from rejecting duplicate transaction IDs
-        MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
-        // NOT setting transaction_id - MoPay will generate its own unique ID
-        logger.info("Not setting transaction_id in MoPay request - MoPay will generate its own unique transaction ID");
-        moPayRequest.setAmount(amount);
-        moPayRequest.setCurrency(request.getCurrency());
+        // Generate a temporary transaction ID (UUID-based) - will be updated with MoPay ID when processed
+        String tempTransactionId = "EFASHE-" + java.util.UUID.randomUUID().toString().replace("-", "").toUpperCase();
         
-        // MoPay API requires phone as Long, so convert for API call but keep as String in DTO
-        moPayRequest.setPhone(normalizedCustomerPhone); // Will be converted to Long in MoPayService if needed
-        moPayRequest.setPayment_mode(request.getPayment_mode());
-        moPayRequest.setMessage(request.getMessage() != null ? request.getMessage() : 
-            "EFASHE " + request.getServiceType() + " payment");
-        moPayRequest.setCallback_url(request.getCallback_url());
-
-        // Build transfers array - Include ALL transfers (Full Amount, Customer Cashback, Besoft Share) in the same request
-        // Don't set transaction_id on transfers either - let MoPay handle it
-        List<MoPayInitiateRequest.Transfer> transfers = new ArrayList<>();
-
-        // Transfer 1: Full Amount Phone Number - receives amount minus customer cashback and besoft share
-        MoPayInitiateRequest.Transfer transfer1 = new MoPayInitiateRequest.Transfer();
-        // NOT setting transaction_id - MoPay will handle it
-        transfer1.setAmount(fullAmountPhoneReceives);
-        String normalizedFullAmountPhone = normalizePhoneTo12Digits(settingsResponse.getFullAmountPhoneNumber());
-        transfer1.setPhone(Long.parseLong(normalizedFullAmountPhone)); // Phone as number (Long)
-        transfer1.setMessage("EFASHE " + request.getServiceType() + " - Full amount");
-        transfers.add(transfer1);
-        logger.info("Transfer 1 - Full Amount Phone: {}, Amount: {}", 
-            normalizedFullAmountPhone, fullAmountPhoneReceives);
-        
-        // Transfer 2: Customer Cashback - send customer cashback back to customer
-        if (customerCashbackAmount.compareTo(BigDecimal.ZERO) > 0) {
-            MoPayInitiateRequest.Transfer transfer2 = new MoPayInitiateRequest.Transfer();
-            // NOT setting transaction_id - MoPay will handle it
-            transfer2.setAmount(customerCashbackAmount);
-            transfer2.setPhone(Long.parseLong(normalizedCustomerPhone)); // Customer phone
-            transfer2.setMessage("EFASHE " + request.getServiceType() + " - Customer cashback");
-            transfers.add(transfer2);
-            logger.info("Transfer 2 - Customer Cashback: {}, Amount: {}", 
-                normalizedCustomerPhone, customerCashbackAmount);
-        }
-        
-        // Transfer 3: Besoft Share - send besoft share to besoft phone
-        if (besoftShareAmount.compareTo(BigDecimal.ZERO) > 0) {
-            String normalizedCashbackPhone = normalizePhoneTo12Digits(settingsResponse.getCashbackPhoneNumber());
-            MoPayInitiateRequest.Transfer transfer3 = new MoPayInitiateRequest.Transfer();
-            // NOT setting transaction_id - MoPay will handle it
-            transfer3.setAmount(besoftShareAmount);
-            transfer3.setPhone(Long.parseLong(normalizedCashbackPhone)); // Besoft phone
-            transfer3.setMessage("EFASHE " + request.getServiceType() + " - Besoft share");
-            transfers.add(transfer3);
-            logger.info("Transfer 3 - Besoft Share: {}, Amount: {}", 
-                normalizedCashbackPhone, besoftShareAmount);
-        }
-        
-        logger.info("All transfers included in initial MoPay request - Total transfers: {}. MoPay will generate transaction IDs.", 
-            transfers.size());
-
-        moPayRequest.setTransfers(transfers);
-
-        // Initiate payment with MoPay - no need to set transaction_id, MoPay will generate its own
-        // This matches PaymentService behavior and prevents duplicate ID rejections
-        MoPayResponse moPayResponse = moPayService.initiatePayment(moPayRequest);
-
-        // Store transaction record in database for later status checking
-        // ALWAYS create a NEW transaction record for each initiate request
-        // Use MoPay's transaction ID as the primary identifier
-        String mopayTransactionId = moPayResponse != null && moPayResponse.getTransactionId() != null 
-            ? moPayResponse.getTransactionId() : null;
-        
-        if (mopayTransactionId == null || mopayTransactionId.isEmpty()) {
-            throw new RuntimeException("MoPay did not return a transaction ID. Payment initiation may have failed.");
-        }
-        
+        // Store transaction record in database with validated=INITIAL
+        // MoPay will be called later when user calls /process endpoint
         EfasheTransaction transaction = new EfasheTransaction();
-        transaction.setTransactionId(mopayTransactionId); // Use MoPay transaction ID as primary identifier
+        transaction.setTransactionId(tempTransactionId); // Temporary ID, will be updated with MoPay ID when processed
         transaction.setServiceType(request.getServiceType());
         transaction.setCustomerPhone(normalizedCustomerPhone);
         transaction.setCustomerAccountNumber(customerAccountNumber);
@@ -278,19 +242,18 @@ public class EfashePaymentService {
         transaction.setDeliveryMethodId(deliveryMethodId);
         transaction.setAmount(amount);
         transaction.setCurrency(request.getCurrency());
-        transaction.setMopayTransactionId(mopayTransactionId); // Also store in mopayTransactionId field
+        transaction.setValidated("INITIAL"); // Mark as validated but not yet processed
         
-        // Set INITIAL STATUS - this is the status when transaction was first created
-        String initialMopayStatus = moPayResponse != null && moPayResponse.getStatus() != null 
-            ? moPayResponse.getStatus().toString() : "PENDING";
-        transaction.setInitialMopayStatus(initialMopayStatus); // Store initial status (never changes)
+        // Set INITIAL STATUS - MoPay not called yet, so statuses are null/PENDING
+        transaction.setInitialMopayStatus(null); // Will be set when MoPay is called
         transaction.setInitialEfasheStatus("PENDING"); // Store initial EFASHE status (never changes)
         
-        // Set CURRENT STATUS - this will be updated when checking status later
-        transaction.setMopayStatus(initialMopayStatus); // Current status (will be updated on status check)
+        // Set CURRENT STATUS - MoPay not called yet
+        transaction.setMopayStatus(null); // Will be set when MoPay is called
         transaction.setEfasheStatus("PENDING"); // Current status (will be updated on status check)
         
-        transaction.setMessage(moPayRequest.getMessage());
+        transaction.setMessage(request.getMessage() != null ? request.getMessage() : 
+            "EFASHE " + request.getServiceType() + " payment");
         
         // For ELECTRICITY and RRA services, if delivery method is SMS, set deliverTo to customer phone
         // This will be used when we execute the EFASHE transaction
@@ -300,40 +263,43 @@ public class EfashePaymentService {
                 request.getServiceType(), normalizedCustomerPhone);
         }
         
-        // Store cashback amounts and phone numbers for reference
+        // Store cashback amounts and phone numbers for reference (will be used when processing MoPay)
         transaction.setCustomerCashbackAmount(customerCashbackAmount);
         transaction.setBesoftShareAmount(besoftShareAmount);
         transaction.setFullAmountPhone(normalizePhoneTo12Digits(settingsResponse.getFullAmountPhoneNumber()));
         transaction.setCashbackPhone(normalizePhoneTo12Digits(settingsResponse.getCashbackPhoneNumber()));
-        transaction.setCashbackSent(true); // Mark as sent since transfers are included in initial request
+        transaction.setCashbackSent(false); // Not sent yet - will be sent when MoPay is processed
         
-        // No need to store separate transfer transaction IDs - MoPay handles this
+        // Store payment mode and callback URL for later MoPay processing
+        transaction.setPaymentMode(request.getPayment_mode());
+        transaction.setCallbackUrl(request.getCallback_url());
         
         // Save transaction - creates a NEW row in database for each initiation
         efasheTransactionRepository.save(transaction);
-        logger.info("Saved EFASHE transaction record - MoPay Transaction ID: {}", mopayTransactionId);
+        logger.info("Saved EFASHE transaction record with validated=INITIAL - Transaction ID: {}", tempTransactionId);
 
         // Build response - normalize all phone numbers to consistent format
         EfasheInitiateResponse response = new EfasheInitiateResponse();
-        response.setTransactionId(mopayTransactionId); // Use MoPay transaction ID
+        response.setTransactionId(tempTransactionId); // Temporary transaction ID
         response.setServiceType(request.getServiceType());
         response.setAmount(amount);
         // Set normalized phone as string in response
         response.setCustomerPhone(normalizedCustomerPhone);
         // Include customer account name from validate response
         response.setCustomerAccountName(customerAccountName);
-        response.setMoPayResponse(moPayResponse);
+        response.setMoPayResponse(null); // No MoPay response yet
         // Include complete EFASHE validate response
         response.setEfasheValidateResponse(validateResponse);
         // Return normalized phone numbers in response (12 digits with 250 prefix)
-        response.setFullAmountPhone(normalizedFullAmountPhone);
+        response.setFullAmountPhone(normalizePhoneTo12Digits(settingsResponse.getFullAmountPhoneNumber()));
         response.setCashbackPhone(normalizePhoneTo12Digits(settingsResponse.getCashbackPhoneNumber()));
         response.setCustomerCashbackAmount(customerCashbackAmount);
         response.setAgentCommissionAmount(agentCommissionAmount);
         response.setBesoftShareAmount(besoftShareAmount);
         response.setFullAmountPhoneReceives(fullAmountPhoneReceives);
+        response.setValidated("INITIAL"); // Mark as validated but not processed
 
-        logger.info("EFASHE payment initiated successfully - MoPay Transaction ID: {}", mopayTransactionId);
+        logger.info("EFASHE payment validated successfully - Transaction ID: {}, validated: INITIAL", tempTransactionId);
 
         return response;
     }
@@ -423,10 +389,10 @@ public class EfashePaymentService {
             }
         }
         
-        logger.info("=== EFASHE Validation Complete - Proceeding with MoPay Initiation (payer phone) ===");
+        logger.info("=== EFASHE Validation Complete - Storing transaction with validated=INITIAL ===");
 
         // ===================================================================
-        // STEP 2: Proceed with MoPay initiation using PAYER phone
+        // STEP 2: Store transaction with validated=INITIAL (MoPay will be called later via /process endpoint)
         // ===================================================================
         BigDecimal agentCommissionPercent = settingsResponse.getAgentCommissionPercentage();
         BigDecimal customerCashbackPercent = settingsResponse.getCustomerCashbackPercentage();
@@ -454,60 +420,13 @@ public class EfashePaymentService {
             throw new RuntimeException("Invalid percentage configuration: Total percentages exceed 100%. Full amount phone would receive negative amount: " + fullAmountPhoneReceives);
         }
 
-        // Build MoPay request - Use PAYER phone for debit
-        MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
-        moPayRequest.setAmount(amount);
-        moPayRequest.setCurrency(request.getCurrency());
-        moPayRequest.setPhone(normalizedPayerPhone); // PAYER phone for MoPay debit
-        moPayRequest.setPayment_mode(request.getPayment_mode());
-        moPayRequest.setMessage(request.getMessage() != null ? request.getMessage() : 
-            "EFASHE " + request.getServiceType() + " payment for other");
-        moPayRequest.setCallback_url(request.getCallback_url());
-
-        // Build transfers array
-        List<MoPayInitiateRequest.Transfer> transfers = new ArrayList<>();
-
-        // Transfer 1: Full Amount Phone Number
-        MoPayInitiateRequest.Transfer transfer1 = new MoPayInitiateRequest.Transfer();
-        transfer1.setAmount(fullAmountPhoneReceives);
-        String normalizedFullAmountPhone = normalizePhoneTo12Digits(settingsResponse.getFullAmountPhoneNumber());
-        transfer1.setPhone(Long.parseLong(normalizedFullAmountPhone));
-        transfer1.setMessage("EFASHE " + request.getServiceType() + " - Full amount");
-        transfers.add(transfer1);
+        // Generate a temporary transaction ID (UUID-based) - will be updated with MoPay ID when processed
+        String tempTransactionId = "EFASHE-" + java.util.UUID.randomUUID().toString().replace("-", "").toUpperCase();
         
-        // Transfer 2: Customer Cashback - send to PAYER (the person who paid)
-        if (customerCashbackAmount.compareTo(BigDecimal.ZERO) > 0) {
-            MoPayInitiateRequest.Transfer transfer2 = new MoPayInitiateRequest.Transfer();
-            transfer2.setAmount(customerCashbackAmount);
-            transfer2.setPhone(Long.parseLong(normalizedPayerPhone)); // PAYER gets cashback
-            transfer2.setMessage("EFASHE " + request.getServiceType() + " - Customer cashback");
-            transfers.add(transfer2);
-        }
-        
-        // Transfer 3: Besoft Share
-        if (besoftShareAmount.compareTo(BigDecimal.ZERO) > 0) {
-            String normalizedCashbackPhone = normalizePhoneTo12Digits(settingsResponse.getCashbackPhoneNumber());
-            MoPayInitiateRequest.Transfer transfer3 = new MoPayInitiateRequest.Transfer();
-            transfer3.setAmount(besoftShareAmount);
-            transfer3.setPhone(Long.parseLong(normalizedCashbackPhone));
-            transfer3.setMessage("EFASHE " + request.getServiceType() + " - Besoft share");
-            transfers.add(transfer3);
-        }
-
-        moPayRequest.setTransfers(transfers);
-
-        // Initiate payment with MoPay using PAYER phone
-        MoPayResponse moPayResponse = moPayService.initiatePayment(moPayRequest);
-        
-        String mopayTransactionId = moPayResponse != null && moPayResponse.getTransactionId() != null 
-            ? moPayResponse.getTransactionId() : null;
-        
-        if (mopayTransactionId == null || mopayTransactionId.isEmpty()) {
-            throw new RuntimeException("MoPay did not return a transaction ID. Payment initiation may have failed.");
-        }
-        
+        // Store transaction record in database with validated=INITIAL
+        // MoPay will be called later when user calls /process endpoint
         EfasheTransaction transaction = new EfasheTransaction();
-        transaction.setTransactionId(mopayTransactionId);
+        transaction.setTransactionId(tempTransactionId); // Temporary ID, will be updated with MoPay ID when processed
         transaction.setServiceType(request.getServiceType());
         transaction.setCustomerPhone(normalizedPayerPhone); // Store payer phone (for MoPay)
         transaction.setCustomerAccountNumber(customerAccountNumber); // Store recipient account number (for EFASHE)
@@ -518,19 +437,20 @@ public class EfashePaymentService {
             transaction.setCustomerAccountName(customerAccountName); // Recipient name
         }
         transaction.setDeliveryMethodId(deliveryMethodId);
-        
         transaction.setAmount(amount);
         transaction.setCurrency(request.getCurrency());
-        transaction.setMopayTransactionId(mopayTransactionId);
+        transaction.setValidated("INITIAL"); // Mark as validated but not yet processed
         
-        String initialMopayStatus = moPayResponse != null && moPayResponse.getStatus() != null 
-            ? moPayResponse.getStatus().toString() : "PENDING";
-        transaction.setInitialMopayStatus(initialMopayStatus);
-        transaction.setInitialEfasheStatus("PENDING");
-        transaction.setMopayStatus(initialMopayStatus);
-        transaction.setEfasheStatus("PENDING");
+        // Set INITIAL STATUS - MoPay not called yet, so statuses are null/PENDING
+        transaction.setInitialMopayStatus(null); // Will be set when MoPay is called
+        transaction.setInitialEfasheStatus("PENDING"); // Store initial EFASHE status (never changes)
         
-        transaction.setMessage(moPayRequest.getMessage());
+        // Set CURRENT STATUS - MoPay not called yet
+        transaction.setMopayStatus(null); // Will be set when MoPay is called
+        transaction.setEfasheStatus("PENDING"); // Current status (will be updated on status check)
+        
+        transaction.setMessage(request.getMessage() != null ? request.getMessage() : 
+            "EFASHE " + request.getServiceType() + " payment for other");
         
         if ("sms".equals(deliveryMethodId)) {
             transaction.setDeliverTo(normalizedRecipientPhone); // Recipient phone for SMS delivery
@@ -541,31 +461,164 @@ public class EfashePaymentService {
         transaction.setBesoftShareAmount(besoftShareAmount);
         transaction.setFullAmountPhone(normalizePhoneTo12Digits(settingsResponse.getFullAmountPhoneNumber()));
         transaction.setCashbackPhone(normalizePhoneTo12Digits(settingsResponse.getCashbackPhoneNumber()));
-        transaction.setCashbackSent(true);
+        transaction.setCashbackSent(false); // Not sent yet - will be sent when MoPay is processed
+        
+        // Store payment mode and callback URL for later MoPay processing
+        transaction.setPaymentMode(request.getPayment_mode());
+        transaction.setCallbackUrl(request.getCallback_url());
         
         efasheTransactionRepository.save(transaction);
-        logger.info("Saved EFASHE transaction record (buying for other) - MoPay Transaction ID: {}, Payer: {}, Recipient: {}", 
-            mopayTransactionId, normalizedPayerPhone, normalizedRecipientPhone);
+        logger.info("Saved EFASHE transaction record (buying for other) with validated=INITIAL - Transaction ID: {}, Payer: {}, Recipient: {}", 
+            tempTransactionId, normalizedPayerPhone, normalizedRecipientPhone);
 
         // Build response
         EfasheInitiateResponse response = new EfasheInitiateResponse();
-        response.setTransactionId(mopayTransactionId);
+        response.setTransactionId(tempTransactionId); // Temporary transaction ID
         response.setServiceType(request.getServiceType());
         response.setAmount(amount);
         response.setCustomerPhone(normalizedPayerPhone); // Payer phone in response
         response.setCustomerAccountName(customerAccountName); // Recipient name
-        response.setMoPayResponse(moPayResponse);
+        response.setMoPayResponse(null); // No MoPay response yet
         // Include complete EFASHE validate response
         response.setEfasheValidateResponse(validateResponse);
-        response.setFullAmountPhone(normalizedFullAmountPhone);
+        response.setFullAmountPhone(normalizePhoneTo12Digits(settingsResponse.getFullAmountPhoneNumber()));
         response.setCashbackPhone(normalizePhoneTo12Digits(settingsResponse.getCashbackPhoneNumber()));
         response.setCustomerCashbackAmount(customerCashbackAmount);
         response.setAgentCommissionAmount(agentCommissionAmount);
         response.setBesoftShareAmount(besoftShareAmount);
         response.setFullAmountPhoneReceives(fullAmountPhoneReceives);
+        response.setValidated("INITIAL"); // Mark as validated but not processed
 
-        logger.info("EFASHE payment initiated successfully for other - MoPay Transaction ID: {}, Payer: {}, Recipient: {}", 
-            mopayTransactionId, normalizedPayerPhone, normalizedRecipientPhone);
+        logger.info("EFASHE payment validated successfully for other - Transaction ID: {}, validated: INITIAL, Payer: {}, Recipient: {}", 
+            tempTransactionId, normalizedPayerPhone, normalizedRecipientPhone);
+
+        return response;
+    }
+
+    /**
+     * Process a validated transaction by calling MoPay
+     * Updates validated flag to "PROCESS" and initiates MoPay payment
+     * @param transactionId The transaction ID from initiate response
+     * @return EfasheInitiateResponse with MoPay response
+     */
+    @Transactional
+    public EfasheInitiateResponse processPayment(String transactionId) {
+        logger.info("Processing EFASHE payment - Transaction ID: {}", transactionId);
+        
+        // Find transaction by ID
+        EfasheTransaction transaction = efasheTransactionRepository.findByTransactionId(transactionId)
+            .orElseThrow(() -> new RuntimeException("EFASHE transaction not found: " + transactionId));
+        
+        // Check if transaction is in INITIAL state
+        if (!"INITIAL".equals(transaction.getValidated())) {
+            throw new RuntimeException("Transaction is not in INITIAL state. Current state: " + transaction.getValidated());
+        }
+        
+        logger.info("Found transaction in INITIAL state - Updating to PROCESS and initiating MoPay");
+        
+        // Update validated flag to PROCESS
+        transaction.setValidated("PROCESS");
+        
+        // Get EFASHE settings for the service type
+        EfasheSettingsResponse settingsResponse = efasheSettingsService.getSettingsByServiceType(transaction.getServiceType());
+        
+        BigDecimal amount = transaction.getAmount();
+        
+        // For RRA, amount can be null during initiate, but is required for processing
+        // For other services, amount should already be set during initiate
+        if (amount == null) {
+            throw new RuntimeException("Amount is required for processing. Please provide amount for service type: " + transaction.getServiceType());
+        }
+        
+        String normalizedCustomerPhone = transaction.getCustomerPhone();
+
+        // Build MoPay request
+        MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
+        moPayRequest.setAmount(amount);
+        moPayRequest.setCurrency(transaction.getCurrency());
+        moPayRequest.setPhone(normalizedCustomerPhone);
+        moPayRequest.setPayment_mode(transaction.getPaymentMode());
+        moPayRequest.setMessage(transaction.getMessage());
+        moPayRequest.setCallback_url(transaction.getCallbackUrl());
+        
+        // Build transfers array
+        List<MoPayInitiateRequest.Transfer> transfers = new ArrayList<>();
+
+        // Transfer 1: Full Amount Phone Number
+        MoPayInitiateRequest.Transfer transfer1 = new MoPayInitiateRequest.Transfer();
+        BigDecimal fullAmountPhoneReceives = amount.subtract(
+            transaction.getCustomerCashbackAmount() != null ? transaction.getCustomerCashbackAmount() : BigDecimal.ZERO)
+            .subtract(transaction.getBesoftShareAmount() != null ? transaction.getBesoftShareAmount() : BigDecimal.ZERO)
+            .setScale(0, RoundingMode.HALF_UP);
+        transfer1.setAmount(fullAmountPhoneReceives);
+        String normalizedFullAmountPhone = normalizePhoneTo12Digits(transaction.getFullAmountPhone());
+        transfer1.setPhone(Long.parseLong(normalizedFullAmountPhone));
+        transfer1.setMessage("EFASHE " + transaction.getServiceType() + " - Full amount");
+        transfers.add(transfer1);
+        
+        // Transfer 2: Customer Cashback
+        if (transaction.getCustomerCashbackAmount() != null && transaction.getCustomerCashbackAmount().compareTo(BigDecimal.ZERO) > 0) {
+            MoPayInitiateRequest.Transfer transfer2 = new MoPayInitiateRequest.Transfer();
+            transfer2.setAmount(transaction.getCustomerCashbackAmount());
+            transfer2.setPhone(Long.parseLong(normalizedCustomerPhone));
+            transfer2.setMessage("EFASHE " + transaction.getServiceType() + " - Customer cashback");
+            transfers.add(transfer2);
+        }
+        
+        // Transfer 3: Besoft Share
+        if (transaction.getBesoftShareAmount() != null && transaction.getBesoftShareAmount().compareTo(BigDecimal.ZERO) > 0) {
+            String normalizedCashbackPhone = normalizePhoneTo12Digits(transaction.getCashbackPhone());
+            MoPayInitiateRequest.Transfer transfer3 = new MoPayInitiateRequest.Transfer();
+            transfer3.setAmount(transaction.getBesoftShareAmount());
+            transfer3.setPhone(Long.parseLong(normalizedCashbackPhone));
+            transfer3.setMessage("EFASHE " + transaction.getServiceType() + " - Besoft share");
+            transfers.add(transfer3);
+        }
+
+        moPayRequest.setTransfers(transfers);
+
+        // Initiate payment with MoPay
+        MoPayResponse moPayResponse = moPayService.initiatePayment(moPayRequest);
+
+        String mopayTransactionId = moPayResponse != null && moPayResponse.getTransactionId() != null 
+            ? moPayResponse.getTransactionId() : null;
+        
+        if (mopayTransactionId == null || mopayTransactionId.isEmpty()) {
+            throw new RuntimeException("MoPay did not return a transaction ID. Payment initiation may have failed.");
+        }
+        
+        // Update transaction with MoPay response
+        transaction.setTransactionId(mopayTransactionId); // Update with MoPay transaction ID
+        transaction.setMopayTransactionId(mopayTransactionId);
+        
+        String initialMopayStatus = moPayResponse != null && moPayResponse.getStatus() != null 
+            ? moPayResponse.getStatus().toString() : "PENDING";
+        transaction.setInitialMopayStatus(initialMopayStatus);
+        transaction.setMopayStatus(initialMopayStatus);
+        transaction.setCashbackSent(true); // Mark as sent
+        
+        // Save updated transaction
+        efasheTransactionRepository.save(transaction);
+        logger.info("Updated transaction with MoPay response - Transaction ID: {}, MoPay Transaction ID: {}", 
+            transactionId, mopayTransactionId);
+
+        // Build response
+        EfasheInitiateResponse response = new EfasheInitiateResponse();
+        response.setTransactionId(mopayTransactionId);
+        response.setServiceType(transaction.getServiceType());
+        response.setAmount(amount);
+        response.setCustomerPhone(normalizedCustomerPhone);
+        response.setCustomerAccountName(transaction.getCustomerAccountName());
+        response.setMoPayResponse(moPayResponse);
+        response.setFullAmountPhone(normalizedFullAmountPhone);
+        response.setCashbackPhone(normalizePhoneTo12Digits(transaction.getCashbackPhone()));
+        response.setCustomerCashbackAmount(transaction.getCustomerCashbackAmount());
+        response.setBesoftShareAmount(transaction.getBesoftShareAmount());
+        response.setFullAmountPhoneReceives(fullAmountPhoneReceives);
+        response.setValidated("PROCESS");
+
+        logger.info("EFASHE payment processed successfully - Transaction ID: {}, MoPay Transaction ID: {}", 
+            transactionId, mopayTransactionId);
 
         return response;
     }
@@ -638,7 +691,10 @@ public class EfashePaymentService {
                         EfasheExecuteRequest executeRequest = new EfasheExecuteRequest();
                     executeRequest.setTrxId(trxId);
                         executeRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
+                        // For RRA service type, don't send amount
+                        if (transaction.getServiceType() != EfasheServiceType.RRA) {
                         executeRequest.setAmount(transaction.getAmount());
+                        }
                         executeRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
                     
                     // Use stored delivery method and deliverTo (already determined during initiate)
@@ -1449,7 +1505,21 @@ public class EfashePaymentService {
             logger.info("=== WhatsApp Service Call Completed ===");
             logger.info("WhatsApp notification sent successfully to customer {} for EFASHE transaction: {}", 
                 whatsappPhone, transaction.getTransactionId());
-            logger.info("=== END WhatsApp Notification ===");
+            
+            // Send SMS notification (same message as WhatsApp)
+            logger.info("=== SENDING SMS Notification ===");
+            logger.info("SMS Phone: {}", whatsappPhone);
+            logger.info("SMS Message: {}", message);
+            try {
+                messagingService.sendSms(message, whatsappPhone);
+                logger.info("SMS notification sent successfully to customer {} for EFASHE transaction: {}", 
+                    whatsappPhone, transaction.getTransactionId());
+            } catch (Exception smsException) {
+                logger.error("Failed to send SMS notification (WhatsApp was sent successfully): ", smsException);
+                // Don't fail the transaction if SMS fails - WhatsApp was already sent
+            }
+            
+            logger.info("=== END WhatsApp and SMS Notification ===");
         } catch (Exception e) {
             logger.error("=== ERROR in WhatsApp Notification ===");
             logger.error("Transaction ID: {}", transaction.getTransactionId());

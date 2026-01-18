@@ -96,6 +96,7 @@ public class SecurityConfig {
                         .requestMatchers("/api/users/*/nfc-card/**").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .requestMatchers("/api/efashe/initiate").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .requestMatchers("/api/efashe/initiate-for-other").hasAnyRole("USER", "RECEIVER", "ADMIN")
+                        .requestMatchers("/api/efashe/process/**").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .requestMatchers("/api/efashe/status/**").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .requestMatchers("/api/efashe/transactions", "/api/efashe/transactions/**").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .requestMatchers("/api/efashe/settings", "/api/efashe/settings/**").hasRole("ADMIN")

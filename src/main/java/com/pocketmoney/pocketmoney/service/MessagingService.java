@@ -19,7 +19,7 @@ public class MessagingService {
     @Value("${sms.api.url:https://swiftqom.io/api/dev}")
     private String smsApiUrl;
 
-    @Value("${sms.api.key:SWQRyoqZr2FhTYpll3m7etmKLhgrDTuUEGLDHjWgx5CSV2DFFavXjQODVzBhqjqL}")
+    @Value("${sms.api.key:SWQWEkheqFdx31PXeKXbVT9MlTU8jzs7Sgtf3ovpkzxb5dimWLTCx9FLLjnZc4YS}")
     private String smsApiKey;
 
     private final RestTemplate restTemplate;

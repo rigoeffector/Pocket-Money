@@ -78,6 +78,24 @@ public class EfasheController {
     }
 
     /**
+     * Process a validated transaction by calling MoPay
+     * POST /api/efashe/process/{transactionId}
+     * Updates validated flag to "PROCESS" and initiates MoPay payment
+     */
+    @PostMapping("/process/{transactionId}")
+    public ResponseEntity<ApiResponse<EfasheInitiateResponse>> processPayment(
+            @PathVariable("transactionId") String transactionId) {
+        try {
+            EfasheInitiateResponse response = efashePaymentService.processPayment(transactionId);
+            return ResponseEntity.ok(ApiResponse.success("EFASHE payment processed successfully", response));
+        } catch (RuntimeException e) {
+            logger.error("Error processing EFASHE payment: ", e);
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    /**
      * Check EFASHE transaction status using MoPay transaction ID
      * GET /api/efashe/status/{transactionId}
      * Automatically triggers EFASHE validate and execute when MoPay status is SUCCESS

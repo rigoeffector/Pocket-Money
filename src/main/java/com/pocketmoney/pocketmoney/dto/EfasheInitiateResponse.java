@@ -20,5 +20,6 @@ public class EfasheInitiateResponse {
     private BigDecimal agentCommissionAmount;
     private BigDecimal besoftShareAmount;
     private BigDecimal fullAmountPhoneReceives;
+    private String validated; // Validation status: INITIAL (validated but not processed), PROCESS (ready to process MoPay)
 }
 

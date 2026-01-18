@@ -39,8 +39,8 @@ public class EfasheTransaction {
     @Column(name = "customer_account_name")
     private String customerAccountName; // Customer account name (e.g., "MUHINZI ANDRE" for electricity, TIN owner for RRA)
 
-    @Column(name = "amount", nullable = false, precision = 10, scale = 2)
-    private BigDecimal amount;
+    @Column(name = "amount", nullable = true, precision = 10, scale = 2)
+    private BigDecimal amount; // Nullable for RRA service type
 
     @Column(name = "currency", nullable = false)
     private String currency = "RWF";
@@ -81,6 +81,12 @@ public class EfasheTransaction {
     @Column(name = "error_message", length = 1000)
     private String errorMessage;
 
+    @Column(name = "payment_mode")
+    private String paymentMode; // Store payment_mode for MoPay processing
+
+    @Column(name = "callback_url", length = 500)
+    private String callbackUrl; // Store callback_url for MoPay processing
+
     @Column(name = "customer_cashback_amount", precision = 10, scale = 2)
     private BigDecimal customerCashbackAmount; // Amount to send to customer after execute
 
@@ -104,6 +110,9 @@ public class EfasheTransaction {
 
     @Column(name = "besoft_share_transaction_id")
     private String besoftShareTransactionId; // Unique transaction ID for besoft share transfer
+
+    @Column(name = "validated")
+    private String validated; // Validation status: INITIAL (validated but not processed), PROCESS (ready to process MoPay)
 
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)

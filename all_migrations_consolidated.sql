@@ -339,6 +339,22 @@ ADD COLUMN IF NOT EXISTS customer_account_name VARCHAR(255);
 
 COMMENT ON COLUMN efashe_transactions.customer_account_name IS 'Customer account name (e.g., "MUHINZI ANDRE" for electricity, TIN owner for RRA)';
 
+-- Add validated, payment_mode, and callback_url columns for two-step payment processing
+ALTER TABLE efashe_transactions 
+ADD COLUMN IF NOT EXISTS validated VARCHAR(20),
+ADD COLUMN IF NOT EXISTS payment_mode VARCHAR(50),
+ADD COLUMN IF NOT EXISTS callback_url VARCHAR(500);
+
+COMMENT ON COLUMN efashe_transactions.validated IS 'Validation status: INITIAL (validated but not processed), PROCESS (ready to process MoPay)';
+COMMENT ON COLUMN efashe_transactions.payment_mode IS 'Payment mode for MoPay processing (e.g., MOBILE)';
+COMMENT ON COLUMN efashe_transactions.callback_url IS 'Callback URL for MoPay processing';
+
+-- Make amount nullable for RRA service type (amount is optional for RRA)
+ALTER TABLE efashe_transactions 
+ALTER COLUMN amount DROP NOT NULL;
+
+COMMENT ON COLUMN efashe_transactions.amount IS 'Transaction amount (nullable for RRA service type, required for all other services)';
+
 COMMIT;
 
 -- ===================================================================
