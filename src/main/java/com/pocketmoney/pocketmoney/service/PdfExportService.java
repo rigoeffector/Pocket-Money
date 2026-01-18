@@ -2,6 +2,8 @@ package com.pocketmoney.pocketmoney.service;
 
 import com.pocketmoney.pocketmoney.dto.PaymentResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverTransactionsResponse;
+import com.pocketmoney.pocketmoney.entity.EfasheServiceType;
+import com.pocketmoney.pocketmoney.entity.EfasheTransaction;
 import com.pocketmoney.pocketmoney.entity.Receiver;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
@@ -473,5 +475,331 @@ public class PdfExportService {
             return text;
         }
         return text.substring(0, maxLength - 3) + "...";
+    }
+    
+    /**
+     * Generate PDF receipt for EFASHE transactions (RRA and TV only)
+     * Format similar to invoice with company information, transaction details, and payment summary
+     */
+    public byte[] generateEfasheReceiptPdf(EfasheTransaction transaction) {
+        try (PDDocument document = new PDDocument();
+             ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+            
+            // Create A4 portrait page
+            PDPage page = new PDPage(PDRectangle.A4);
+            document.addPage(page);
+            PDPageContentStream contentStream = new PDPageContentStream(document, page);
+            
+            try {
+                float pageWidth = PDRectangle.A4.getWidth();
+                float pageHeight = PDRectangle.A4.getHeight();
+                float margin = 50;
+                float currentY = pageHeight - margin;
+                
+                // Company Information (Top Right)
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA_BOLD, 16);
+                float companyX = pageWidth - margin - 150;
+                contentStream.newLineAtOffset(companyX, currentY);
+                contentStream.showText("BEPAY");
+                contentStream.endText();
+                
+                currentY -= 8;
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 8);
+                contentStream.newLineAtOffset(companyX, currentY);
+                contentStream.showText("only if you want the best");
+                contentStream.endText();
+                
+                // Invoice Header (Top Left)
+                currentY = pageHeight - margin;
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA_BOLD, 24);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("Invoice");
+                contentStream.endText();
+                
+                currentY -= 20;
+                String invoiceNumber = generateInvoiceNumber(transaction);
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 11);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("#" + invoiceNumber);
+                contentStream.endText();
+                
+                currentY -= 40;
+                
+                // Dates
+                DateTimeFormatter dateFormatter = DateTimeFormatter.ofPattern("d MMMM, yyyy");
+                String invoiceDate = transaction.getCreatedAt().format(dateFormatter);
+                String dueDate = transaction.getCreatedAt().plusDays(1).format(dateFormatter);
+                
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 10);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("Invoice Date: " + invoiceDate);
+                contentStream.endText();
+                
+                currentY -= 15;
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 10);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("Due Date: " + dueDate);
+                contentStream.endText();
+                
+                currentY -= 30;
+                
+                // Billed To Section
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA_BOLD, 12);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("Billed To");
+                contentStream.endText();
+                
+                currentY -= 18;
+                
+                // Extract TIN from customer account number for RRA (format: TIN or account number)
+                String tin = transaction.getCustomerAccountNumber();
+                
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 10);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("TIN: " + tin);
+                contentStream.endText();
+                
+                currentY -= 14;
+                
+                // Address
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 10);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("Address: Kigali, Rwanda");
+                contentStream.endText();
+                
+                currentY -= 14;
+                
+                // Phone
+                String phone = formatPhoneNumber(transaction.getCustomerPhone());
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 10);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("Telephone: " + phone);
+                contentStream.endText();
+                
+                currentY -= 14;
+                
+                // Email
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 10);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("Email: info@bepay.info");
+                contentStream.endText();
+                
+                currentY -= 14;
+                
+                // Website
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 10);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("Website: www.bepay.info");
+                contentStream.endText();
+                
+                currentY -= 14;
+                
+                // Invoice No (Internal)
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 10);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("Invoice No: BEP-INV-" + transaction.getCreatedAt().format(DateTimeFormatter.ofPattern("yyyy-MM-")) + 
+                    String.format("%06d", Math.abs(transaction.getTransactionId().hashCode() % 1000000)));
+                contentStream.endText();
+                
+                currentY -= 14;
+                
+                // Date for internal invoice
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 10);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("Date: " + transaction.getCreatedAt().format(DateTimeFormatter.ofPattern("d MMM yyyy")));
+                contentStream.endText();
+                
+                currentY -= 14;
+                
+                // Payment Method
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 10);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("Payment Method: Mobile Money");
+                contentStream.endText();
+                
+                currentY -= 14;
+                
+                // Transaction ID
+                String transactionId = transaction.getMopayTransactionId() != null 
+                    ? transaction.getMopayTransactionId() 
+                    : transaction.getTransactionId();
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 10);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("Transaction ID: " + transactionId);
+                contentStream.endText();
+                
+                currentY -= 14;
+                
+                // Customer Name
+                if (transaction.getCustomerAccountName() != null && !transaction.getCustomerAccountName().trim().isEmpty()) {
+                    contentStream.beginText();
+                    contentStream.setFont(PDType1Font.HELVETICA, 10);
+                    contentStream.newLineAtOffset(margin, currentY);
+                    contentStream.showText("Customer: " + transaction.getCustomerAccountName());
+                    contentStream.endText();
+                    currentY -= 14;
+                }
+                
+                // Phone (customer phone)
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 10);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("Phone: " + phone);
+                contentStream.endText();
+                
+                currentY -= 35;
+                
+                // Service Details Section
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA_BOLD, 12);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("Service Details");
+                contentStream.endText();
+                
+                currentY -= 20;
+                
+                // Service Type
+                String serviceName = getServiceDisplayName(transaction.getServiceType());
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 10);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("Service: " + serviceName);
+                contentStream.endText();
+                
+                currentY -= 14;
+                
+                // Account/Meter Number Label
+                String accountLabel = transaction.getServiceType() == EfasheServiceType.RRA ? "TIN Number" : "Account/Decoder Number";
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 10);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText(accountLabel + ": " + transaction.getCustomerAccountNumber());
+                contentStream.endText();
+                
+                currentY -= 14;
+                
+                // Amount Paid
+                String amountStr = formatCurrency(transaction.getAmount() != null ? transaction.getAmount() : BigDecimal.ZERO);
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 10);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("Amount Paid: " + amountStr + " " + transaction.getCurrency());
+                contentStream.endText();
+                
+                currentY -= 35;
+                
+                // Payment Summary
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA_BOLD, 12);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("Payment Summary");
+                contentStream.endText();
+                
+                currentY -= 20;
+                
+                // Total Paid
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA_BOLD, 11);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("TOTAL PAID: " + amountStr + " " + transaction.getCurrency());
+                contentStream.endText();
+                
+                currentY -= 14;
+                
+                // Tax Status
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 10);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("TAX STATUS: VAT EXEMPT");
+                contentStream.endText();
+                
+                currentY -= 50;
+                
+                // Footer
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 10);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("Thank you for using BEPAY Solutions");
+                contentStream.endText();
+                
+                currentY -= 12;
+                
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 9);
+                contentStream.newLineAtOffset(margin, currentY);
+                contentStream.showText("www.bepay.info | Support: +250 788 319 169");
+                contentStream.endText();
+                
+            } finally {
+                if (contentStream != null) {
+                    contentStream.close();
+                }
+            }
+            
+            document.save(baos);
+            return baos.toByteArray();
+        } catch (Exception e) {
+            logger.error("Error generating EFASHE receipt PDF: ", e);
+            throw new RuntimeException("Failed to generate receipt PDF: " + e.getMessage(), e);
+        }
+    }
+    
+    private String generateInvoiceNumber(EfasheTransaction transaction) {
+        // Generate invoice number from transaction ID hash
+        int hash = Math.abs(transaction.getTransactionId().hashCode());
+        String datePart = transaction.getCreatedAt().format(DateTimeFormatter.ofPattern("yyyyMMdd"));
+        return datePart + "-" + String.format("%06d", hash % 1000000);
+    }
+    
+    private String formatPhoneNumber(String phone) {
+        if (phone == null || phone.isEmpty()) {
+            return "";
+        }
+        // Format: +250 788 319 169
+        String digits = phone.replaceAll("[^0-9]", "");
+        if (digits.length() >= 9) {
+            if (digits.length() == 12 && digits.startsWith("250")) {
+                return "+" + digits.substring(0, 3) + " " + digits.substring(3, 6) + " " + digits.substring(6, 9) + " " + digits.substring(9);
+            } else if (digits.length() == 9) {
+                return "+250 " + digits.substring(0, 3) + " " + digits.substring(3, 6) + " " + digits.substring(6);
+            }
+        }
+        return phone;
+    }
+    
+    private String getServiceDisplayName(EfasheServiceType serviceType) {
+        if (serviceType == null) {
+            return "Payment Service";
+        }
+        switch (serviceType) {
+            case RRA:
+                return "RRA Tax Payment";
+            case TV:
+                return "TV Subscription Payment";
+            case ELECTRICITY:
+                return "Electricity Token Purchase";
+            case AIRTIME:
+                return "Airtime Purchase";
+            case MTN:
+                return "MTN Data/Voice Bundle";
+            default:
+                return serviceType.toString();
+        }
     }
 }

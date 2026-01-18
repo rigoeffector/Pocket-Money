@@ -40,7 +40,7 @@ public class TestController {
      */
     @PostMapping("/sms/send-json")
     @PreAuthorize("hasAnyRole('USER', 'RECEIVER', 'ADMIN')")
-    public ResponseEntity<ApiResponse<Object>> sendTestSms(@Valid @RequestBody TestSmsRequest request) {
+    public ResponseEntity<ApiResponse<Object>> sendTestSmsSwift(@Valid @RequestBody TestSmsRequest request) {
         try {
             logger.info("Test SMS request received - Phone: {}, Message length: {}", request.getPhone(), request.getMessage().length());
             
@@ -53,13 +53,73 @@ public class TestController {
             logger.info("Test SMS sent successfully to: {}", normalizedPhone);
             
             return ResponseEntity.ok(ApiResponse.success(
-                "SMS sent successfully",
-                new TestSmsResponse(normalizedPhone, request.getMessage(), "SMS queued for delivery")
+                "SMS sent successfully via Swift.com",
+                new TestSmsResponse(normalizedPhone, request.getMessage(), "SMS queued for delivery via Swift.com")
             ));
         } catch (Exception e) {
-            logger.error("Error sending test SMS: ", e);
+            logger.error("Error sending test SMS via Swift.com: ", e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(ApiResponse.error("Failed to send SMS: " + e.getMessage()));
+                    .body(ApiResponse.error("Failed to send SMS via Swift.com: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * Test endpoint for sending SMS via BeSoft SMS API
+     * POST /api/test/sms/besoft
+     * Requires authentication
+     */
+    @PostMapping("/sms/besoft")
+    @PreAuthorize("hasAnyRole('USER', 'RECEIVER', 'ADMIN')")
+    public ResponseEntity<ApiResponse<Object>> sendTestSmsBeSoft(@Valid @RequestBody TestSmsRequest request) {
+        try {
+            logger.info("Test BeSoft SMS request received - Phone: {}, Message length: {}", request.getPhone(), request.getMessage().length());
+            
+            // Normalize phone number (ensure 12 digits with 250 prefix)
+            String normalizedPhone = normalizePhoneNumber(request.getPhone());
+            
+            // Send SMS using BeSoft SMS (by temporarily setting SMS type to besoftsms)
+            messagingService.sendSmsViaBeSoft(request.getMessage(), normalizedPhone);
+            
+            logger.info("Test BeSoft SMS sent successfully to: {}", normalizedPhone);
+            
+            return ResponseEntity.ok(ApiResponse.success(
+                "SMS sent successfully via BeSoft",
+                new TestSmsResponse(normalizedPhone, request.getMessage(), "SMS queued for delivery via BeSoft")
+            ));
+        } catch (Exception e) {
+            logger.error("Error sending test SMS via BeSoft: ", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(ApiResponse.error("Failed to send SMS via BeSoft: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * Test endpoint for sending SMS via Swift.com API with BEPAY sender ID
+     * POST /api/test/sms/bepay
+     * Requires authentication
+     */
+    @PostMapping("/sms/bepay")
+    @PreAuthorize("hasAnyRole('USER', 'RECEIVER', 'ADMIN')")
+    public ResponseEntity<ApiResponse<Object>> sendTestSmsBEPAY(@Valid @RequestBody TestSmsRequest request) {
+        try {
+            logger.info("Test BEPAY SMS request received - Phone: {}, Message length: {}", request.getPhone(), request.getMessage().length());
+            
+            // Normalize phone number (ensure 12 digits with 250 prefix)
+            String normalizedPhone = normalizePhoneNumber(request.getPhone());
+            
+            // Send SMS using BEPAY configuration
+            messagingService.sendSmsViaBEPAY(request.getMessage(), normalizedPhone);
+            
+            logger.info("Test BEPAY SMS sent successfully to: {}", normalizedPhone);
+            
+            return ResponseEntity.ok(ApiResponse.success(
+                "SMS sent successfully via BEPAY",
+                new TestSmsResponse(normalizedPhone, request.getMessage(), "SMS queued for delivery via BEPAY")
+            ));
+        } catch (Exception e) {
+            logger.error("Error sending test SMS via BEPAY: ", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(ApiResponse.error("Failed to send SMS via BEPAY: " + e.getMessage()));
         }
     }
 

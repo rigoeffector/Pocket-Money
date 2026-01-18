@@ -9,6 +9,7 @@ import com.pocketmoney.pocketmoney.dto.EfasheTransactionResponse;
 import com.pocketmoney.pocketmoney.dto.PaginatedResponse;
 import com.pocketmoney.pocketmoney.entity.EfasheServiceType;
 import com.pocketmoney.pocketmoney.service.EfashePaymentService;
+import com.pocketmoney.pocketmoney.service.PdfExportService;
 import jakarta.validation.Valid;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,9 +27,11 @@ public class EfasheController {
     private static final Logger logger = LoggerFactory.getLogger(EfasheController.class);
 
     private final EfashePaymentService efashePaymentService;
+    private final PdfExportService pdfExportService;
 
-    public EfasheController(EfashePaymentService efashePaymentService) {
+    public EfasheController(EfashePaymentService efashePaymentService, PdfExportService pdfExportService) {
         this.efashePaymentService = efashePaymentService;
+        this.pdfExportService = pdfExportService;
     }
 
     /**
@@ -140,7 +143,7 @@ public class EfasheController {
      *   - USER: Can only see their own transactions (automatically filtered by their phone number)
      * 
      * Query parameters:
-     *   - serviceType: Optional filter by service type (AIRTIME, RRA, TV, MTN)
+     *   - serviceType: Optional filter by service type (AIRTIME, RRA, TV, MTN, ELECTRICITY, or ALL to show all service types)
      *   - phone: Optional filter by customer phone number (accepts any format, will be normalized)
      *            - For ADMIN/RECEIVER: optional filter
      *            - For USER: ignored, automatically uses their own phone number
@@ -151,15 +154,16 @@ public class EfasheController {
      * 
      * Examples:
      *   ADMIN: /api/efashe/transactions?serviceType=RRA&phone=250784638201
+     *   ADMIN: /api/efashe/transactions?serviceType=ALL&phone=250794230137&fromDate=2026-01-16T00:00:00&toDate=2026-01-16T23:59:59 (shows all service types)
      *   ADMIN: /api/efashe/transactions (returns all transactions)
      *   RECEIVER: /api/efashe/transactions?serviceType=AIRTIME&phone=250784638201
-     *   RECEIVER: /api/efashe/transactions (returns all transactions)
+     *   RECEIVER: /api/efashe/transactions?serviceType=ALL (shows all service types)
      *   USER: /api/efashe/transactions?serviceType=RRA (returns only user's transactions)
-     *   USER: /api/efashe/transactions?phone=250784638201 (phone parameter ignored, returns only user's transactions)
+     *   USER: /api/efashe/transactions?serviceType=ALL (returns all service types for user's transactions)
      */
     @GetMapping("/transactions")
     public ResponseEntity<ApiResponse<PaginatedResponse<EfasheTransactionResponse>>> getTransactions(
-            @RequestParam(value = "serviceType", required = false) EfasheServiceType serviceType,
+            @RequestParam(value = "serviceType", required = false) String serviceTypeParam,
             @RequestParam(value = "phone", required = false) String phone,
             @RequestParam(value = "page", defaultValue = "0") int page,
             @RequestParam(value = "size", defaultValue = "20") int size,
@@ -168,6 +172,21 @@ public class EfasheController {
             @RequestParam(value = "toDate", required = false) 
             @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate) {
         try {
+            // Parse serviceType parameter - allow "ALL" to show all service types
+            EfasheServiceType serviceType = null;
+            if (serviceTypeParam != null && !serviceTypeParam.trim().isEmpty()) {
+                String serviceTypeStr = serviceTypeParam.trim().toUpperCase();
+                if (!"ALL".equals(serviceTypeStr)) {
+                    try {
+                        serviceType = EfasheServiceType.valueOf(serviceTypeStr);
+                    } catch (IllegalArgumentException e) {
+                        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                                .body(ApiResponse.error("Invalid serviceType: " + serviceTypeParam + ". Valid values are: AIRTIME, RRA, TV, MTN, ELECTRICITY, or ALL"));
+                    }
+                }
+                // If "ALL", serviceType remains null, which means no filter will be applied
+            }
+            
             PaginatedResponse<EfasheTransactionResponse> response = efashePaymentService.getTransactions(
                 serviceType, phone, page, size, fromDate, toDate);
             return ResponseEntity.ok(ApiResponse.success("EFASHE transactions retrieved successfully", response));
@@ -175,6 +194,66 @@ public class EfasheController {
             logger.error("Error retrieving EFASHE transactions: ", e);
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    /**
+     * Export PDF receipt for successful RRA or TV transactions
+     * GET /api/efashe/receipt/{transactionId}
+     * 
+     * Only works for:
+     *   - RRA and TV service types
+     *   - SUCCESS transactions (both MoPay and EFASHE status must be SUCCESS)
+     */
+    @GetMapping("/receipt/{transactionId}")
+    public ResponseEntity<byte[]> exportReceipt(@PathVariable("transactionId") String transactionId) {
+        try {
+            // Get transaction by ID (tries both EFASHE and MoPay transaction IDs)
+            var transactionOpt = efashePaymentService.findTransactionById(transactionId);
+            
+            if (!transactionOpt.isPresent()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+            }
+            
+            var transaction = transactionOpt.get();
+            
+            // Validate service type - only RRA and TV are allowed
+            if (transaction.getServiceType() != EfasheServiceType.RRA && 
+                transaction.getServiceType() != EfasheServiceType.TV) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST).build();
+            }
+            
+            // Validate transaction status - must be SUCCESS for both MoPay and EFASHE
+            String mopayStatus = transaction.getMopayStatus();
+            String efasheStatus = transaction.getEfasheStatus();
+            
+            boolean isSuccess = (mopayStatus != null && ("200".equals(mopayStatus) || "201".equals(mopayStatus) || "SUCCESS".equalsIgnoreCase(mopayStatus)))
+                && (efasheStatus != null && "SUCCESS".equalsIgnoreCase(efasheStatus));
+            
+            if (!isSuccess) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST).build();
+            }
+            
+            // Generate PDF receipt
+            byte[] pdfBytes = pdfExportService.generateEfasheReceiptPdf(transaction);
+            
+            // Set response headers
+            org.springframework.http.HttpHeaders headers = new org.springframework.http.HttpHeaders();
+            headers.setContentType(org.springframework.http.MediaType.APPLICATION_PDF);
+            
+            String filename = "receipt_" + transaction.getServiceType().toString().toLowerCase() + "_" + 
+                transactionId + "_" + 
+                java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd")) + ".pdf";
+            
+            headers.setContentDispositionFormData("attachment", filename);
+            headers.setContentLength(pdfBytes.length);
+            
+            return ResponseEntity.ok()
+                    .headers(headers)
+                    .body(pdfBytes);
+        } catch (RuntimeException e) {
+            logger.error("Error exporting EFASHE receipt: ", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }
 }

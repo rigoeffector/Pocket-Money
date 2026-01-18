@@ -206,13 +206,13 @@ public class EfashePaymentService {
             .setScale(0, RoundingMode.HALF_UP); // Round to whole number
 
         // Full amount phone receives: amount - (customerCashback + besoftShare)
-        // Customer gets cashback back and Besoft phone gets their share
+        // Customer gets cashback back and Bepay phone gets their share
         // Agent Commission is included in the full amount phone's portion
             fullAmountPhoneReceives = amount.subtract(customerCashbackAmount)
-            .subtract(besoftShareAmount)
-            .setScale(0, RoundingMode.HALF_UP); // Round to whole number
+                .subtract(besoftShareAmount)
+                .setScale(0, RoundingMode.HALF_UP); // Round to whole number
 
-        logger.info("Amount breakdown - Total: {}, Customer Cashback: {}, Besoft Share: {}, Agent Commission: {}, Full Amount Phone (remaining after cashback and besoft): {}",
+        logger.info("Amount breakdown - Total: {}, Customer Cashback: {}, Bepay Share: {}, Agent Commission: {}, Full Amount Phone (remaining after cashback and bepay): {}",
             amount, customerCashbackAmount, besoftShareAmount, agentCommissionAmount, fullAmountPhoneReceives);
 
         // Validate that fullAmountPhoneReceives is not negative
@@ -624,26 +624,55 @@ public class EfashePaymentService {
     }
 
     /**
-     * Check the status of an EFASHE transaction using MoPay transaction ID
+     * Find EFASHE transaction by ID (tries both EFASHE transaction ID and MoPay transaction ID)
+     * @param transactionId Can be either the EFASHE transaction ID or MoPay transaction ID
+     * @return Optional containing the transaction if found
+     */
+    @Transactional(readOnly = true)
+    public Optional<EfasheTransaction> findTransactionById(String transactionId) {
+        // Try to find transaction by EFASHE transaction ID first, then by MoPay transaction ID
+        // This allows the endpoint to work with both transaction ID formats
+        Optional<EfasheTransaction> transactionOpt = efasheTransactionRepository.findByTransactionId(transactionId);
+        
+        if (!transactionOpt.isPresent()) {
+            // If not found by EFASHE transaction ID, try MoPay transaction ID
+            logger.info("Transaction not found by EFASHE transaction ID, trying MoPay transaction ID: {}", transactionId);
+            transactionOpt = efasheTransactionRepository.findByMopayTransactionId(transactionId);
+        }
+        
+        return transactionOpt;
+    }
+    
+    /**
+     * Check the status of an EFASHE transaction using either EFASHE transaction ID or MoPay transaction ID
      * If status is SUCCESS (200), automatically triggers EFASHE validate and execute
-     * @param transactionId The MoPay transaction ID (used as primary identifier)
+     * @param transactionId Can be either the EFASHE transaction ID or MoPay transaction ID
      * @return EfasheStatusResponse containing the transaction status and EFASHE responses
      */
     @Transactional
     public EfasheStatusResponse checkTransactionStatus(String transactionId) {
-        logger.info("Checking EFASHE transaction status for MoPay transaction ID: {}", transactionId);
+        logger.info("Checking EFASHE transaction status for transaction ID: {} (trying both EFASHE and MoPay IDs)", transactionId);
+        
+        // Use the helper method to find transaction
+        Optional<EfasheTransaction> transactionOpt = findTransactionById(transactionId);
         
         // Get stored transaction record - ALWAYS update existing row, never create new one
-        // transactionId is now the MoPay transaction ID
-        EfasheTransaction transaction = efasheTransactionRepository.findByTransactionId(transactionId)
-            .orElseThrow(() -> new RuntimeException("EFASHE transaction not found: " + transactionId));
+        EfasheTransaction transaction = transactionOpt
+            .orElseThrow(() -> new RuntimeException("EFASHE transaction not found with ID: " + transactionId + " (tried both EFASHE and MoPay IDs)"));
         
-        logger.info("Found existing transaction - ID: {}, Current MoPay Status: {}, Current EFASHE Status: {}, Initial MoPay Status: {}, Initial EFASHE Status: {}", 
-            transaction.getId(), transaction.getMopayStatus(), transaction.getEfasheStatus(), 
+        logger.info("Found existing transaction - ID: {}, EFASHE Transaction ID: {}, MoPay Transaction ID: {}, Current MoPay Status: {}, Current EFASHE Status: {}, Initial MoPay Status: {}, Initial EFASHE Status: {}", 
+            transaction.getId(), transaction.getTransactionId(), transaction.getMopayTransactionId(), 
+            transaction.getMopayStatus(), transaction.getEfasheStatus(), 
             transaction.getInitialMopayStatus(), transaction.getInitialEfasheStatus());
         
-        // Check MoPay status using the transaction ID (which is the MoPay transaction ID)
-        MoPayResponse moPayResponse = moPayService.checkTransactionStatus(transactionId);
+        // Use the actual MoPay transaction ID from the transaction record for checking MoPay status
+        // The transactionId parameter might be either EFASHE or MoPay ID, but we need the actual MoPay ID for the API call
+        String mopayTransactionIdToCheck = transaction.getMopayTransactionId() != null 
+            ? transaction.getMopayTransactionId() 
+            : transaction.getTransactionId(); // Fallback to transactionId if mopayTransactionId is null
+        
+        logger.info("Checking MoPay status using transaction ID: {} (from stored transaction record)", mopayTransactionIdToCheck);
+        MoPayResponse moPayResponse = moPayService.checkTransactionStatus(mopayTransactionIdToCheck);
         
         EfasheExecuteResponse executeResponse = null;
         
@@ -691,9 +720,15 @@ public class EfashePaymentService {
                         EfasheExecuteRequest executeRequest = new EfasheExecuteRequest();
                     executeRequest.setTrxId(trxId);
                         executeRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
-                        // For RRA service type, don't send amount
-                        if (transaction.getServiceType() != EfasheServiceType.RRA) {
+                        // Always send amount (including for RRA) - EFASHE requires it even for RRA
+                        // For RRA, the amount comes from vendMin (already set during initiate)
+                        if (transaction.getAmount() != null) {
                         executeRequest.setAmount(transaction.getAmount());
+                            logger.info("EFASHE execute - Setting amount: {} for service type: {}", 
+                                transaction.getAmount(), transaction.getServiceType());
+                        } else {
+                            logger.error("EFASHE execute - Amount is null for transaction: {}", transaction.getTransactionId());
+                            throw new RuntimeException("Amount is required for EFASHE execute but is null in transaction");
                         }
                         executeRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
                     
@@ -821,106 +856,18 @@ public class EfashePaymentService {
                                 logger.info("EFASHE execute initiated async - PollEndpoint: {}, RetryAfterSecs: {}s", 
                                     executeResponse.getPollEndpoint(), executeResponse.getRetryAfterSecs());
                                 
-                                // Wait for retryAfterSecs before polling (if specified)
-                                if (executeResponse.getRetryAfterSecs() != null && executeResponse.getRetryAfterSecs() > 0) {
-                                    try {
-                                        logger.info("Waiting {} seconds before polling EFASHE status...", executeResponse.getRetryAfterSecs());
-                                        Thread.sleep(executeResponse.getRetryAfterSecs() * 1000L);
-                                    } catch (InterruptedException ie) {
-                                        Thread.currentThread().interrupt();
-                                        logger.warn("Interrupted while waiting to poll EFASHE status");
-                                    }
-                                }
-                                
-                                // Poll the status endpoint to check if transaction is SUCCESS
-                                try {
-                                    EfashePollStatusResponse pollResponse = efasheApiService.pollTransactionStatus(executeResponse.getPollEndpoint());
-                                    
-                                    if (pollResponse != null) {
-                                        String pollStatus = pollResponse.getStatus();
-                                        logger.info("EFASHE poll response received - Status: {}, Message: {}, TrxId: {}", 
-                                            pollStatus, pollResponse.getMessage(), pollResponse.getTrxId());
-                                        
-                                        // Check if status is SUCCESS (case-insensitive, trim whitespace)
-                                        String trimmedStatus = pollStatus != null ? pollStatus.trim() : null;
-                                        if (trimmedStatus != null && "SUCCESS".equalsIgnoreCase(trimmedStatus)) {
-                                            transaction.setEfasheStatus("SUCCESS");
-                                            
-                                            // For ELECTRICITY service, extract and store token and KWH information if available
-                                            if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
-                                                String token = pollResponse.getToken();
-                                                String pollMessage = pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction completed successfully";
-                                                String kwh = null;
-                                                
-                                                // Try to extract KWH from extraInfo if available
-                                                if (pollResponse.getExtraInfo() != null) {
-                                                    try {
-                                                        if (pollResponse.getExtraInfo() instanceof java.util.Map) {
-                                                            @SuppressWarnings("unchecked")
-                                                            java.util.Map<String, Object> extraInfoMap = (java.util.Map<String, Object>) pollResponse.getExtraInfo();
-                                                            if (extraInfoMap.containsKey("kwh") || extraInfoMap.containsKey("KWH") || extraInfoMap.containsKey("kWh")) {
-                                                                Object kwhObj = extraInfoMap.getOrDefault("kwh", extraInfoMap.getOrDefault("KWH", extraInfoMap.get("kWh")));
-                                                                if (kwhObj != null) {
-                                                                    kwh = kwhObj.toString();
-                                                                    logger.info("ELECTRICITY service - KWH extracted from poll extraInfo: {}", kwh);
-                                                                }
-                                                            }
-                                                        }
-                                                    } catch (Exception e) {
-                                                        logger.debug("Error extracting KWH from poll extraInfo: {}", e.getMessage());
-                                                    }
-                                                }
-                                                
-                                                // Build message with token and KWH
-                                                StringBuilder messageBuilder = new StringBuilder(pollMessage);
-                                                
-                                                if (token != null && !token.isEmpty()) {
-                                                    if (messageBuilder.length() > 0) {
-                                                        messageBuilder.append(" | ");
-                                                    }
-                                                    messageBuilder.append("Token: ").append(token);
-                                                    logger.info("ELECTRICITY service - Token received from poll: {}", token);
-                                                }
-                                                
-                                                if (kwh != null && !kwh.isEmpty()) {
-                                                    if (messageBuilder.length() > 0) {
-                                                        messageBuilder.append(" | ");
-                                                    }
-                                                    messageBuilder.append("KWH: ").append(kwh);
-                                                    logger.info("ELECTRICITY service - KWH received from poll: {}", kwh);
-                                                }
-                                                
-                                                transaction.setMessage(messageBuilder.toString());
-                                            } else {
-                                            transaction.setMessage(pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction completed successfully");
-                                            }
-                                            
-                                            logger.info("EFASHE transaction SUCCESS confirmed from poll - Status: '{}'", trimmedStatus);
-                                            
-                                            // Update existing transaction (never create new row)
+                                // Store pollEndpoint and retryAfterSecs for later polling
+                                transaction.setPollEndpoint(executeResponse.getPollEndpoint());
+                                transaction.setRetryAfterSecs(executeResponse.getRetryAfterSecs());
                                             efasheTransactionRepository.save(transaction);
-                                            logger.info("Updated existing transaction row - Transaction ID: {}, EFASHE Status: SUCCESS (from poll)", transaction.getTransactionId());
                                             
-                                            // Cashback transfers already included in initial MoPay request - no separate requests needed
-                                            logger.info("Cashback transfers already included in initial MoPay request - no separate requests needed");
-                                            
-                                            // Send WhatsApp notification
-                                            sendWhatsAppNotification(transaction);
-                                        } else {
-                                            // Still pending or failed - log the actual status value
-                                            String actualStatus = trimmedStatus != null ? trimmedStatus : "PENDING";
-                                            transaction.setEfasheStatus(actualStatus);
-                                            transaction.setMessage(pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction is still processing");
-                                            logger.info("EFASHE transaction status from poll - Status: '{}' (not SUCCESS yet, will need to check again)", actualStatus);
-                                        }
-                                    } else {
-                                        logger.warn("EFASHE poll response is null, keeping status as PENDING");
-                                        transaction.setEfasheStatus("PENDING");
-                                        transaction.setMessage("EFASHE transaction is still processing");
-                                    }
-                                } catch (Exception e) {
-                                    logger.warn("Error polling EFASHE status, will remain PENDING: ", e);
-                                    // Keep status as PENDING if poll fails, can be checked again later
+                                // Automatic retry polling - poll until SUCCESS or max retries
+                                boolean pollSuccess = pollUntilSuccess(transaction, executeResponse.getPollEndpoint(), 
+                                    executeResponse.getRetryAfterSecs() != null ? executeResponse.getRetryAfterSecs() : 10);
+                                
+                                if (!pollSuccess) {
+                                    logger.warn("EFASHE polling completed but status is still not SUCCESS - Transaction ID: {}, Status: {}", 
+                                        transaction.getTransactionId(), transaction.getEfasheStatus());
                                 }
                             } else {
                                 // Synchronous response - check if status is SUCCESS
@@ -957,53 +904,59 @@ public class EfashePaymentService {
                 logger.info("MoPay transaction not yet SUCCESS or already processed - Status: {}, EFASHE Status: {}", 
                     statusCode, transaction.getEfasheStatus());
                 
-                // If EFASHE is PENDING with pollEndpoint, check status again
+                // If EFASHE is PENDING with pollEndpoint and MoPay is SUCCESS, use automatic retry polling
                 // NOTE: If /vend/execute returned HTTP 200, status is already SUCCESS, so we don't poll
                 // Only poll if status is still PENDING and we have a pollEndpoint
                 if ("PENDING".equalsIgnoreCase(transaction.getEfasheStatus()) 
                     && transaction.getPollEndpoint() != null 
                     && !transaction.getPollEndpoint().isEmpty()
-                    && (transaction.getCashbackSent() == null || !transaction.getCashbackSent())) {
-                    logger.info("Checking EFASHE poll status for pending transaction - PollEndpoint: {}", transaction.getPollEndpoint());
-                    try {
-                        EfashePollStatusResponse pollResponse = efasheApiService.pollTransactionStatus(transaction.getPollEndpoint());
-                        
-                        if (pollResponse != null) {
-                            String pollStatus = pollResponse.getStatus();
-                            logger.info("EFASHE poll response received - Status: '{}', Message: {}, TrxId: {}", 
-                                pollStatus, pollResponse.getMessage(), pollResponse.getTrxId());
-                            
-                            // Check if status is SUCCESS (case-insensitive, trim whitespace)
-                            if (pollStatus != null && "SUCCESS".equalsIgnoreCase(pollStatus.trim())) {
-                                transaction.setEfasheStatus("SUCCESS");
-                                transaction.setMessage(pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction completed successfully");
-                                logger.info("EFASHE transaction SUCCESS confirmed from poll - Status: {}", pollStatus);
-                                
-                                // Update existing transaction (never create new row)
-                                efasheTransactionRepository.save(transaction);
-                                logger.info("Updated existing transaction row - Transaction ID: {}, EFASHE Status: SUCCESS (from poll)", transaction.getTransactionId());
-                                
-                                // Cashback transfers already included in initial MoPay request - no separate requests needed
-                                logger.info("Cashback transfers already included in initial MoPay request - no separate requests needed");
-                                
-                                // Send WhatsApp notification
-                                sendWhatsAppNotification(transaction);
-                            } else if (pollStatus != null) {
-                                // Update status (could be FAILED or still PENDING)
-                                String actualStatus = pollStatus.trim();
-                                transaction.setEfasheStatus(actualStatus);
-                                transaction.setMessage(pollResponse.getMessage());
-                                logger.info("EFASHE poll status updated - Status: '{}' (not SUCCESS yet)", actualStatus);
+                    && (transaction.getCashbackSent() == null || !transaction.getCashbackSent())
+                    && isSuccess) { // Only retry when MoPay is SUCCESS
+                    
+                    logger.info("MoPay is SUCCESS and EFASHE is PENDING - Starting automatic retry polling - PollEndpoint: {}", 
+                        transaction.getPollEndpoint());
+                    
+                    Integer retryAfterSecs = transaction.getRetryAfterSecs() != null && transaction.getRetryAfterSecs() > 0 
+                        ? transaction.getRetryAfterSecs() : 10;
+                    
+                    boolean pollSuccess = pollUntilSuccess(transaction, transaction.getPollEndpoint(), retryAfterSecs);
+                    
+                    if (pollSuccess) {
+                        logger.info("✅ Automatic retry polling completed - Transaction ID: {}, EFASHE Status: SUCCESS", 
+                            transaction.getTransactionId());
                             } else {
-                                logger.warn("EFASHE poll response status is null, keeping status as PENDING");
-                            }
+                        logger.warn("⚠️ Automatic retry polling completed but status is still not SUCCESS - Transaction ID: {}, Status: {}", 
+                            transaction.getTransactionId(), transaction.getEfasheStatus());
+                    }
+                } else if ("PENDING".equalsIgnoreCase(transaction.getEfasheStatus()) 
+                    && transaction.getPollEndpoint() != null 
+                    && !transaction.getPollEndpoint().isEmpty()
+                    && !isSuccess) {
+                    logger.info("EFASHE is PENDING but MoPay is not yet SUCCESS - Skipping polling until MoPay succeeds");
+                }
+                
+                // If EFASHE is FAILED with pollEndpoint and MoPay is SUCCESS, retry polling
+                // This handles cases where polling failed but the pollEndpoint is still valid
+                if ("FAILED".equalsIgnoreCase(transaction.getEfasheStatus()) 
+                    && transaction.getPollEndpoint() != null 
+                    && !transaction.getPollEndpoint().isEmpty()
+                    && (transaction.getCashbackSent() == null || !transaction.getCashbackSent())
+                    && isSuccess) { // Only retry when MoPay is SUCCESS
+                    
+                    logger.info("MoPay is SUCCESS and EFASHE is FAILED - Retrying automatic polling - PollEndpoint: {}", 
+                        transaction.getPollEndpoint());
+                    
+                    Integer retryAfterSecs = transaction.getRetryAfterSecs() != null && transaction.getRetryAfterSecs() > 0 
+                        ? transaction.getRetryAfterSecs() : 10;
+                    
+                    boolean pollSuccess = pollUntilSuccess(transaction, transaction.getPollEndpoint(), retryAfterSecs);
+                    
+                    if (pollSuccess) {
+                        logger.info("✅ Retry polling completed - Transaction ID: {}, EFASHE Status: SUCCESS", 
+                            transaction.getTransactionId());
                         } else {
-                            logger.warn("EFASHE poll response is null, keeping status as PENDING");
-                        }
-                    } catch (Exception e) {
-                        logger.error("Error polling EFASHE status for pending transaction: ", e);
-                        e.printStackTrace();
-                        // Keep status as PENDING if poll fails
+                        logger.warn("⚠️ Retry polling completed but status is still not SUCCESS - Transaction ID: {}, Status: {}", 
+                            transaction.getTransactionId(), transaction.getEfasheStatus());
                     }
                 }
             }
@@ -1384,6 +1337,193 @@ public class EfashePaymentService {
     }
     
     /**
+     * Poll EFASHE status until SUCCESS or max retries
+     * Only retries when MoPay status is SUCCESS and EFASHE status is PENDING
+     * @param transaction The transaction to poll
+     * @param pollEndpoint The poll endpoint URL
+     * @param initialRetryAfterSecs Initial wait time before first poll
+     * @return true if SUCCESS, false if still PENDING after max retries
+     */
+    private boolean pollUntilSuccess(EfasheTransaction transaction, String pollEndpoint, Integer initialRetryAfterSecs) {
+        logger.info("=== START Automatic Polling with Retry Mechanism ===");
+        logger.info("Transaction ID: {}, Poll Endpoint: {}, Initial Retry After: {}s", 
+            transaction.getTransactionId(), pollEndpoint, initialRetryAfterSecs);
+        
+        int maxRetries = 10; // Maximum number of retry attempts
+        int retryCount = 0;
+        int retryAfterSecs = initialRetryAfterSecs != null && initialRetryAfterSecs > 0 ? initialRetryAfterSecs : 10;
+        
+        // Wait before first poll
+        if (retryAfterSecs > 0) {
+            try {
+                logger.info("Waiting {} seconds before first poll...", retryAfterSecs);
+                Thread.sleep(retryAfterSecs * 1000L);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                logger.warn("Interrupted while waiting to poll EFASHE status");
+                return false;
+            }
+        }
+        
+        // Poll loop - retry until SUCCESS or max retries
+        while (retryCount < maxRetries) {
+            retryCount++;
+            logger.info("Poll attempt {}/{} - Transaction ID: {}", retryCount, maxRetries, transaction.getTransactionId());
+            
+            try {
+                // Poll the status endpoint
+                EfashePollStatusResponse pollResponse = efasheApiService.pollTransactionStatus(pollEndpoint);
+                
+                if (pollResponse != null) {
+                    String pollStatus = pollResponse.getStatus();
+                    logger.info("EFASHE poll response [{}/{}] - Status: {}, Message: {}, TrxId: {}", 
+                        retryCount, maxRetries, pollStatus, pollResponse.getMessage(), pollResponse.getTrxId());
+                    
+                    // Check if status is SUCCESS (case-insensitive, trim whitespace)
+                    String trimmedStatus = pollStatus != null ? pollStatus.trim() : null;
+                    if (trimmedStatus != null && "SUCCESS".equalsIgnoreCase(trimmedStatus)) {
+                        logger.info("✅ EFASHE transaction SUCCESS confirmed on attempt {}/{}", retryCount, maxRetries);
+                        
+                        // Set status to SUCCESS
+                        transaction.setEfasheStatus("SUCCESS");
+                        
+                        // For ELECTRICITY service, extract and store token and KWH information
+                        if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
+                            String token = pollResponse.getToken();
+                            String pollMessage = pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction completed successfully";
+                            String kwh = null;
+                            
+                            // Extract KWH from extraInfo
+                            if (pollResponse.getExtraInfo() != null) {
+                                try {
+                                    if (pollResponse.getExtraInfo() instanceof java.util.Map) {
+                                        @SuppressWarnings("unchecked")
+                                        java.util.Map<String, Object> extraInfoMap = (java.util.Map<String, Object>) pollResponse.getExtraInfo();
+                                        if (extraInfoMap.containsKey("kwh") || extraInfoMap.containsKey("KWH") || extraInfoMap.containsKey("kWh")) {
+                                            Object kwhObj = extraInfoMap.getOrDefault("kwh", extraInfoMap.getOrDefault("KWH", extraInfoMap.get("kWh")));
+                                            if (kwhObj != null) {
+                                                kwh = kwhObj.toString();
+                                                logger.info("ELECTRICITY service - KWH extracted from poll extraInfo: {}", kwh);
+                                            }
+                                        }
+                                    }
+                                } catch (Exception e) {
+                                    logger.debug("Error extracting KWH from poll extraInfo: {}", e.getMessage());
+                                }
+                            }
+                            
+                            // Build message with token and KWH
+                            StringBuilder messageBuilder = new StringBuilder(pollMessage);
+                            
+                            if (token != null && !token.isEmpty()) {
+                                if (messageBuilder.length() > 0) {
+                                    messageBuilder.append(" | ");
+                                }
+                                messageBuilder.append("Token: ").append(token);
+                                logger.info("ELECTRICITY service - Token received from poll: {}", token);
+                            }
+                            
+                            if (kwh != null && !kwh.isEmpty()) {
+                                if (messageBuilder.length() > 0) {
+                                    messageBuilder.append(" | ");
+                                }
+                                messageBuilder.append("KWH: ").append(kwh);
+                                logger.info("ELECTRICITY service - KWH received from poll: {}", kwh);
+                            }
+                            
+                            transaction.setMessage(messageBuilder.toString());
+                        } else {
+                            transaction.setMessage(pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction completed successfully");
+                        }
+                        
+                        // Update transaction
+                        efasheTransactionRepository.save(transaction);
+                        logger.info("Updated transaction - Transaction ID: {}, EFASHE Status: SUCCESS (from poll attempt {})", 
+                            transaction.getTransactionId(), retryCount);
+                        
+                        // Send WhatsApp notification
+                        sendWhatsAppNotification(transaction);
+                        
+                        logger.info("=== END Automatic Polling (SUCCESS) ===");
+                        return true;
+                        
+                    } else if (trimmedStatus != null && "FAILED".equalsIgnoreCase(trimmedStatus)) {
+                        // Transaction failed - stop retrying
+                        logger.error("❌ EFASHE transaction FAILED on attempt {}/{} - Status: {}", retryCount, maxRetries, trimmedStatus);
+                        transaction.setEfasheStatus("FAILED");
+                        transaction.setMessage(pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction failed");
+                        transaction.setErrorMessage("EFASHE transaction failed: " + pollResponse.getMessage());
+                        efasheTransactionRepository.save(transaction);
+                        logger.info("=== END Automatic Polling (FAILED) ===");
+                        return false;
+                        
+                    } else {
+                        // Still PENDING or other status - continue polling
+                        String actualStatus = trimmedStatus != null ? trimmedStatus : "PENDING";
+                        logger.info("EFASHE status is '{}' (not SUCCESS yet) - Will retry in {}s (attempt {}/{})", 
+                            actualStatus, retryAfterSecs, retryCount, maxRetries);
+                        
+                        // Update status (might be PENDING or other intermediate status)
+                        transaction.setEfasheStatus(actualStatus);
+                        transaction.setMessage(pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction is still processing");
+                        efasheTransactionRepository.save(transaction);
+                        
+                        // Wait before next retry (exponential backoff: increase delay slightly)
+                        if (retryCount < maxRetries) {
+                            try {
+                                int delaySeconds = retryAfterSecs + (retryCount * 2); // Slight increase: 10s, 12s, 14s, etc.
+                                logger.info("Waiting {} seconds before next poll attempt...", delaySeconds);
+                                Thread.sleep(delaySeconds * 1000L);
+                            } catch (InterruptedException ie) {
+                                Thread.currentThread().interrupt();
+                                logger.warn("Interrupted while waiting for next poll retry");
+                                return false;
+                            }
+                        }
+                    }
+                } else {
+                    logger.warn("EFASHE poll response is null on attempt {}/{} - Will retry", retryCount, maxRetries);
+                    
+                    // Wait before retry
+                    if (retryCount < maxRetries) {
+                        try {
+                            int delaySeconds = retryAfterSecs + (retryCount * 2);
+                            Thread.sleep(delaySeconds * 1000L);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            return false;
+                        }
+                    }
+                }
+                
+            } catch (Exception e) {
+                logger.error("Error polling EFASHE status on attempt {}/{}: {}", retryCount, maxRetries, e.getMessage(), e);
+                
+                // Wait before retry on error
+                if (retryCount < maxRetries) {
+                    try {
+                        int delaySeconds = retryAfterSecs + (retryCount * 2);
+                        logger.info("Error occurred, waiting {} seconds before retry...", delaySeconds);
+                        Thread.sleep(delaySeconds * 1000L);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return false;
+                    }
+                }
+            }
+        }
+        
+        // Max retries reached - still PENDING
+        logger.warn("⚠️ Max retries ({}) reached - EFASHE status is still PENDING. Transaction ID: {}", 
+            maxRetries, transaction.getTransactionId());
+        transaction.setMessage("EFASHE transaction is still processing after " + maxRetries + " poll attempts");
+        efasheTransactionRepository.save(transaction);
+        
+        logger.info("=== END Automatic Polling (MAX RETRIES REACHED) ===");
+        return false;
+    }
+    
+    /**
      * Send WhatsApp notification to the customer when EFASHE transaction is SUCCESS
      */
     private void sendWhatsAppNotification(EfasheTransaction transaction) {
@@ -1437,15 +1577,28 @@ public class EfashePaymentService {
             // For ELECTRICITY service, include token information if available
             if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
                 // Extract token from message if it's stored there
+                // Token format in message: "Token: {token}" or "Token: {token} | KWH: {kwh}"
                 String tokenInfo = "";
-                if (transaction.getMessage() != null && transaction.getMessage().contains("Token:")) {
-                    // Extract token from message
-                    String[] parts = transaction.getMessage().split("Token:");
-                    if (parts.length > 1) {
-                        tokenInfo = parts[1].trim();
-                        // Remove any additional text after token
-                        if (tokenInfo.contains(" | ")) {
-                            tokenInfo = tokenInfo.split(" \\| ")[0];
+                if (transaction.getMessage() != null) {
+                    String messageText = transaction.getMessage();
+                    logger.info("ELECTRICITY - Extracting token from message: {}", messageText);
+                    
+                    // Try multiple patterns to extract token
+                    if (messageText.contains("Token:")) {
+                        // Pattern 1: "Token: {token}"
+                        String[] parts = messageText.split("Token:");
+                        if (parts.length > 1) {
+                            tokenInfo = parts[1].trim();
+                            // Remove any additional text after token (KWH, | separator, etc.)
+                            if (tokenInfo.contains(" | ")) {
+                                tokenInfo = tokenInfo.split(" \\| ")[0].trim();
+                            }
+                            if (tokenInfo.contains("KWH:")) {
+                                tokenInfo = tokenInfo.split("KWH:")[0].trim();
+                            }
+                            // Clean up any trailing separators
+                            tokenInfo = tokenInfo.replaceAll("\\|", "").trim();
+                            logger.info("ELECTRICITY - Token extracted: {}", tokenInfo);
                         }
                     }
                 }
@@ -1453,30 +1606,33 @@ public class EfashePaymentService {
                 // Build message with owner name and token
                 String ownerInfo = ownerName != null ? " for " + ownerName : "";
                 
-                if (!tokenInfo.isEmpty()) {
+                if (tokenInfo != null && !tokenInfo.isEmpty()) {
+                    // Token is available - include it prominently in the message
                     message = String.format(
-                        "You Paid %s RWF for %s%s. Your token is: %s. Cashback: %s RWF. Thanks for using POCHI App",
+                        "You Paid %s RWF for %s%s. Your token is: %s. Cashback: %s RWF. Thanks for using Bepay POCHI App",
                         amount,
-                        serviceName,
+                serviceName,
                         ownerInfo,
                         tokenInfo,
                         cashbackAmount
                     );
+                    logger.info("ELECTRICITY - WhatsApp/SMS message with token: {}", message);
                 } else {
-                    // No token available yet
+                    // No token available yet - log warning
+                    logger.warn("ELECTRICITY - Token not found in transaction message. Message: {}", transaction.getMessage());
                     message = String.format(
-                        "You Paid %s RWF for %s%s. Cashback: %s RWF. Thanks for using POCHI App",
-                        amount,
+                        "You Paid %s RWF for %s%s. Cashback: %s RWF. Thanks for using Bepay POCHI App",
+                amount,
                         serviceName,
                         ownerInfo,
-                        cashbackAmount
-                    );
+                cashbackAmount
+            );
                 }
             } else if (transaction.getServiceType() == EfasheServiceType.RRA) {
                 // For RRA, include owner name (TIN owner)
                 String ownerInfo = ownerName != null ? " for " + ownerName : "";
                 message = String.format(
-                    "You Paid %s RWF for %s%s. Cashback: %s RWF. Thanks for using POCHI App",
+                    "You Paid %s RWF for %s%s. Cashback: %s RWF. Thanks for using Bepay POCHI App",
                     amount,
                     serviceName,
                     ownerInfo,
@@ -1485,7 +1641,7 @@ public class EfashePaymentService {
             } else {
                 // For other services (AIRTIME, TV, MTN)
                 message = String.format(
-                "You Paid %s, %s and your cash back is %s, Thanks for using POCHI App",
+                "You Paid %s, %s and your cash back is %s, Thanks for using Bepay POCHI App",
                 serviceName,
                 amount,
                 cashbackAmount
@@ -1495,9 +1651,24 @@ public class EfashePaymentService {
             // Use the same phone format as PaymentService (12 digits with 250)
             // WhatsApp service should handle the format conversion if needed
             String whatsappPhone = normalizedPhone;
+            
+            // Log token information for electricity transactions
+            if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
+                logger.info("=== ELECTRICITY TRANSACTION NOTIFICATION ===");
+                logger.info("Service: ELECTRICITY, Phone: {}, Amount: {} RWF", whatsappPhone, amount);
+                if (message.contains("token is:")) {
+                    logger.info("✅ TOKEN IS INCLUDED IN MESSAGE - Will be sent via WhatsApp and SMS");
+                } else {
+                    logger.warn("⚠️ TOKEN NOT FOUND IN MESSAGE - Token may not be available yet");
+                }
+            }
+            
             logger.info("=== CALLING WhatsApp Service ===");
             logger.info("WhatsApp Phone: {}", whatsappPhone);
             logger.info("WhatsApp Message: {}", message);
+            if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY && message.contains("token is:")) {
+                logger.info("✅ WhatsApp message includes TOKEN for electricity transaction");
+            }
             
             // Send WhatsApp notification
             whatsAppService.sendWhatsApp(message, whatsappPhone);
@@ -1506,13 +1677,16 @@ public class EfashePaymentService {
             logger.info("WhatsApp notification sent successfully to customer {} for EFASHE transaction: {}", 
                 whatsappPhone, transaction.getTransactionId());
             
-            // Send SMS notification (same message as WhatsApp)
-            logger.info("=== SENDING SMS Notification ===");
+            // Send SMS notification (same message as WhatsApp) via Swift.com
+            logger.info("=== SENDING SMS Notification via Swift.com ===");
             logger.info("SMS Phone: {}", whatsappPhone);
             logger.info("SMS Message: {}", message);
+            if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY && message.contains("token is:")) {
+                logger.info("✅ SMS message (Swift.com) includes TOKEN for electricity transaction");
+            }
             try {
                 messagingService.sendSms(message, whatsappPhone);
-                logger.info("SMS notification sent successfully to customer {} for EFASHE transaction: {}", 
+                logger.info("✅ SMS notification sent successfully via Swift.com to customer {} for EFASHE transaction: {}", 
                     whatsappPhone, transaction.getTransactionId());
             } catch (Exception smsException) {
                 logger.error("Failed to send SMS notification (WhatsApp was sent successfully): ", smsException);
@@ -1643,9 +1817,18 @@ public class EfashePaymentService {
             queryBuilder.append("AND t.createdAt <= :toDate ");
         }
         
-        // Exclude PENDING transactions - only show SUCCESS or FAILED
-        // Exclude if MoPay status is NULL or PENDING (transaction still in progress)
-        queryBuilder.append("AND t.mopayStatus IS NOT NULL AND t.mopayStatus != 'PENDING' ");
+        // Check if any filters are applied (excluding normalizedPhone for USER role, as it's always set)
+        boolean hasFilters = serviceType != null || fromDate != null || toDate != null 
+            || (isAdmin || isReceiver) && normalizedPhone != null && !normalizedPhone.trim().isEmpty();
+        
+        // Only exclude PENDING transactions when filters are applied
+        // When no filtering, show all transactions including PENDING and FAILED
+        if (hasFilters) {
+            // Exclude PENDING transactions - only show SUCCESS or FAILED
+            // Exclude if MoPay status is NULL or PENDING (transaction still in progress)
+            queryBuilder.append("AND t.mopayStatus IS NOT NULL AND t.mopayStatus != 'PENDING' ");
+        }
+        // If no filters, show all transactions (including PENDING)
         
         queryBuilder.append("ORDER BY t.createdAt DESC");
         
@@ -1683,9 +1866,13 @@ public class EfashePaymentService {
             countQueryBuilder.append("AND t.createdAt <= :toDate ");
         }
         
-        // Exclude PENDING transactions - only show SUCCESS or FAILED
-        // Exclude if MoPay status is NULL or PENDING (transaction still in progress)
-        countQueryBuilder.append("AND t.mopayStatus IS NOT NULL AND t.mopayStatus != 'PENDING' ");
+        // Only exclude PENDING transactions when filters are applied (same logic as main query)
+        if (hasFilters) {
+            // Exclude PENDING transactions - only show SUCCESS or FAILED
+            // Exclude if MoPay status is NULL or PENDING (transaction still in progress)
+            countQueryBuilder.append("AND t.mopayStatus IS NOT NULL AND t.mopayStatus != 'PENDING' ");
+        }
+        // If no filters, show all transactions (including PENDING)
         
         Query countQuery = entityManager.createQuery(countQueryBuilder.toString(), Long.class);
         

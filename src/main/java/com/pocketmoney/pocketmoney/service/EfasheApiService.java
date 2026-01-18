@@ -421,10 +421,10 @@ public class EfasheApiService {
         
         logger.info("Polling EFASHE transaction status - Endpoint: {}", url);
         
-        // Poll status endpoint does NOT require token authentication (as per user's previous note)
-        // Use headers without token
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(org.springframework.http.MediaType.APPLICATION_JSON);
+        // Poll status endpoint requires token authentication (same as validate and execute)
+        // Use headers with Bearer token for authentication
+        HttpHeaders headers = buildHeadersWithToken();
+        logger.info("EFASHE poll status - Using Bearer token authentication");
         HttpEntity<String> entity = new HttpEntity<>(headers);
 
         try {
