@@ -1574,21 +1574,22 @@ public class EfashePaymentService {
             
             String message;
             
-            // For ELECTRICITY service, include token information if available
+            // For ELECTRICITY service, include token and KWH information if available
             if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
-                // Extract token from message if it's stored there
+                // Extract token and KWH from message if it's stored there
                 // Token format in message: "Token: {token}" or "Token: {token} | KWH: {kwh}"
                 String tokenInfo = "";
+                String kwhInfo = "";
+                
                 if (transaction.getMessage() != null) {
                     String messageText = transaction.getMessage();
-                    logger.info("ELECTRICITY - Extracting token from message: {}", messageText);
+                    logger.info("ELECTRICITY - Extracting token and KWH from message: {}", messageText);
                     
-                    // Try multiple patterns to extract token
+                    // Extract token
                     if (messageText.contains("Token:")) {
-                        // Pattern 1: "Token: {token}"
-                        String[] parts = messageText.split("Token:");
-                        if (parts.length > 1) {
-                            tokenInfo = parts[1].trim();
+                        String[] tokenParts = messageText.split("Token:");
+                        if (tokenParts.length > 1) {
+                            tokenInfo = tokenParts[1].trim();
                             // Remove any additional text after token (KWH, | separator, etc.)
                             if (tokenInfo.contains(" | ")) {
                                 tokenInfo = tokenInfo.split(" \\| ")[0].trim();
@@ -1601,23 +1602,60 @@ public class EfashePaymentService {
                             logger.info("ELECTRICITY - Token extracted: {}", tokenInfo);
                         }
                     }
+                    
+                    // Extract KWH
+                    if (messageText.contains("KWH:")) {
+                        String[] kwhParts = messageText.split("KWH:");
+                        if (kwhParts.length > 1) {
+                            String kwhRaw = kwhParts[1].trim();
+                            // Remove any additional text after KWH (| separator, etc.)
+                            if (kwhRaw.contains(" | ")) {
+                                kwhRaw = kwhRaw.split(" \\| ")[0].trim();
+                            }
+                            // Format KWH to 1 decimal place
+                            try {
+                                double kwhValue = Double.parseDouble(kwhRaw);
+                                kwhInfo = String.format("%.1f", kwhValue);
+                                logger.info("ELECTRICITY - KWH extracted and formatted: {} -> {}", kwhRaw, kwhInfo);
+                            } catch (NumberFormatException e) {
+                                logger.warn("ELECTRICITY - Could not parse KWH value: {}", kwhRaw);
+                                kwhInfo = kwhRaw; // Use as-is if parsing fails
+                            }
+                        }
+                    }
                 }
                 
-                // Build message with owner name and token
+                // Build message with owner name, token, and KWH
                 String ownerInfo = ownerName != null ? " for " + ownerName : "";
                 
                 if (tokenInfo != null && !tokenInfo.isEmpty()) {
-                    // Token is available - include it prominently in the message
-                    message = String.format(
-                        "Bepay-Efashe-%s You Paid %s RWF for %s%s. Your token is: %s. Cashback: %s RWF. Thanks for using Bepay POCHI App",
-                        serviceName.toUpperCase(),
-                        amount,
-                        serviceName,
-                        ownerInfo,
-                        tokenInfo,
-                        cashbackAmount
-                    );
-                    logger.info("ELECTRICITY - WhatsApp/SMS message with token: {}", message);
+                    // Token is available - include it and KWH in the message
+                    if (kwhInfo != null && !kwhInfo.isEmpty()) {
+                        // Both token and KWH available
+                        message = String.format(
+                            "Bepay-Efashe-%s You Paid %s RWF for %s%s. Your token is: %s. KWH: %s. Cashback: %s RWF. Thanks for using Bepay POCHI App",
+                            serviceName.toUpperCase(),
+                            amount,
+                            serviceName,
+                            ownerInfo,
+                            tokenInfo,
+                            kwhInfo,
+                            cashbackAmount
+                        );
+                        logger.info("ELECTRICITY - WhatsApp/SMS message with token and KWH: {}", message);
+                    } else {
+                        // Only token available (KWH not yet available)
+                        message = String.format(
+                            "Bepay-Efashe-%s You Paid %s RWF for %s%s. Your token is: %s. Cashback: %s RWF. Thanks for using Bepay POCHI App",
+                            serviceName.toUpperCase(),
+                            amount,
+                            serviceName,
+                            ownerInfo,
+                            tokenInfo,
+                            cashbackAmount
+                        );
+                        logger.info("ELECTRICITY - WhatsApp/SMS message with token (KWH not available): {}", message);
+                    }
                 } else {
                     // No token available yet - log warning
                     logger.warn("ELECTRICITY - Token not found in transaction message. Message: {}", transaction.getMessage());
