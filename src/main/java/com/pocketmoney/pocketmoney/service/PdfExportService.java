@@ -10,11 +10,14 @@ import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.PDPageContentStream;
 import org.apache.pdfbox.pdmodel.common.PDRectangle;
 import org.apache.pdfbox.pdmodel.font.PDType1Font;
+import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Service;
 
 import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -496,20 +499,61 @@ public class PdfExportService {
                 float margin = 50;
                 float currentY = pageHeight - margin;
                 
-                // Company Information (Top Right)
-                contentStream.beginText();
-                contentStream.setFont(PDType1Font.HELVETICA_BOLD, 16);
-                float companyX = pageWidth - margin - 150;
-                contentStream.newLineAtOffset(companyX, currentY);
-                contentStream.showText("BEPAY");
-                contentStream.endText();
-                
-                currentY -= 8;
-                contentStream.beginText();
-                contentStream.setFont(PDType1Font.HELVETICA, 8);
-                contentStream.newLineAtOffset(companyX, currentY);
-                contentStream.showText("only if you want the best");
-                contentStream.endText();
+                // Load and draw logo image (Top Right)
+                try {
+                    ClassPathResource logoResource = new ClassPathResource("images/LOGO.jpeg");
+                    if (logoResource.exists()) {
+                        InputStream logoInputStream = logoResource.getInputStream();
+                        PDImageXObject logoImage = PDImageXObject.createFromByteArray(document, logoInputStream.readAllBytes(), "LOGO");
+                        logoInputStream.close();
+                        
+                        // Logo dimensions - scale to fit (max width 150, maintain aspect ratio)
+                        float logoWidth = 150;
+                        float logoHeight = (logoImage.getHeight() / logoImage.getWidth()) * logoWidth;
+                        
+                        // Position logo at top right
+                        float logoX = pageWidth - margin - logoWidth;
+                        float logoY = pageHeight - margin - logoHeight;
+                        
+                        contentStream.drawImage(logoImage, logoX, logoY, logoWidth, logoHeight);
+                        logger.info("Logo image added to PDF receipt - Size: {}x{}, Position: ({}, {})", logoWidth, logoHeight, logoX, logoY);
+                        
+                        // Adjust currentY to account for logo height
+                        currentY = logoY - 10; // Add some space below logo
+                    } else {
+                        logger.warn("Logo file not found at images/LOGO.jpeg, using text fallback");
+                        // Fallback to text if logo not found
+                        contentStream.beginText();
+                        contentStream.setFont(PDType1Font.HELVETICA_BOLD, 16);
+                        float companyX = pageWidth - margin - 150;
+                        contentStream.newLineAtOffset(companyX, currentY);
+                        contentStream.showText("BEPAY");
+                        contentStream.endText();
+                        
+                        currentY -= 8;
+                        contentStream.beginText();
+                        contentStream.setFont(PDType1Font.HELVETICA, 8);
+                        contentStream.newLineAtOffset(companyX, currentY);
+                        contentStream.showText("only if you want the best");
+                        contentStream.endText();
+                    }
+                } catch (Exception e) {
+                    logger.error("Error loading logo image: ", e);
+                    // Fallback to text if logo fails to load
+                    contentStream.beginText();
+                    contentStream.setFont(PDType1Font.HELVETICA_BOLD, 16);
+                    float companyX = pageWidth - margin - 150;
+                    contentStream.newLineAtOffset(companyX, currentY);
+                    contentStream.showText("BEPAY");
+                    contentStream.endText();
+                    
+                    currentY -= 8;
+                    contentStream.beginText();
+                    contentStream.setFont(PDType1Font.HELVETICA, 8);
+                    contentStream.newLineAtOffset(companyX, currentY);
+                    contentStream.showText("only if you want the best");
+                    contentStream.endText();
+                }
                 
                 // Invoice Header (Top Left)
                 currentY = pageHeight - margin;
@@ -699,7 +743,7 @@ public class PdfExportService {
                 contentStream.beginText();
                 contentStream.setFont(PDType1Font.HELVETICA, 10);
                 contentStream.newLineAtOffset(margin, currentY);
-                contentStream.showText("Amount Paid: " + amountStr + " " + transaction.getCurrency());
+                contentStream.showText("Amount Paid: " + amountStr);
                 contentStream.endText();
                 
                 currentY -= 35;
@@ -717,7 +761,7 @@ public class PdfExportService {
                 contentStream.beginText();
                 contentStream.setFont(PDType1Font.HELVETICA_BOLD, 11);
                 contentStream.newLineAtOffset(margin, currentY);
-                contentStream.showText("TOTAL PAID: " + amountStr + " " + transaction.getCurrency());
+                contentStream.showText("TOTAL PAID: " + amountStr);
                 contentStream.endText();
                 
                 currentY -= 14;

@@ -100,10 +100,12 @@ public class EfasheController {
 
     /**
      * Check EFASHE transaction status using MoPay transaction ID
-     * GET /api/efashe/status/{transactionId}
+     * GET/POST /api/efashe/status/{transactionId}
      * Automatically triggers EFASHE validate and execute when MoPay status is SUCCESS
+     * Supports both GET and POST methods for flexibility
      */
     @GetMapping("/status/{transactionId}")
+    @PostMapping("/status/{transactionId}")
     public ResponseEntity<ApiResponse<EfasheStatusResponse>> checkTransactionStatus(
             @PathVariable("transactionId") String transactionId) {
         try {

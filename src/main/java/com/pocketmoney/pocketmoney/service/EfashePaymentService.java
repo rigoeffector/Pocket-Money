@@ -1609,9 +1609,10 @@ public class EfashePaymentService {
                 if (tokenInfo != null && !tokenInfo.isEmpty()) {
                     // Token is available - include it prominently in the message
                     message = String.format(
-                        "You Paid %s RWF for %s%s. Your token is: %s. Cashback: %s RWF. Thanks for using Bepay POCHI App",
+                        "Bepay-Efashe-%s You Paid %s RWF for %s%s. Your token is: %s. Cashback: %s RWF. Thanks for using Bepay POCHI App",
+                        serviceName.toUpperCase(),
                         amount,
-                serviceName,
+                        serviceName,
                         ownerInfo,
                         tokenInfo,
                         cashbackAmount
@@ -1621,18 +1622,20 @@ public class EfashePaymentService {
                     // No token available yet - log warning
                     logger.warn("ELECTRICITY - Token not found in transaction message. Message: {}", transaction.getMessage());
                     message = String.format(
-                        "You Paid %s RWF for %s%s. Cashback: %s RWF. Thanks for using Bepay POCHI App",
-                amount,
+                        "Bepay-Efashe-%s You Paid %s RWF for %s%s. Cashback: %s RWF. Thanks for using Bepay POCHI App",
+                        serviceName.toUpperCase(),
+                        amount,
                         serviceName,
                         ownerInfo,
-                cashbackAmount
-            );
+                        cashbackAmount
+                    );
                 }
             } else if (transaction.getServiceType() == EfasheServiceType.RRA) {
                 // For RRA, include owner name (TIN owner)
                 String ownerInfo = ownerName != null ? " for " + ownerName : "";
                 message = String.format(
-                    "You Paid %s RWF for %s%s. Cashback: %s RWF. Thanks for using Bepay POCHI App",
+                    "Bepay-Efashe-%s You Paid %s RWF for %s%s. Cashback: %s RWF. Thanks for using Bepay POCHI App",
+                    serviceName.toUpperCase(),
                     amount,
                     serviceName,
                     ownerInfo,
@@ -1641,11 +1644,12 @@ public class EfashePaymentService {
             } else {
                 // For other services (AIRTIME, TV, MTN)
                 message = String.format(
-                "You Paid %s, %s and your cash back is %s, Thanks for using Bepay POCHI App",
-                serviceName,
-                amount,
-                cashbackAmount
-            );
+                    "Bepay-Efashe-%s You Paid %s, %s and your cash back is %s, Thanks for using Bepay POCHI App",
+                    serviceName.toUpperCase(),
+                    serviceName,
+                    amount,
+                    cashbackAmount
+                );
             }
             
             // Use the same phone format as PaymentService (12 digits with 250)
