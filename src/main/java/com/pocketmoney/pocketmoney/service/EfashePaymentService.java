@@ -738,11 +738,11 @@ public class EfashePaymentService {
                 
                 // Execute the transaction first to actually deliver the service (airtime, electricity, etc.)
                 try {
-                    EfasheExecuteRequest executeRequest = new EfasheExecuteRequest();
+                        EfasheExecuteRequest executeRequest = new EfasheExecuteRequest();
                     executeRequest.setTrxId(transaction.getTrxId());
-                    executeRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
-                    executeRequest.setAmount(transaction.getAmount());
-                    executeRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
+                        executeRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
+                        executeRequest.setAmount(transaction.getAmount());
+                        executeRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
                     
                     String deliveryMethodId = transaction.getDeliveryMethodId();
                     if (deliveryMethodId == null || deliveryMethodId.trim().isEmpty()) {
@@ -758,11 +758,8 @@ public class EfashePaymentService {
                         executeRequest.setDeliverTo(deliverTo);
                     }
                     
-                    logger.info("Executing EFASHE transaction to deliver service - TrxId: {}, Service: {}, Amount: {}, Account: {}", 
-                        executeRequest.getTrxId(), transaction.getServiceType(), executeRequest.getAmount(), 
-                        executeRequest.getCustomerAccountNumber());
-                    
-                    executeResponse = efasheApiService.executeTransaction(executeRequest);
+                    // Use executeWithRetry to handle 3-minute window errors
+                    executeResponse = executeWithRetry(transaction);
                     
                     if (executeResponse != null) {
                         logger.info("✅ EFASHE execute completed - HTTP Status: {}, Message: {}, ServiceType: {}, CustomerAccountNumber: {}", 
@@ -809,8 +806,9 @@ public class EfashePaymentService {
                     logger.info("✅ Retry polling completed - Transaction ID: {}, EFASHE Status: SUCCESS", 
                         transaction.getTransactionId());
                 } else {
-                    logger.warn("⚠️ Retry polling completed but status is still not SUCCESS - Transaction ID: {}, Status: {}", 
+                    logger.error("❌ Retry polling failed - Transaction ID: {}, Status: {} - NOT sending notifications. Throwing error.", 
                         transaction.getTransactionId(), transaction.getEfasheStatus());
+                    throw new RuntimeException("EFASHE polling failed. Status: " + transaction.getEfasheStatus() + ". Transaction ID: " + transaction.getTransactionId());
                 }
             } else if (isSuccess && !"SUCCESS".equalsIgnoreCase(transaction.getEfasheStatus())) {
                 logger.info("MoPay transaction SUCCESS detected (status: {}, success: {}). Triggering EFASHE execute...", 
@@ -830,50 +828,14 @@ public class EfashePaymentService {
                     
                     logger.info("Using stored trxId from validate (done during initiate) - TrxId: {}", trxId);
                     
-                    // Execute EFASHE transaction using stored trxId and delivery method info
-                        EfasheExecuteRequest executeRequest = new EfasheExecuteRequest();
-                    executeRequest.setTrxId(trxId);
-                        executeRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
-                        // Always send amount (including for RRA) - EFASHE requires it even for RRA
-                        // For RRA, the amount comes from vendMin (already set during initiate)
-                        if (transaction.getAmount() != null) {
-                        executeRequest.setAmount(transaction.getAmount());
-                            logger.info("EFASHE execute - Setting amount: {} for service type: {}", 
-                                transaction.getAmount(), transaction.getServiceType());
-                        } else {
-                            logger.error("EFASHE execute - Amount is null for transaction: {}", transaction.getTransactionId());
-                            throw new RuntimeException("Amount is required for EFASHE execute but is null in transaction");
-                        }
-                        executeRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
-                    
-                    // Use stored delivery method and deliverTo (already determined during initiate)
-                    String deliveryMethodId = transaction.getDeliveryMethodId();
-                    if (deliveryMethodId == null || deliveryMethodId.trim().isEmpty()) {
-                        deliveryMethodId = "direct_topup"; // Default fallback
-                        logger.warn("No delivery method stored, using default: {}", deliveryMethodId);
+                    // Validate amount is not null
+                    if (transaction.getAmount() == null) {
+                        logger.error("EFASHE execute - Amount is null for transaction: {}", transaction.getTransactionId());
+                        throw new RuntimeException("Amount is required for EFASHE execute but is null in transaction");
                     }
-                    executeRequest.setDeliveryMethodId(deliveryMethodId);
                     
-                    // If delivery method is "sms", use stored deliverTo
-                    if ("sms".equals(deliveryMethodId)) {
-                        String deliverTo = transaction.getDeliverTo();
-                        if (deliverTo != null && !deliverTo.trim().isEmpty()) {
-                            executeRequest.setDeliverTo(deliverTo);
-                            logger.info("Using stored deliverTo for SMS delivery: {}", deliverTo);
-                        } else {
-                            // Fallback: use customer phone
-                            String customerPhone = normalizePhoneTo12Digits(transaction.getCustomerPhone());
-                            executeRequest.setDeliverTo(customerPhone);
-                            transaction.setDeliverTo(customerPhone);
-                            logger.info("No stored deliverTo, using customer phone: {}", customerPhone);
-                        }
-                    }
-                        // deliverTo and callBack are optional for direct_topup
-                        
-                    logger.info("Calling EFASHE execute - TrxId: {}, Amount: {}, Account: {}, DeliveryMethod: {}", 
-                        executeRequest.getTrxId(), executeRequest.getAmount(), executeRequest.getCustomerAccountNumber(), 
-                        executeRequest.getDeliveryMethodId());
-                        executeResponse = efasheApiService.executeTransaction(executeRequest);
+                    // Use executeWithRetry to handle 3-minute window errors
+                    executeResponse = executeWithRetry(transaction);
                         
                         if (executeResponse != null) {
                             // EFASHE execute returns async response with pollEndpoint
@@ -1044,8 +1006,9 @@ public class EfashePaymentService {
                                     executeResponse.getRetryAfterSecs() != null ? executeResponse.getRetryAfterSecs() : 10);
                                 
                                 if (!pollSuccess) {
-                                    logger.warn("EFASHE polling completed but status is still not SUCCESS - Transaction ID: {}, Status: {}", 
+                                    logger.error("❌ EFASHE polling failed - Transaction ID: {}, Status: {} - NOT sending notifications. Throwing error.", 
                                         transaction.getTransactionId(), transaction.getEfasheStatus());
+                                    throw new RuntimeException("EFASHE polling failed. Status: " + transaction.getEfasheStatus() + ". Transaction ID: " + transaction.getTransactionId());
                                 }
                             } else {
                                 // Synchronous response - check if status is SUCCESS
@@ -1069,14 +1032,17 @@ public class EfashePaymentService {
                         } else {
                             transaction.setEfasheStatus("FAILED");
                             transaction.setErrorMessage("EFASHE execute returned null response");
-                            logger.error("EFASHE execute returned null response");
+                            logger.error("❌ EFASHE execute returned null response - NOT sending notifications. Throwing error.");
+                            efasheTransactionRepository.save(transaction);
+                            throw new RuntimeException("EFASHE execute returned null response. Service may not be delivered. Transaction ID: " + transaction.getTransactionId());
                         }
                         // Execute response handling continues below (no validate error handling needed since validate is done in initiate)
                 } catch (Exception e) {
                     transaction.setEfasheStatus("FAILED");
                     transaction.setErrorMessage("Failed to execute EFASHE transaction: " + e.getMessage());
-                    logger.error("Error executing EFASHE transaction after MoPay SUCCESS: ", e);
-                    e.printStackTrace();
+                    logger.error("❌ Error executing EFASHE transaction after MoPay SUCCESS - NOT sending notifications. Throwing error: ", e);
+                    efasheTransactionRepository.save(transaction);
+                    throw new RuntimeException("Failed to execute EFASHE transaction: " + e.getMessage() + ". Transaction ID: " + transaction.getTransactionId(), e);
                 }
                 
                 // After execute attempt (success or failure), check if we need to retry polling for FAILED status
@@ -1099,68 +1065,42 @@ public class EfashePaymentService {
                         logger.info("✅ Retry polling completed after execute failure - Transaction ID: {}, EFASHE Status: SUCCESS", 
                             transaction.getTransactionId());
                     } else {
-                        logger.warn("⚠️ Retry polling completed but status is still not SUCCESS - Transaction ID: {}, Status: {}", 
+                        logger.error("❌ Retry polling failed after execute failure - Transaction ID: {}, Status: {} - NOT sending notifications. Throwing error.", 
                             transaction.getTransactionId(), transaction.getEfasheStatus());
+                        throw new RuntimeException("EFASHE polling failed after execute failure. Status: " + transaction.getEfasheStatus() + ". Transaction ID: " + transaction.getTransactionId());
                     }
                 }
             } else {
                 logger.info("MoPay transaction not yet SUCCESS or already processed - Status: {}, EFASHE Status: {}", 
                     statusCode, transaction.getEfasheStatus());
                 
-                // If EFASHE is PENDING with pollEndpoint and MoPay is SUCCESS, use automatic retry polling
-                // NOTE: If /vend/execute returned HTTP 200, status is already SUCCESS, so we don't poll
-                // Only poll if status is still PENDING and we have a pollEndpoint
-                // Note: We retry even if cashback is sent, because EFASHE status might still be PENDING
-                if ("PENDING".equalsIgnoreCase(transaction.getEfasheStatus()) 
+                // If we have a pollEndpoint and MoPay is SUCCESS, poll it and execute if SUCCESS
+                // This ensures service delivery when polling returns SUCCESS
+                if (isSuccess 
                     && transaction.getPollEndpoint() != null 
-                    && !transaction.getPollEndpoint().isEmpty()
-                    && isSuccess) { // Only retry when MoPay is SUCCESS
+                    && !transaction.getPollEndpoint().isEmpty()) {
                     
-                    logger.info("MoPay is SUCCESS and EFASHE is PENDING - Starting automatic retry polling - PollEndpoint: {}", 
+                    logger.info("MoPay is SUCCESS and pollEndpoint exists - Polling and executing if SUCCESS - PollEndpoint: {}", 
                         transaction.getPollEndpoint());
                     
                     Integer retryAfterSecs = transaction.getRetryAfterSecs() != null && transaction.getRetryAfterSecs() > 0 
                         ? transaction.getRetryAfterSecs() : 10;
                     
+                    // Poll the endpoint - pollUntilSuccess will call /vend/execute if polling returns SUCCESS
                     boolean pollSuccess = pollUntilSuccess(transaction, transaction.getPollEndpoint(), retryAfterSecs);
                     
                     if (pollSuccess) {
-                        logger.info("✅ Automatic retry polling completed - Transaction ID: {}, EFASHE Status: SUCCESS", 
+                        logger.info("✅ Polling completed and execute called - Transaction ID: {}, EFASHE Status: SUCCESS", 
                             transaction.getTransactionId());
-                            } else {
-                        logger.warn("⚠️ Automatic retry polling completed but status is still not SUCCESS - Transaction ID: {}, Status: {}", 
+                    } else {
+                        logger.error("❌ Polling failed - Transaction ID: {}, Status: {} - NOT sending notifications. Throwing error.", 
                             transaction.getTransactionId(), transaction.getEfasheStatus());
+                        throw new RuntimeException("EFASHE polling failed. Status: " + transaction.getEfasheStatus() + ". Transaction ID: " + transaction.getTransactionId());
                     }
-                } else if ("PENDING".equalsIgnoreCase(transaction.getEfasheStatus()) 
-                    && transaction.getPollEndpoint() != null 
+                } else if (transaction.getPollEndpoint() != null 
                     && !transaction.getPollEndpoint().isEmpty()
                     && !isSuccess) {
-                    logger.info("EFASHE is PENDING but MoPay is not yet SUCCESS - Skipping polling until MoPay succeeds");
-                }
-                
-                // If EFASHE is FAILED with pollEndpoint and MoPay is SUCCESS, retry polling
-                // This handles cases where polling failed but the pollEndpoint is still valid
-                // Note: We retry even if cashback is sent, because EFASHE might have failed after cashback was sent
-                if ("FAILED".equalsIgnoreCase(transaction.getEfasheStatus()) 
-                    && transaction.getPollEndpoint() != null 
-                    && !transaction.getPollEndpoint().isEmpty()
-                    && isSuccess) { // Only retry when MoPay is SUCCESS
-                    
-                    logger.info("MoPay is SUCCESS and EFASHE is FAILED - Retrying automatic polling - PollEndpoint: {}", 
-                        transaction.getPollEndpoint());
-                    
-                    Integer retryAfterSecs = transaction.getRetryAfterSecs() != null && transaction.getRetryAfterSecs() > 0 
-                        ? transaction.getRetryAfterSecs() : 10;
-                    
-                    boolean pollSuccess = pollUntilSuccess(transaction, transaction.getPollEndpoint(), retryAfterSecs);
-                    
-                    if (pollSuccess) {
-                        logger.info("✅ Retry polling completed - Transaction ID: {}, EFASHE Status: SUCCESS", 
-                            transaction.getTransactionId());
-                        } else {
-                        logger.warn("⚠️ Retry polling completed but status is still not SUCCESS - Transaction ID: {}, Status: {}", 
-                            transaction.getTransactionId(), transaction.getEfasheStatus());
-                    }
+                    logger.info("PollEndpoint exists but MoPay is not yet SUCCESS - Skipping polling until MoPay succeeds");
                 }
             }
             
@@ -1748,6 +1688,140 @@ public class EfashePaymentService {
      * @param initialRetryAfterSecs Initial wait time before first poll
      * @return true if SUCCESS, false if still PENDING after max retries
      */
+    /**
+     * Execute EFASHE transaction with retry logic for 3-minute window errors
+     * If execute fails with "3 minute window" error, re-validates to get new trxId and retries
+     * 
+     * @param transaction The EFASHE transaction
+     * @return EfasheExecuteResponse if successful, null otherwise
+     */
+    private EfasheExecuteResponse executeWithRetry(EfasheTransaction transaction) {
+        try {
+            EfasheExecuteRequest executeRequest = new EfasheExecuteRequest();
+            executeRequest.setTrxId(transaction.getTrxId());
+            executeRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
+            executeRequest.setAmount(transaction.getAmount());
+            executeRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
+            
+            String deliveryMethodId = transaction.getDeliveryMethodId();
+            if (deliveryMethodId == null || deliveryMethodId.trim().isEmpty()) {
+                deliveryMethodId = "direct_topup";
+            }
+            executeRequest.setDeliveryMethodId(deliveryMethodId);
+            
+            if ("sms".equals(deliveryMethodId)) {
+                String deliverTo = transaction.getDeliverTo();
+                if (deliverTo == null || deliverTo.trim().isEmpty()) {
+                    deliverTo = normalizePhoneTo12Digits(transaction.getCustomerPhone());
+                }
+                executeRequest.setDeliverTo(deliverTo);
+            }
+            
+            logger.info("Executing EFASHE /vend/execute - TrxId: {}, Service: {}, Amount: {}, Account: {}", 
+                executeRequest.getTrxId(), transaction.getServiceType(), executeRequest.getAmount(), 
+                executeRequest.getCustomerAccountNumber());
+            
+            EfasheExecuteResponse executeResponse = null;
+            try {
+                executeResponse = efasheApiService.executeTransaction(executeRequest);
+            } catch (RuntimeException e) {
+                // Check if error is about "3 minute window" - need to re-validate and get new trxId
+                if (e.getMessage() != null && e.getMessage().contains("You cannot perform the same transaction within a 3 minute window")) {
+                    logger.warn("⚠️ EFASHE execute failed with 3-minute window error - Re-validating to get new trxId");
+                    
+                    try {
+                        // Re-validate to get a new trxId
+                        EfasheValidateRequest validateRequest = new EfasheValidateRequest();
+                        validateRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
+                        validateRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
+                        
+                        logger.info("Re-validating EFASHE transaction - Vertical: {}, Customer Account Number: {}", 
+                            validateRequest.getVerticalId(), validateRequest.getCustomerAccountNumber());
+                        
+                        EfasheValidateResponse validateResponse = efasheApiService.validateAccount(validateRequest);
+                        
+                        if (validateResponse != null && validateResponse.getTrxId() != null && !validateResponse.getTrxId().trim().isEmpty()) {
+                            // Get new trxId from validate response
+                            String newTrxId = validateResponse.getTrxId();
+                            
+                            // Update transaction with new trxId
+                            transaction.setTrxId(newTrxId);
+                            efasheTransactionRepository.save(transaction);
+                            
+                            logger.info("✅ Got new trxId from re-validation: {} - Building new execute request with new trxId", newTrxId);
+                            
+                            // Build a fresh execute request with the new trxId and all existing fields
+                            EfasheExecuteRequest retryExecuteRequest = new EfasheExecuteRequest();
+                            retryExecuteRequest.setTrxId(newTrxId); // Use NEW trxId from validate
+                            retryExecuteRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber()); // Use existing
+                            retryExecuteRequest.setAmount(transaction.getAmount()); // Use existing
+                            retryExecuteRequest.setVerticalId(getVerticalId(transaction.getServiceType())); // Use existing
+                            
+                            // Reuse existing deliveryMethodId (already set above)
+                            retryExecuteRequest.setDeliveryMethodId(deliveryMethodId); // Use existing
+                            
+                            if ("sms".equals(deliveryMethodId)) {
+                                String deliverTo = transaction.getDeliverTo();
+                                if (deliverTo == null || deliverTo.trim().isEmpty()) {
+                                    deliverTo = normalizePhoneTo12Digits(transaction.getCustomerPhone());
+                                }
+                                retryExecuteRequest.setDeliverTo(deliverTo); // Use existing
+                            }
+                            
+                            logger.info("Retrying execute with NEW trxId: {}, CustomerAccountNumber: {}, Amount: {}, VerticalId: {}, DeliveryMethodId: {}", 
+                                newTrxId, retryExecuteRequest.getCustomerAccountNumber(), retryExecuteRequest.getAmount(), 
+                                retryExecuteRequest.getVerticalId(), retryExecuteRequest.getDeliveryMethodId());
+                            
+                            // Retry execute with new trxId and all existing fields
+                            try {
+                                executeResponse = efasheApiService.executeTransaction(retryExecuteRequest);
+                                
+                                logger.info("✅ EFASHE /vend/execute completed after re-validation - HTTP Status: {}, Message: {}", 
+                                    executeResponse != null ? executeResponse.getHttpStatusCode() : "null",
+                                    executeResponse != null ? executeResponse.getMessage() : "null");
+                            } catch (RuntimeException retryException) {
+                                // If retry still fails with 3-minute window error, it's likely because:
+                                // 1. The service was already delivered (poll returned SUCCESS)
+                                // 2. EFASHE checks customerAccountNumber + amount, not just trxId
+                                // Since poll already returned SUCCESS, we'll log and continue
+                                if (retryException.getMessage() != null && 
+                                    retryException.getMessage().contains("You cannot perform the same transaction within a 3 minute window")) {
+                                    logger.warn("⚠️ Execute still failed with 3-minute window error after re-validation. " +
+                                        "This is expected if the service was already delivered. Poll returned SUCCESS, so transaction is complete. " +
+                                        "New trxId: {}, CustomerAccountNumber: {}, Amount: {}", 
+                                        newTrxId, retryExecuteRequest.getCustomerAccountNumber(), retryExecuteRequest.getAmount());
+                                    // Don't throw - poll said SUCCESS, so transaction is complete
+                                    // Return null to indicate execute wasn't needed (service already delivered)
+                                    executeResponse = null;
+                                } else {
+                                    // Different error, re-throw
+                                    throw retryException;
+                                }
+                            }
+                        } else {
+                            logger.error("Re-validation failed - Cannot get new trxId");
+                            throw new RuntimeException("Re-validation failed - Cannot get new trxId");
+                        }
+                    } catch (Exception revalidateException) {
+                        // If re-validation itself fails, log and continue since poll already returned SUCCESS
+                        logger.error("Error during re-validation: ", revalidateException);
+                        logger.warn("⚠️ Re-validation failed, but poll returned SUCCESS - transaction is likely already complete. Continuing...");
+                        // Don't throw - poll said SUCCESS, so transaction is complete
+                        executeResponse = null;
+                    }
+                } else {
+                    // Not a 3-minute window error, re-throw
+                    throw e;
+                }
+            }
+            
+            return executeResponse;
+        } catch (Exception e) {
+            logger.error("Error in executeWithRetry: ", e);
+            return null;
+        }
+    }
+    
     private boolean pollUntilSuccess(EfasheTransaction transaction, String pollEndpoint, Integer initialRetryAfterSecs) {
         logger.info("=== START Automatic Polling with Retry Mechanism ===");
         logger.info("Transaction ID: {}, Poll Endpoint: {}, Initial Retry After: {}s", 
@@ -1794,58 +1868,61 @@ public class EfashePaymentService {
                         logger.info("Poll returned SUCCESS - Executing transaction via /vend/execute to deliver service ({})", 
                             transaction.getServiceType());
                         
+                        boolean executeSuccessful = false;
                         try {
-                            // Execute the transaction to actually deliver the service
-                            EfasheExecuteRequest executeRequest = new EfasheExecuteRequest();
-                            executeRequest.setTrxId(transaction.getTrxId());
-                            executeRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
-                            executeRequest.setAmount(transaction.getAmount());
-                            executeRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
-                            
-                            String deliveryMethodId = transaction.getDeliveryMethodId();
-                            if (deliveryMethodId == null || deliveryMethodId.trim().isEmpty()) {
-                                deliveryMethodId = "direct_topup";
-                            }
-                            executeRequest.setDeliveryMethodId(deliveryMethodId);
-                            
-                            if ("sms".equals(deliveryMethodId)) {
-                                String deliverTo = transaction.getDeliverTo();
-                                if (deliverTo == null || deliverTo.trim().isEmpty()) {
-                                    deliverTo = normalizePhoneTo12Digits(transaction.getCustomerPhone());
-                                }
-                                executeRequest.setDeliverTo(deliverTo);
-                            }
-                            
-                            logger.info("Executing EFASHE /vend/execute to deliver service - TrxId: {}, Service: {}, Amount: {}, Account: {}", 
-                                executeRequest.getTrxId(), transaction.getServiceType(), executeRequest.getAmount(), 
-                                executeRequest.getCustomerAccountNumber());
-                            
-                            EfasheExecuteResponse executeResponse = efasheApiService.executeTransaction(executeRequest);
+                            // Execute the transaction to actually deliver the service (with retry logic for 3-minute window errors)
+                            EfasheExecuteResponse executeResponse = executeWithRetry(transaction);
                             
                             if (executeResponse != null) {
-                                logger.info("✅ EFASHE /vend/execute completed - HTTP Status: {}, Message: {}, ServiceType: {}, CustomerAccountNumber: {}", 
-                                    executeResponse.getHttpStatusCode(), executeResponse.getMessage(), 
-                                    transaction.getServiceType(), transaction.getCustomerAccountNumber());
-                                
-                                // Update pollEndpoint if provided
-                                if (executeResponse.getPollEndpoint() != null && !executeResponse.getPollEndpoint().isEmpty()) {
-                                    String cleanPollEndpoint = executeResponse.getPollEndpoint();
-                                    if (cleanPollEndpoint.endsWith("/")) {
-                                        cleanPollEndpoint = cleanPollEndpoint.substring(0, cleanPollEndpoint.length() - 1);
+                                // Check if execute was successful (HTTP 200 or 202)
+                                Integer httpStatusCode = executeResponse.getHttpStatusCode();
+                                if (httpStatusCode != null && (httpStatusCode == 200 || httpStatusCode == 202)) {
+                                    executeSuccessful = true;
+                                    logger.info("✅ EFASHE /vend/execute completed successfully - HTTP Status: {}, Message: {}, ServiceType: {}, CustomerAccountNumber: {}", 
+                                        executeResponse.getHttpStatusCode(), executeResponse.getMessage(), 
+                                        transaction.getServiceType(), transaction.getCustomerAccountNumber());
+                                    
+                                    // Update pollEndpoint if provided
+                                    if (executeResponse.getPollEndpoint() != null && !executeResponse.getPollEndpoint().isEmpty()) {
+                                        String cleanPollEndpoint = executeResponse.getPollEndpoint();
+                                        if (cleanPollEndpoint.endsWith("/")) {
+                                            cleanPollEndpoint = cleanPollEndpoint.substring(0, cleanPollEndpoint.length() - 1);
+                                        }
+                                        transaction.setPollEndpoint(cleanPollEndpoint);
+                                        transaction.setRetryAfterSecs(executeResponse.getRetryAfterSecs());
                                     }
-                                    transaction.setPollEndpoint(cleanPollEndpoint);
-                                    transaction.setRetryAfterSecs(executeResponse.getRetryAfterSecs());
+                                } else {
+                                    logger.warn("⚠️ EFASHE /vend/execute returned non-success status: {} - NOT marking transaction as SUCCESS", httpStatusCode);
                                 }
+                            } else {
+                                logger.warn("⚠️ EFASHE /vend/execute returned null response - NOT marking transaction as SUCCESS");
                             }
                         } catch (Exception e) {
-                            logger.error("Error executing EFASHE /vend/execute after poll SUCCESS: ", e);
-                            // Continue anyway - poll said SUCCESS, so we'll mark it as SUCCESS
+                            logger.error("❌ Error executing EFASHE /vend/execute after poll SUCCESS: ", e);
+                            logger.warn("⚠️ Execute failed - NOT marking transaction as SUCCESS. Poll said SUCCESS but execute failed.");
+                            // Don't mark as SUCCESS if execute fails
                         }
                         
-                        // Set status to SUCCESS
-                        transaction.setEfasheStatus("SUCCESS");
+                        // Only set status to SUCCESS if execute was successful
+                        if (executeSuccessful) {
+                            transaction.setEfasheStatus("SUCCESS");
+                            logger.info("✅ Transaction marked as SUCCESS - Execute was successful");
+                        } else {
+                            // Execute failed - don't mark as SUCCESS even though poll said SUCCESS
+                            // Keep current status or set to FAILED
+                            if (!"FAILED".equalsIgnoreCase(transaction.getEfasheStatus())) {
+                                transaction.setEfasheStatus("FAILED");
+                                transaction.setErrorMessage((transaction.getErrorMessage() != null ? transaction.getErrorMessage() + " | " : "") + 
+                                    "Poll returned SUCCESS but execute failed - Service may not be delivered");
+                                logger.warn("⚠️ Transaction NOT marked as SUCCESS - Execute failed. Status set to FAILED.");
+                            }
+                            // DO NOT send notifications if execute failed - throw error instead
+                            logger.error("❌ Execute failed - NOT sending notifications. Throwing error.");
+                            throw new RuntimeException("EFASHE execute failed after poll SUCCESS. Service may not be delivered. Transaction ID: " + transaction.getTransactionId());
+                        }
                         
                         // For ELECTRICITY service, extract and store token and KWH information
+                        // Only process if execute was successful
                         if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
                             String token = pollResponse.getToken();
                             String pollMessage = pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction completed successfully";
@@ -1950,24 +2027,30 @@ public class EfashePaymentService {
                         
                         // Update transaction
                         efasheTransactionRepository.save(transaction);
-                        logger.info("Updated transaction - Transaction ID: {}, EFASHE Status: SUCCESS (from poll attempt {})", 
-                            transaction.getTransactionId(), retryCount);
+                        logger.info("Updated transaction - Transaction ID: {}, EFASHE Status: SUCCESS (from poll attempt {}), Execute Successful: {}", 
+                            transaction.getTransactionId(), retryCount, executeSuccessful);
                         
-                        // Send WhatsApp notification
-                        sendWhatsAppNotification(transaction);
-                        
-                        logger.info("=== END Automatic Polling (SUCCESS) ===");
-                        return true;
+                        // Only send notifications if execute was successful
+                        if (executeSuccessful) {
+                            // Send WhatsApp notification
+                            sendWhatsAppNotification(transaction);
+                            logger.info("=== END Automatic Polling (SUCCESS) ===");
+                            return true;
+                        } else {
+                            // Execute failed - throw error, don't send notifications
+                            logger.error("❌ Execute failed - NOT sending notifications. Throwing error.");
+                            throw new RuntimeException("EFASHE execute failed after poll SUCCESS. Service may not be delivered. Transaction ID: " + transaction.getTransactionId());
+                        }
                         
                     } else if (trimmedStatus != null && "FAILED".equalsIgnoreCase(trimmedStatus)) {
                         // Transaction failed - stop retrying
-                        logger.error("❌ EFASHE transaction FAILED on attempt {}/{} - Status: {}", retryCount, maxRetries, trimmedStatus);
+                        logger.error("❌ EFASHE transaction FAILED on attempt {}/{} - Status: {} - NOT sending notifications. Throwing error.", retryCount, maxRetries, trimmedStatus);
                         transaction.setEfasheStatus("FAILED");
                         transaction.setMessage(pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction failed");
                         transaction.setErrorMessage("EFASHE transaction failed: " + pollResponse.getMessage());
                         efasheTransactionRepository.save(transaction);
                         logger.info("=== END Automatic Polling (FAILED) ===");
-                        return false;
+                        throw new RuntimeException("EFASHE transaction FAILED: " + (pollResponse.getMessage() != null ? pollResponse.getMessage() : "Unknown error") + ". Transaction ID: " + transaction.getTransactionId());
                         
                     } else {
                         // Still PENDING or other status - continue polling

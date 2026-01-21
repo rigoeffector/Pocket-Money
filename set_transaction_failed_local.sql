@@ -1,31 +1,32 @@
--- Test script to update transaction CHQ1769018477 for refund testing
--- Sets EFASHE status to FAILED while keeping MoPay status as SUCCESS (200)
--- This will trigger the refund logic
+-- Set transaction CHQ1769018477 to FAILED on EFASHE status (local database)
+-- This is for testing purposes
 
 -- First, check current status
 SELECT 
     transaction_id,
+    mopay_transaction_id,
     mopay_status,
     efashe_status,
     amount,
     customer_phone,
     full_amount_phone,
-    error_message
+    error_message,
+    updated_at
 FROM efashe_transactions 
-WHERE transaction_id = 'CLU1769018230' OR mopay_transaction_id = 'CLU1769018230';
+WHERE transaction_id = 'CDE1768743882' OR mopay_transaction_id = 'CDE1768743882';
 
--- Update transaction to test refund: EFASHE FAILED + MoPay SUCCESS
+-- Update transaction to set EFASHE status to FAILED
 UPDATE efashe_transactions 
 SET 
     efashe_status = 'FAILED',
-    mopay_status = '200',
-    error_message = 'Test: EFASHE transaction failed for refund testing',
+    error_message = COALESCE(error_message, '') || ' | Test: EFASHE transaction set to FAILED for testing',
     updated_at = NOW()
-WHERE transaction_id = 'CDE1768743882' OR mopay_transaction_id = 'CDE1768743882';
+WHERE transaction_id = 'CHQ1769018477' OR mopay_transaction_id = 'CHQ1769018477';
 
 -- Verify the update
 SELECT 
     transaction_id,
+    mopay_transaction_id,
     mopay_status,
     efashe_status,
     amount,
