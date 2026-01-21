@@ -400,24 +400,46 @@ public class EfasheApiService {
      * Uses token authentication (Bearer token)
      */
     public EfashePollStatusResponse pollTransactionStatus(String pollEndpoint) {
-        // pollEndpoint should be relative path like "/v2/trx/849d5438-fe49-4c11-b959-dac800d187dd/status/"
-        // or full URL
-        // NOTE: efasheApiUrl already ends with "/rw/v2", so if pollEndpoint starts with "/v2/",
-        // we need to remove the duplicate "/v2" prefix
+        // pollEndpoint should be relative path like "/vend/23oMSt0cODJPa07PH0AOdpS73u6/status"
+        // or "/v2/trx/849d5438-fe49-4c11-b959-dac800d187dd/status" or full URL
+        // NOTE: efasheApiUrl is "https://sb-api.efashe.com/rw/v2"
+        // For /vend/ endpoints, we need to use /rw/vend/ instead of /rw/v2/vend/
+        // Also remove trailing slash if present
         String url;
-        if (pollEndpoint.startsWith("http")) {
-            url = pollEndpoint;
-        } else if (pollEndpoint.startsWith("/")) {
-            // Remove leading slash if pollEndpoint starts with "/v2/" to avoid duplicate
-            String cleanEndpoint = pollEndpoint;
-            if (pollEndpoint.startsWith("/v2/")) {
-                // efasheApiUrl is like "https://sb-api.efashe.com/rw/v2"
+        if (pollEndpoint == null || pollEndpoint.trim().isEmpty()) {
+            throw new RuntimeException("Poll endpoint cannot be null or empty");
+        }
+        
+        // Remove trailing slash if present
+        String cleanPollEndpoint = pollEndpoint.trim();
+        if (cleanPollEndpoint.endsWith("/")) {
+            cleanPollEndpoint = cleanPollEndpoint.substring(0, cleanPollEndpoint.length() - 1);
+        }
+        
+        if (cleanPollEndpoint.startsWith("http")) {
+            url = cleanPollEndpoint;
+        } else if (cleanPollEndpoint.startsWith("/")) {
+            // Handle different poll endpoint formats
+            String cleanEndpoint = cleanPollEndpoint;
+            
+            if (cleanPollEndpoint.startsWith("/vend/")) {
+                // pollEndpoint is like "/vend/23oMSt0cODJPa07PH0AOdpS73u6/status"
+                // efasheApiUrl is "https://sb-api.efashe.com/rw/v2"
+                // We need "https://sb-api.efashe.com/rw/vend/23oMSt0cODJPa07PH0AOdpS73u6/status"
+                // Replace "/rw/v2" with "/rw" and append the endpoint
+                String baseUrl = efasheApiUrl.replace("/v2", ""); // Remove "/v2" -> "https://sb-api.efashe.com/rw"
+                url = baseUrl + cleanEndpoint;
+            } else if (cleanPollEndpoint.startsWith("/v2/")) {
                 // pollEndpoint is like "/v2/trx/...", so we need "/trx/..." instead
-                cleanEndpoint = pollEndpoint.substring(3); // Remove "/v2" -> "/trx/..."
+                // efasheApiUrl is "https://sb-api.efashe.com/rw/v2"
+                cleanEndpoint = cleanPollEndpoint.substring(3); // Remove "/v2" -> "/trx/..."
+                url = efasheApiUrl + cleanEndpoint;
+            } else {
+                // Other relative paths - append directly
+                url = efasheApiUrl + cleanEndpoint;
             }
-            url = efasheApiUrl + cleanEndpoint;
         } else {
-            url = efasheApiUrl + "/" + pollEndpoint;
+            url = efasheApiUrl + "/" + cleanPollEndpoint;
         }
         
         logger.info("Polling EFASHE transaction status - Endpoint: {}", url);
@@ -448,38 +470,47 @@ public class EfasheApiService {
             
             try {
                 JsonNode jsonNode = objectMapper.readTree(responseBodyString);
+                JsonNode dataNodeToUse = null;
+                
                 if (jsonNode.has("data")) {
                     // Extract from "data" wrapper
                     JsonNode dataNode = jsonNode.get("data");
                     // If data has another "data" nested, get that
                     if (dataNode.has("data")) {
-                        pollResponse = objectMapper.treeToValue(dataNode.get("data"), EfashePollStatusResponse.class);
-                        // Extract token if available in nested data
-                        if (pollResponse != null && (pollResponse.getToken() == null || pollResponse.getToken().isEmpty())) {
-                            JsonNode nestedDataNode = dataNode.get("data");
-                            if (nestedDataNode.has("token")) {
-                                pollResponse.setToken(nestedDataNode.get("token").asText());
-                                logger.info("Extracted token from nested data node: {}", pollResponse.getToken());
-                            }
-                        }
+                        dataNodeToUse = dataNode.get("data");
+                        pollResponse = objectMapper.treeToValue(dataNodeToUse, EfashePollStatusResponse.class);
                     } else {
-                        pollResponse = objectMapper.treeToValue(dataNode, EfashePollStatusResponse.class);
-                        // Extract token if available
-                        if (pollResponse != null && (pollResponse.getToken() == null || pollResponse.getToken().isEmpty())) {
-                            if (dataNode.has("token")) {
-                                pollResponse.setToken(dataNode.get("token").asText());
-                                logger.info("Extracted token from data node: {}", pollResponse.getToken());
-                            }
-                        }
+                        dataNodeToUse = dataNode;
+                        pollResponse = objectMapper.treeToValue(dataNodeToUse, EfashePollStatusResponse.class);
                     }
                 } else {
-                    pollResponse = objectMapper.treeToValue(jsonNode, EfashePollStatusResponse.class);
-                    // Extract token if available
-                    if (pollResponse != null && (pollResponse.getToken() == null || pollResponse.getToken().isEmpty())) {
-                        if (jsonNode.has("token")) {
-                            pollResponse.setToken(jsonNode.get("token").asText());
-                            logger.info("Extracted token from root node: {}", pollResponse.getToken());
+                    dataNodeToUse = jsonNode;
+                    pollResponse = objectMapper.treeToValue(dataNodeToUse, EfashePollStatusResponse.class);
+                }
+                
+                // Extract status from trxStatusId if status is null
+                if (pollResponse != null && (pollResponse.getStatus() == null || pollResponse.getStatus().isEmpty())) {
+                    if (dataNodeToUse != null && dataNodeToUse.has("trxStatusId")) {
+                        String trxStatusId = dataNodeToUse.get("trxStatusId").asText();
+                        // Map trxStatusId values to status values
+                        if ("successful".equalsIgnoreCase(trxStatusId)) {
+                            pollResponse.setStatus("SUCCESS");
+                        } else if ("failed".equalsIgnoreCase(trxStatusId)) {
+                            pollResponse.setStatus("FAILED");
+                        } else if ("pending".equalsIgnoreCase(trxStatusId)) {
+                            pollResponse.setStatus("PENDING");
+                        } else {
+                            pollResponse.setStatus(trxStatusId.toUpperCase());
                         }
+                        logger.info("Extracted status from trxStatusId: {} -> {}", trxStatusId, pollResponse.getStatus());
+                    }
+                }
+                
+                // Extract token if available
+                if (pollResponse != null && (pollResponse.getToken() == null || pollResponse.getToken().isEmpty())) {
+                    if (dataNodeToUse != null && dataNodeToUse.has("token")) {
+                        pollResponse.setToken(dataNodeToUse.get("token").asText());
+                        logger.info("Extracted token from data node: {}", pollResponse.getToken());
                     }
                 }
             } catch (Exception e) {
@@ -541,6 +572,53 @@ public class EfasheApiService {
                 } catch (Exception retryException) {
                     logger.error("EFASHE poll status retry failed: ", retryException);
                     throw new RuntimeException("EFASHE API authentication failed after retry. Please verify API credentials.");
+                }
+            }
+            
+            // If 404, try refreshing the token and retry once (endpoint might be valid but token expired)
+            if (statusCode == 404) {
+                logger.warn("EFASHE poll endpoint returned 404 - refreshing token and retrying (endpoint may be valid but token expired): {}", url);
+                // Clear cached token to force refresh
+                cachedAccessToken = null;
+                tokenExpiresAt = null;
+                
+                // Retry once with new token (like we do for 401)
+                try {
+                    HttpHeaders retryHeaders = buildHeadersWithToken();
+                    HttpEntity<String> retryEntity = new HttpEntity<>(retryHeaders);
+                    ResponseEntity<String> retryResponse = restTemplate.exchange(
+                            url,
+                            HttpMethod.GET,
+                            retryEntity,
+                            String.class
+                    );
+                    
+                    // Parse retry response
+                    ObjectMapper objectMapper = new ObjectMapper();
+                    JsonNode jsonNode = objectMapper.readTree(retryResponse.getBody());
+                    EfashePollStatusResponse pollResponse;
+                    if (jsonNode.has("data")) {
+                        JsonNode dataNode = jsonNode.get("data");
+                        if (dataNode.has("data")) {
+                            pollResponse = objectMapper.treeToValue(dataNode.get("data"), EfashePollStatusResponse.class);
+                        } else {
+                            pollResponse = objectMapper.treeToValue(dataNode, EfashePollStatusResponse.class);
+                        }
+                    } else {
+                        pollResponse = objectMapper.treeToValue(jsonNode, EfashePollStatusResponse.class);
+                    }
+                    logger.info("✅ EFASHE poll retry with refreshed token succeeded after 404");
+                    return pollResponse;
+                } catch (Exception retryException) {
+                    logger.error("EFASHE poll status retry after 404 failed: ", retryException);
+                    // If retry still fails with 404, then the endpoint is truly expired
+                    if (retryException instanceof HttpClientErrorException) {
+                        HttpClientErrorException httpException = (HttpClientErrorException) retryException;
+                        if (httpException.getStatusCode().value() == 404) {
+                            throw new RuntimeException("EFASHE_POLL_ENDPOINT_NOT_FOUND: Poll endpoint returned 404 even after token refresh. The transaction status endpoint is no longer available. This may indicate the transaction has expired or the endpoint is invalid.");
+                        }
+                    }
+                    throw new RuntimeException("EFASHE poll endpoint retry failed after 404: " + retryException.getMessage());
                 }
             }
             
