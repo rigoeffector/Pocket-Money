@@ -98,6 +98,8 @@ public class SecurityConfig {
                         .requestMatchers("/api/efashe/initiate-for-other").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .requestMatchers("/api/efashe/process/**").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .requestMatchers("/api/efashe/status/**").hasAnyRole("USER", "RECEIVER", "ADMIN")
+                        .requestMatchers("/api/efashe/refund/**").hasRole("ADMIN")
+                        .requestMatchers("/api/efashe/refund-history").hasRole("ADMIN")
                         .requestMatchers("/api/efashe/receipt/**").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .requestMatchers("/api/efashe/transactions", "/api/efashe/transactions/**").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .requestMatchers("/api/efashe/electricity/tokens").hasAnyRole("USER", "RECEIVER", "ADMIN")

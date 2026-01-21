@@ -2,9 +2,11 @@ package com.pocketmoney.pocketmoney.service;
 
 import com.pocketmoney.pocketmoney.dto.*;
 import com.pocketmoney.pocketmoney.entity.EfasheTransaction;
+import com.pocketmoney.pocketmoney.entity.EfasheRefundHistory;
 import com.pocketmoney.pocketmoney.entity.EfasheServiceType;
 import com.pocketmoney.pocketmoney.entity.User;
 import com.pocketmoney.pocketmoney.repository.EfasheTransactionRepository;
+import com.pocketmoney.pocketmoney.repository.EfasheRefundHistoryRepository;
 import com.pocketmoney.pocketmoney.repository.UserRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,6 +25,7 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 @Service
@@ -34,6 +37,7 @@ public class EfashePaymentService {
     private final MoPayService moPayService;
     private final EfasheApiService efasheApiService;
     private final EfasheTransactionRepository efasheTransactionRepository;
+    private final EfasheRefundHistoryRepository efasheRefundHistoryRepository;
     private final WhatsAppService whatsAppService;
     private final MessagingService messagingService;
     private final UserRepository userRepository;
@@ -43,6 +47,7 @@ public class EfashePaymentService {
                                  MoPayService moPayService,
                                  EfasheApiService efasheApiService,
                                  EfasheTransactionRepository efasheTransactionRepository,
+                                 EfasheRefundHistoryRepository efasheRefundHistoryRepository,
                                  WhatsAppService whatsAppService,
                                  MessagingService messagingService,
                                  UserRepository userRepository,
@@ -51,6 +56,7 @@ public class EfashePaymentService {
         this.moPayService = moPayService;
         this.efasheApiService = efasheApiService;
         this.efasheTransactionRepository = efasheTransactionRepository;
+        this.efasheRefundHistoryRepository = efasheRefundHistoryRepository;
         this.whatsAppService = whatsAppService;
         this.messagingService = messagingService;
         this.userRepository = userRepository;
@@ -722,14 +728,78 @@ public class EfashePaymentService {
                 transaction.getPollEndpoint() != null ? transaction.getPollEndpoint() : "NULL",
                 transaction.getCashbackSent());
             
-            // If EFASHE is already FAILED with a pollEndpoint and MoPay is SUCCESS, try polling instead of executing
+            // If EFASHE is already FAILED with a pollEndpoint and MoPay is SUCCESS, execute first to deliver service, then poll
             if (isSuccess && "FAILED".equalsIgnoreCase(transaction.getEfasheStatus()) 
                 && transaction.getPollEndpoint() != null 
                 && !transaction.getPollEndpoint().isEmpty()) {
                 
-                logger.info("MoPay is SUCCESS and EFASHE is FAILED with pollEndpoint - Retrying automatic polling instead of executing - PollEndpoint: {}", 
+                logger.info("MoPay is SUCCESS and EFASHE is FAILED with pollEndpoint - Executing transaction first to deliver service, then polling - PollEndpoint: {}", 
                     transaction.getPollEndpoint());
                 
+                // Execute the transaction first to actually deliver the service (airtime, electricity, etc.)
+                try {
+                    EfasheExecuteRequest executeRequest = new EfasheExecuteRequest();
+                    executeRequest.setTrxId(transaction.getTrxId());
+                    executeRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
+                    executeRequest.setAmount(transaction.getAmount());
+                    executeRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
+                    
+                    String deliveryMethodId = transaction.getDeliveryMethodId();
+                    if (deliveryMethodId == null || deliveryMethodId.trim().isEmpty()) {
+                        deliveryMethodId = "direct_topup";
+                    }
+                    executeRequest.setDeliveryMethodId(deliveryMethodId);
+                    
+                    if ("sms".equals(deliveryMethodId)) {
+                        String deliverTo = transaction.getDeliverTo();
+                        if (deliverTo == null || deliverTo.trim().isEmpty()) {
+                            deliverTo = normalizePhoneTo12Digits(transaction.getCustomerPhone());
+                        }
+                        executeRequest.setDeliverTo(deliverTo);
+                    }
+                    
+                    logger.info("Executing EFASHE transaction to deliver service - TrxId: {}, Service: {}, Amount: {}, Account: {}", 
+                        executeRequest.getTrxId(), transaction.getServiceType(), executeRequest.getAmount(), 
+                        executeRequest.getCustomerAccountNumber());
+                    
+                    executeResponse = efasheApiService.executeTransaction(executeRequest);
+                    
+                    if (executeResponse != null) {
+                        logger.info("✅ EFASHE execute completed - HTTP Status: {}, Message: {}, ServiceType: {}, CustomerAccountNumber: {}", 
+                            executeResponse.getHttpStatusCode(), executeResponse.getMessage(), 
+                            transaction.getServiceType(), transaction.getCustomerAccountNumber());
+                        
+                        // Update pollEndpoint if provided
+                        if (executeResponse.getPollEndpoint() != null && !executeResponse.getPollEndpoint().isEmpty()) {
+                            String cleanPollEndpoint = executeResponse.getPollEndpoint();
+                            if (cleanPollEndpoint.endsWith("/")) {
+                                cleanPollEndpoint = cleanPollEndpoint.substring(0, cleanPollEndpoint.length() - 1);
+                            }
+                            transaction.setPollEndpoint(cleanPollEndpoint);
+                            transaction.setRetryAfterSecs(executeResponse.getRetryAfterSecs());
+                        }
+                        
+                        // If execute returns 200/202, it's already successful
+                        if (executeResponse.getHttpStatusCode() != null && 
+                            (executeResponse.getHttpStatusCode() == 200 || executeResponse.getHttpStatusCode() == 202)) {
+                            transaction.setEfasheStatus("SUCCESS");
+                            transaction.setMessage(executeResponse.getMessage() != null ? executeResponse.getMessage() : 
+                                "EFASHE transaction executed successfully");
+                            efasheTransactionRepository.save(transaction);
+                            logger.info("✅ EFASHE execute returned HTTP {} - Service delivered successfully", 
+                                executeResponse.getHttpStatusCode());
+                            
+                            // Send notification
+                            sendWhatsAppNotification(transaction);
+                            // Continue to build response at end of method
+                        }
+                    }
+                } catch (Exception e) {
+                    logger.error("Error executing EFASHE transaction during retry: ", e);
+                    // Continue to polling anyway
+                }
+                
+                // After execute, poll to check status
                 Integer retryAfterSecs = transaction.getRetryAfterSecs() != null && transaction.getRetryAfterSecs() > 0 
                     ? transaction.getRetryAfterSecs() : 10;
                 
@@ -1094,46 +1164,6 @@ public class EfashePaymentService {
                 }
             }
             
-            // Check refund conditions:
-            // 1. EFASHE is FAILED but MoPay is SUCCESS - customer paid but service failed
-            // 2. EFASHE is SUCCESS but MoPay is FAILED - service succeeded but payment failed (edge case)
-            boolean shouldRefund = false;
-            String refundReason = "";
-            
-            // Case 1: EFASHE FAILED + MoPay SUCCESS
-            if ("FAILED".equalsIgnoreCase(transaction.getEfasheStatus()) 
-                && (transaction.getMopayStatus() != null && ("200".equals(transaction.getMopayStatus()) || "201".equals(transaction.getMopayStatus()) || "SUCCESS".equalsIgnoreCase(transaction.getMopayStatus())))) {
-                shouldRefund = true;
-                refundReason = "EFASHE FAILED but MoPay SUCCESS";
-            }
-            // Case 2: EFASHE SUCCESS + MoPay FAILED
-            else if ("SUCCESS".equalsIgnoreCase(transaction.getEfasheStatus()) 
-                && (transaction.getMopayStatus() == null || (!"200".equals(transaction.getMopayStatus()) && !"201".equals(transaction.getMopayStatus()) && !"SUCCESS".equalsIgnoreCase(transaction.getMopayStatus())))) {
-                shouldRefund = true;
-                refundReason = "EFASHE SUCCESS but MoPay FAILED";
-            }
-            
-            if (shouldRefund) {
-                // Check if refund has already been processed (to avoid duplicate refunds)
-                if (transaction.getErrorMessage() == null || !transaction.getErrorMessage().contains("REFUND_PROCESSED")) {
-                    logger.info("=== REFUND PROCESSING START ===");
-                    logger.info("{} - Processing refund for transaction: {}", refundReason, transaction.getTransactionId());
-                    logger.info("Transaction Amount: {}, Customer Phone: {}, EFASHE Status: {}, MoPay Status: {}", 
-                        transaction.getAmount(), transaction.getCustomerPhone(), transaction.getEfasheStatus(), transaction.getMopayStatus());
-                    
-                    try {
-                        // Process refund - full amount back to customer
-                        processRefund(transaction, refundReason);
-                        logger.info("=== REFUND PROCESSING COMPLETED ===");
-                    } catch (Exception refundException) {
-                        logger.error("Error processing refund for transaction {}: ", transaction.getTransactionId(), refundException);
-                        // Don't fail the status check if refund fails - log and continue
-                    }
-                } else {
-                    logger.info("Refund already processed for transaction: {}", transaction.getTransactionId());
-                }
-            }
-            
             // Update existing transaction (never create new row)
             efasheTransactionRepository.save(transaction);
             logger.info("Updated existing transaction row - Transaction ID: {}, MoPay Status: {} (Initial: {}), EFASHE Status: {} (Initial: {}), Cashback Sent: {}", 
@@ -1481,9 +1511,9 @@ public class EfashePaymentService {
                 String existingErrorMessage = transaction.getErrorMessage() != null ? transaction.getErrorMessage() : "";
                 transaction.setErrorMessage(existingErrorMessage + " | REFUND_PROCESSED");
                 
-                // Update MoPay status to REFUNDED (was SUCCESS, now changed to REFUNDED)
-                transaction.setMopayStatus("REFUNDED");
-                logger.info("MoPay status updated to REFUNDED for transaction: {}", transaction.getTransactionId());
+                // Keep original MoPay status (don't change to REFUNDED)
+                logger.info("Refund processed successfully for transaction: {} - MoPay status remains: {}", 
+                    transaction.getTransactionId(), transaction.getMopayStatus());
             }
             
             // Send SMS and WhatsApp notifications about refund
@@ -1757,6 +1787,60 @@ public class EfashePaymentService {
                     String trimmedStatus = pollStatus != null ? pollStatus.trim() : null;
                     if (trimmedStatus != null && "SUCCESS".equalsIgnoreCase(trimmedStatus)) {
                         logger.info("✅ EFASHE transaction SUCCESS confirmed on attempt {}/{}", retryCount, maxRetries);
+                        
+                        // Always execute the transaction to deliver the service when poll returns SUCCESS
+                        // Poll SUCCESS means the transaction record exists, but we need to execute to actually deliver the service
+                        // This applies to all service types: AIRTIME, ELECTRICITY, TV, RRA, MTN, etc.
+                        logger.info("Poll returned SUCCESS - Executing transaction via /vend/execute to deliver service ({})", 
+                            transaction.getServiceType());
+                        
+                        try {
+                            // Execute the transaction to actually deliver the service
+                            EfasheExecuteRequest executeRequest = new EfasheExecuteRequest();
+                            executeRequest.setTrxId(transaction.getTrxId());
+                            executeRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
+                            executeRequest.setAmount(transaction.getAmount());
+                            executeRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
+                            
+                            String deliveryMethodId = transaction.getDeliveryMethodId();
+                            if (deliveryMethodId == null || deliveryMethodId.trim().isEmpty()) {
+                                deliveryMethodId = "direct_topup";
+                            }
+                            executeRequest.setDeliveryMethodId(deliveryMethodId);
+                            
+                            if ("sms".equals(deliveryMethodId)) {
+                                String deliverTo = transaction.getDeliverTo();
+                                if (deliverTo == null || deliverTo.trim().isEmpty()) {
+                                    deliverTo = normalizePhoneTo12Digits(transaction.getCustomerPhone());
+                                }
+                                executeRequest.setDeliverTo(deliverTo);
+                            }
+                            
+                            logger.info("Executing EFASHE /vend/execute to deliver service - TrxId: {}, Service: {}, Amount: {}, Account: {}", 
+                                executeRequest.getTrxId(), transaction.getServiceType(), executeRequest.getAmount(), 
+                                executeRequest.getCustomerAccountNumber());
+                            
+                            EfasheExecuteResponse executeResponse = efasheApiService.executeTransaction(executeRequest);
+                            
+                            if (executeResponse != null) {
+                                logger.info("✅ EFASHE /vend/execute completed - HTTP Status: {}, Message: {}, ServiceType: {}, CustomerAccountNumber: {}", 
+                                    executeResponse.getHttpStatusCode(), executeResponse.getMessage(), 
+                                    transaction.getServiceType(), transaction.getCustomerAccountNumber());
+                                
+                                // Update pollEndpoint if provided
+                                if (executeResponse.getPollEndpoint() != null && !executeResponse.getPollEndpoint().isEmpty()) {
+                                    String cleanPollEndpoint = executeResponse.getPollEndpoint();
+                                    if (cleanPollEndpoint.endsWith("/")) {
+                                        cleanPollEndpoint = cleanPollEndpoint.substring(0, cleanPollEndpoint.length() - 1);
+                                    }
+                                    transaction.setPollEndpoint(cleanPollEndpoint);
+                                    transaction.setRetryAfterSecs(executeResponse.getRetryAfterSecs());
+                                }
+                            }
+                        } catch (Exception e) {
+                            logger.error("Error executing EFASHE /vend/execute after poll SUCCESS: ", e);
+                            // Continue anyway - poll said SUCCESS, so we'll mark it as SUCCESS
+                        }
                         
                         // Set status to SUCCESS
                         transaction.setEfasheStatus("SUCCESS");
@@ -2710,6 +2794,600 @@ public class EfashePaymentService {
         
         logger.debug("Token formatted: {} -> {}", token, formatted.toString());
         return formatted.toString();
+    }
+    
+    /**
+     * Process refund for an EFASHE transaction
+     * POST /api/efashe/refund/{transactionId}
+     * 
+     * Refunds the amount paid minus cashback (customer cashback + besoft share)
+     * Transfers from adminPhone (DEBIT) to receiverPhone (CREDIT)
+     * 
+     * IMPORTANT: This method ONLY uses MoPay API - NO EFASHE API calls are made during refund processing.
+     * Refund is a money transfer operation, not a service delivery operation.
+     * 
+     * @param transactionId The EFASHE transaction ID
+     * @param request Refund request with adminPhone, receiverPhone, and optional message
+     * @return Success message with refund details
+     */
+    @Transactional
+    public String processRefund(String transactionId, EfasheRefundRequest request) {
+        logger.info("=== PROCESS REFUND ENDPOINT START ===");
+        logger.info("Transaction ID: {}, Admin Phone: {}, Receiver Phone: {}", 
+            transactionId, request.getAdminPhone(), request.getReceiverPhone());
+        
+        // Find transaction
+        Optional<EfasheTransaction> transactionOpt = findTransactionById(transactionId);
+        if (!transactionOpt.isPresent()) {
+            throw new RuntimeException("EFASHE transaction not found with ID: " + transactionId);
+        }
+        
+        EfasheTransaction transaction = transactionOpt.get();
+        
+        // Validate transaction has amount
+        if (transaction.getAmount() == null || transaction.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
+            throw new RuntimeException("Transaction amount is null or zero. Cannot process refund.");
+        }
+        
+        // Normalize phone numbers
+        String normalizedAdminPhone = normalizePhoneTo12Digits(request.getAdminPhone());
+        String normalizedReceiverPhone = normalizePhoneTo12Digits(request.getReceiverPhone());
+        
+        // Calculate refund amount: transaction amount - (customer cashback + besoft share)
+        BigDecimal transactionAmount = transaction.getAmount();
+        BigDecimal customerCashback = transaction.getCustomerCashbackAmount() != null ? 
+            transaction.getCustomerCashbackAmount() : BigDecimal.ZERO;
+        BigDecimal besoftShare = transaction.getBesoftShareAmount() != null ? 
+            transaction.getBesoftShareAmount() : BigDecimal.ZERO;
+        
+        BigDecimal totalCashback = customerCashback.add(besoftShare);
+        BigDecimal refundAmount = transactionAmount.subtract(totalCashback);
+        
+        if (refundAmount.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new RuntimeException("Refund amount is zero or negative. Transaction amount: " + 
+                transactionAmount + ", Total cashback: " + totalCashback);
+        }
+        
+        logger.info("Refund calculation - Transaction Amount: {}, Customer Cashback: {}, Besoft Share: {}, Total Cashback: {}, Refund Amount: {}", 
+            transactionAmount, customerCashback, besoftShare, totalCashback, refundAmount);
+        
+        // Generate unique transaction ID for refund
+        String timestamp = String.valueOf(System.currentTimeMillis());
+        String refundTransactionId = transactionId + "-REFUND-" + timestamp;
+        
+        // Build refund message
+        String refundMessage = request.getMessage() != null && !request.getMessage().trim().isEmpty() 
+            ? request.getMessage() 
+            : "EFASHE " + transaction.getServiceType() + " - Refund";
+        
+        // Initiate MoPay refund transfer
+        // NOTE: We do NOT call EFASHE API during refund processing - only MoPay transfer
+        try {
+            MoPayInitiateRequest refundRequest = new MoPayInitiateRequest();
+            refundRequest.setTransaction_id(refundTransactionId);
+            refundRequest.setAmount(refundAmount);
+            refundRequest.setCurrency("RWF");
+            refundRequest.setPhone(normalizedAdminPhone); // From: admin phone (DEBIT)
+            refundRequest.setPayment_mode("MOBILE");
+            refundRequest.setMessage(refundMessage);
+            
+            // Create transfer to receiver phone
+            List<MoPayInitiateRequest.Transfer> transfers = new ArrayList<>();
+            MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
+            transfer.setAmount(refundAmount);
+            Long receiverPhoneLong = Long.parseLong(normalizedReceiverPhone);
+            transfer.setPhone(receiverPhoneLong); // To: receiver phone (CREDIT)
+            transfer.setMessage(refundMessage);
+            transfers.add(transfer);
+            refundRequest.setTransfers(transfers);
+            
+            logger.info("Initiating refund transfer - Transaction ID: {}, Amount: {}, From: {}, To: {}", 
+                refundTransactionId, refundAmount, normalizedAdminPhone, normalizedReceiverPhone);
+            
+            // Call MoPay to initiate the refund transfer
+            MoPayResponse refundResponse = moPayService.initiatePayment(refundRequest);
+            
+            // DETAILED LOGGING: Log the complete MoPay initiate response
+            logger.info("═══════════════════════════════════════════════════════════════");
+            logger.info("📋 COMPLETE MoPay Refund Initiate Response:");
+            logger.info("   Request Transaction ID: {}", refundTransactionId);
+            if (refundResponse != null) {
+                logger.info("   Status Code: {}", refundResponse.getStatus());
+                logger.info("   Success Flag: {}", refundResponse.getSuccess());
+                logger.info("   Transaction ID (from response): {}", refundResponse.getTransactionId());
+                logger.info("   Legacy Transaction ID: {}", refundResponse.getTransaction_id());
+                logger.info("   Message: {}", refundResponse.getMessage());
+                logger.info("   Error Message: {}", refundResponse.getErrorMessage());
+                logger.info("   Full Response Object: {}", refundResponse);
+            } else {
+                logger.warn("   ⚠️ MoPay response is NULL");
+            }
+            logger.info("═══════════════════════════════════════════════════════════════");
+            
+            // Check if refund was successful: status 201 (CREATED) or 200 (OK) OR success flag is true
+            boolean isRefundSuccess = false;
+            if (refundResponse != null) {
+                Integer statusCode = refundResponse.getStatus();
+                isRefundSuccess = (statusCode != null && (statusCode == 200 || statusCode == 201))
+                    || (refundResponse.getSuccess() != null && refundResponse.getSuccess())
+                    || (refundResponse.getTransactionId() != null && !refundResponse.getTransactionId().isEmpty());
+            }
+            
+            if (!isRefundSuccess) {
+                throw new RuntimeException("Refund transfer failed. MoPay response: " + 
+                    (refundResponse != null ? refundResponse.toString() : "null"));
+            }
+            
+            logger.info("✅ Refund transfer initiated successfully - Transaction ID: {}, MoPay Status: {}, MoPay Transaction ID: {}", 
+                refundTransactionId, refundResponse.getStatus(), refundResponse.getTransactionId());
+            
+            // Get the actual MoPay transaction ID for status checking
+            // This is the ID that should be returned and used to track the refund status
+            String actualRefundTransactionId = refundResponse.getTransactionId() != null ? 
+                refundResponse.getTransactionId() : refundTransactionId;
+            
+            logger.info("📌 MoPay Transaction ID: {}", actualRefundTransactionId);
+            
+            // Poll refund status synchronously - DO NOT return success until we find status: 200
+            // Poll every 2 seconds for up to 1 minute (60 seconds)
+            logger.info("⏳ Polling refund status - Transaction ID: {}. Will check every 2 seconds for up to 60 seconds (1 minute).", 
+                actualRefundTransactionId);
+            logger.info("⚠️ Will NOT return success until we find status: 200 in MoPay response");
+            
+            // Poll refund status synchronously - wait for status: 200
+            String finalStatus = pollRefundStatusSync(actualRefundTransactionId);
+            
+            logger.info("📊 Refund status check result - Transaction ID: {}, Final Status: {}", actualRefundTransactionId, finalStatus);
+            
+            // Mark refund as processed in error message
+            String existingErrorMessage = transaction.getErrorMessage() != null ? transaction.getErrorMessage() : "";
+            transaction.setErrorMessage(existingErrorMessage + " | REFUND_PROCESSED");
+            efasheTransactionRepository.save(transaction);
+            
+            // Only save refund history if status is SUCCESS or FAILED (not PENDING)
+            if ("SUCCESS".equals(finalStatus) || "FAILED".equals(finalStatus)) {
+                EfasheRefundHistory refundHistory = new EfasheRefundHistory();
+                refundHistory.setEfasheTransaction(transaction);
+                refundHistory.setOriginalTransactionId(transactionId);
+                refundHistory.setRefundTransactionId(actualRefundTransactionId);
+                refundHistory.setRefundAmount(refundAmount);
+                refundHistory.setAdminPhone(normalizedAdminPhone);
+                refundHistory.setReceiverPhone(normalizedReceiverPhone);
+                refundHistory.setMessage(refundMessage);
+                refundHistory.setStatus(finalStatus);
+                refundHistory.setMopayStatus(finalStatus.equals("SUCCESS") ? "200" : "FAILED");
+                refundHistory = efasheRefundHistoryRepository.save(refundHistory);
+                
+                logger.info("✅ Refund history saved - History ID: {}, Refund Transaction ID: {}, Status: {}", 
+                    refundHistory.getId(), refundHistory.getRefundTransactionId(), finalStatus);
+                
+                // ONLY IF STATUS IS SUCCESS (status 200), THEN update EFASHE transaction to REFUNDED and send notifications
+                if ("SUCCESS".equals(finalStatus)) {
+                    logger.info("✅ Refund status is SUCCESS (status 200) - Updating EFASHE transaction to REFUNDED");
+                    
+                    // Update EFASHE transaction status to REFUNDED
+                    transaction.setEfasheStatus("REFUNDED");
+                    efasheTransactionRepository.save(transaction);
+                    
+                    logger.info("✅ EFASHE transaction {} updated to REFUNDED", transactionId);
+                    
+                    // Send WhatsApp and SMS notifications
+                    logger.info("✅ Now sending WhatsApp and SMS notifications to: {}", normalizedReceiverPhone);
+                    try {
+                        String serviceName = transaction.getServiceType() != null ? transaction.getServiceType().toString() : "payment";
+                        String refundAmountStr = refundAmount.toPlainString();
+                        String transactionAmountStr = transactionAmount.toPlainString();
+                        String totalCashbackStr = totalCashback.toPlainString();
+                        
+                        // SMS message - show refund amount and cashback deduction
+                        String smsMessage = String.format(
+                            "Bepay-Efashe-%s Refund: You paid %s RWF. Refunded: %s RWF. Cashback deducted: %s RWF. Transaction ID: %s. Thanks for using Bepay POCHI App",
+                            serviceName.toUpperCase(),
+                            transactionAmountStr,
+                            refundAmountStr,
+                            totalCashbackStr,
+                            transactionId
+                        );
+                        
+                        // WhatsApp message - show refund amount and cashback deduction
+                        String whatsAppMessage = String.format(
+                            "Bepay-Efashe-%s Refund: You paid %s RWF. Refunded: %s RWF. Cashback deducted: %s RWF. Transaction ID: %s. Thanks for using Bepay POCHI App",
+                            serviceName.toUpperCase(),
+                            transactionAmountStr,
+                            refundAmountStr,
+                            totalCashbackStr,
+                            transactionId
+                        );
+                        
+                        messagingService.sendSms(smsMessage, normalizedReceiverPhone);
+                        whatsAppService.sendWhatsApp(whatsAppMessage, normalizedReceiverPhone);
+                        
+                        logger.info("✅ Refund notifications sent - SMS and WhatsApp sent to: {}", normalizedReceiverPhone);
+                    } catch (Exception notificationException) {
+                        logger.error("Error sending refund notifications: ", notificationException);
+                        // Don't fail refund if notifications fail
+                    }
+                } else {
+                    logger.info("⚠️ Refund status is NOT SUCCESS (Status: {}) - Marking as FAILED, NOT sending WhatsApp/SMS notifications", finalStatus);
+                    // Mark as FAILED - don't send notifications
+                    transaction.setEfasheStatus("FAILED");
+                    efasheTransactionRepository.save(transaction);
+                }
+            } else {
+                logger.warn("⚠️ Refund status is still PENDING after polling - not saving to database. Transaction ID: {}", 
+                    actualRefundTransactionId);
+            }
+            
+            logger.info("✅ Refund processed - Amount: {}, From: {}, To: {}, Status: {}", 
+                refundAmount, normalizedAdminPhone, normalizedReceiverPhone, finalStatus);
+            logger.info("=== PROCESS REFUND ENDPOINT END ===");
+            
+            // Only return success if we found status: 200, otherwise throw error
+            if ("SUCCESS".equals(finalStatus)) {
+                // Return the MoPay transaction ID
+                return actualRefundTransactionId;
+            } else {
+                throw new RuntimeException("Refund status check failed. Status: " + finalStatus + ". Transaction ID: " + actualRefundTransactionId);
+            }
+            
+        } catch (Exception e) {
+            logger.error("Error processing refund: ", e);
+            throw new RuntimeException("Failed to process refund: " + e.getMessage(), e);
+        }
+    }
+    
+    /**
+     * Poll refund status synchronously (wait for result)
+     * Polls every 2 seconds, maximum 30 times (60 seconds / 1 minute total)
+     * Returns SUCCESS, FAILED, or PENDING (will be converted to FAILED if still PENDING after max attempts)
+     * 
+     * IMPORTANT: This method ONLY uses MoPay API - NO EFASHE API calls are made.
+     * Refund status checking is done via MoPay's check-status endpoint only.
+     * 
+     * @param refundTransactionId MoPay refund transaction ID
+     * @return Status: SUCCESS, FAILED, or PENDING (converted to FAILED if still PENDING after max attempts)
+     */
+    private String pollRefundStatusSync(String refundTransactionId) {
+        logger.info("=== SYNCHRONOUS REFUND POLLING START ===");
+        logger.info("Refund Transaction ID: {}, Will poll every 2 seconds for up to 60 seconds (1 minute)", refundTransactionId);
+        logger.info("NOTE: Only using MoPay API for status checking - NO EFASHE API calls");
+        
+        int maxAttempts = 30; // 60 seconds / 1 minute total (2 seconds per attempt)
+        int pollIntervalSeconds = 2;
+        String finalStatus = "PENDING";
+        
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                logger.info("Refund status poll attempt {}/{} - Transaction ID: {}", attempt, maxAttempts, refundTransactionId);
+                
+                // Check refund status using MoPay check-status endpoint ONLY (no EFASHE calls)
+                MoPayResponse statusResponse = moPayService.checkTransactionStatus(refundTransactionId);
+                
+                // DETAILED LOGGING: Log the complete MoPay response
+                logger.info("═══════════════════════════════════════════════════════════════");
+                logger.info("📋 COMPLETE MoPay Refund Status Response:");
+                logger.info("   Transaction ID: {}", refundTransactionId);
+                if (statusResponse != null) {
+                    logger.info("   Status Code: {}", statusResponse.getStatus());
+                    logger.info("   Success Flag: {}", statusResponse.getSuccess());
+                    logger.info("   Transaction ID (from response): {}", statusResponse.getTransactionId());
+                    logger.info("   Legacy Transaction ID: {}", statusResponse.getTransaction_id());
+                    logger.info("   Message: {}", statusResponse.getMessage());
+                    logger.info("   Error Message: {}", statusResponse.getErrorMessage());
+                    logger.info("   Full Response Object: {}", statusResponse);
+                } else {
+                    logger.warn("   ⚠️ MoPay response is NULL");
+                }
+                logger.info("═══════════════════════════════════════════════════════════════");
+                
+                if (statusResponse != null) {
+                    Integer statusCode = statusResponse.getStatus();
+                    Boolean successFlag = statusResponse.getSuccess();
+                    
+                    // Check specifically for status: 200 in the MoPay response
+                    // The response should have: "status": 200
+                    boolean isSuccess = (statusCode != null && statusCode == 200);
+                    
+                    logger.info("Refund status check - Transaction ID: {}, Status Code: {}, Success Flag: {}, Is Success (status==200): {}", 
+                        refundTransactionId, statusCode, successFlag, isSuccess);
+                    
+                    if (isSuccess) {
+                        finalStatus = "SUCCESS";
+                        logger.info("✅ Refund status is SUCCESS (status: 200 found) - Transaction ID: {}", refundTransactionId);
+                        logger.info("=== SYNCHRONOUS REFUND POLLING END (SUCCESS) ===");
+                        return "SUCCESS";
+                    } else {
+                        // Check if it's explicitly failed
+                        if (statusCode != null && statusCode >= 400) {
+                            finalStatus = "FAILED";
+                            logger.warn("⚠️ Refund status is FAILED - Transaction ID: {}, Status Code: {}", 
+                                refundTransactionId, statusCode);
+                            logger.info("=== SYNCHRONOUS REFUND POLLING END (FAILED) ===");
+                            return "FAILED";
+                        }
+                        // Check if success flag is explicitly false (transaction failed)
+                        if (statusResponse.getSuccess() != null && !statusResponse.getSuccess() && statusCode != null && statusCode < 400) {
+                            finalStatus = "FAILED";
+                            logger.warn("⚠️ Refund status is FAILED (success flag is false) - Transaction ID: {}", 
+                                refundTransactionId);
+                            logger.info("=== SYNCHRONOUS REFUND POLLING END (FAILED) ===");
+                            return "FAILED";
+                        }
+                        // Still pending, continue polling
+                        logger.info("Refund status is still PENDING - will retry in {} second(s)", pollIntervalSeconds);
+                    }
+                } else {
+                    logger.warn("MoPay status response is null for refund transaction: {}", refundTransactionId);
+                }
+                
+                // Wait before next attempt (except on last attempt)
+                if (attempt < maxAttempts) {
+                    Thread.sleep(pollIntervalSeconds * 1000);
+                }
+                
+            } catch (InterruptedException e) {
+                logger.error("Refund polling thread interrupted: ", e);
+                Thread.currentThread().interrupt();
+                logger.info("=== SYNCHRONOUS REFUND POLLING END (INTERRUPTED) ===");
+                return "FAILED";
+            } catch (Exception e) {
+                logger.error("Error checking refund status (attempt {}/{}): ", attempt, maxAttempts, e);
+                // Continue to next attempt even on error
+                if (attempt < maxAttempts) {
+                    try {
+                        Thread.sleep(pollIntervalSeconds * 1000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        logger.info("=== SYNCHRONOUS REFUND POLLING END (INTERRUPTED) ===");
+                        return "FAILED";
+                    }
+                }
+            }
+        }
+        
+        // If still PENDING after all attempts, mark as FAILED
+        logger.warn("⚠️ Refund status check completed but status is still PENDING after {} attempts - Marking as FAILED. Transaction ID: {}", 
+            maxAttempts, refundTransactionId);
+        logger.info("=== SYNCHRONOUS REFUND POLLING END (PENDING -> FAILED) ===");
+        return "FAILED";
+    }
+    
+    /**
+     * Poll refund status in the background (legacy method - kept for backward compatibility)
+     * Polls every 5 seconds, maximum 3 times
+     * Updates refund history status when SUCCESS is detected
+     * 
+     * @param refundTransactionId MoPay refund transaction ID
+     * @param refundHistoryId Refund history ID to update
+     */
+    private void pollRefundStatus(String refundTransactionId, UUID refundHistoryId) {
+        logger.info("=== BACKGROUND REFUND POLLING START ===");
+        logger.info("Refund Transaction ID: {}, Refund History ID: {}", refundTransactionId, refundHistoryId);
+        
+        int maxAttempts = 3;
+        int pollIntervalSeconds = 5;
+        
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                logger.info("Refund status poll attempt {}/{} - Transaction ID: {}", attempt, maxAttempts, refundTransactionId);
+                
+                // Check refund status using MoPay check-status endpoint
+                MoPayResponse statusResponse = moPayService.checkTransactionStatus(refundTransactionId);
+                
+                if (statusResponse != null) {
+                    Integer statusCode = statusResponse.getStatus();
+                    boolean isSuccess = (statusCode != null && (statusCode == 200 || statusCode == 201))
+                        || (statusResponse.getSuccess() != null && statusResponse.getSuccess());
+                    
+                    logger.info("Refund status check - Transaction ID: {}, Status Code: {}, Success: {}", 
+                        refundTransactionId, statusCode, isSuccess);
+                    
+                    // Update refund history
+                    Optional<EfasheRefundHistory> refundHistoryOpt = efasheRefundHistoryRepository.findById(refundHistoryId);
+                    if (refundHistoryOpt.isPresent()) {
+                        EfasheRefundHistory refundHistory = refundHistoryOpt.get();
+                        refundHistory.setMopayStatus(statusCode != null ? statusCode.toString() : null);
+                        
+                        if (isSuccess) {
+                            refundHistory.setStatus("SUCCESS");
+                            refundHistory.setErrorMessage(null);
+                            efasheRefundHistoryRepository.save(refundHistory);
+                            logger.info("✅ Refund status updated to SUCCESS - Transaction ID: {}", refundTransactionId);
+                            logger.info("=== BACKGROUND REFUND POLLING END (SUCCESS) ===");
+                            return; // Exit polling loop on success
+                        } else {
+                            // Still pending, continue polling
+                            logger.info("Refund status is still PENDING - will retry in {} seconds", pollIntervalSeconds);
+                        }
+                    } else {
+                        logger.warn("Refund history not found - ID: {}", refundHistoryId);
+                        return;
+                    }
+                } else {
+                    logger.warn("MoPay status response is null for refund transaction: {}", refundTransactionId);
+                }
+                
+                // Wait before next attempt (except on last attempt)
+                if (attempt < maxAttempts) {
+                    Thread.sleep(pollIntervalSeconds * 1000);
+                }
+                
+            } catch (InterruptedException e) {
+                logger.error("Refund polling thread interrupted: ", e);
+                Thread.currentThread().interrupt();
+                return;
+            } catch (Exception e) {
+                logger.error("Error checking refund status (attempt {}/{}): ", attempt, maxAttempts, e);
+                // Continue to next attempt even on error
+            }
+        }
+        
+        // If we reach here, all attempts failed or status is still not SUCCESS
+        // Update refund history to FAILED if status is not SUCCESS
+        try {
+            Optional<EfasheRefundHistory> refundHistoryOpt = efasheRefundHistoryRepository.findById(refundHistoryId);
+            if (refundHistoryOpt.isPresent()) {
+                EfasheRefundHistory refundHistory = refundHistoryOpt.get();
+                if (!"SUCCESS".equals(refundHistory.getStatus())) {
+                    refundHistory.setStatus("FAILED");
+                    refundHistory.setErrorMessage("Refund status check failed after " + maxAttempts + " attempts");
+                    efasheRefundHistoryRepository.save(refundHistory);
+                    logger.warn("⚠️ Refund status updated to FAILED after {} attempts - Transaction ID: {}", 
+                        maxAttempts, refundTransactionId);
+                }
+            }
+        } catch (Exception e) {
+            logger.error("Error updating refund history to FAILED: ", e);
+        }
+        
+        logger.info("=== BACKGROUND REFUND POLLING END (MAX ATTEMPTS REACHED) ===");
+    }
+    
+    /**
+     * Get refund history with optional filtering by receiver phone, status, and date range
+     * 
+     * @param receiverPhone Optional filter by receiver phone
+     * @param status Optional filter by status (PENDING, SUCCESS, FAILED)
+     * @param fromDate Optional start date filter
+     * @param toDate Optional end date filter
+     * @param page Page number
+     * @param size Page size
+     * @return Paginated refund history
+     */
+    @Transactional(readOnly = true)
+    public PaginatedResponse<EfasheRefundHistoryResponse> getRefundHistory(
+            String receiverPhone, String status, LocalDateTime fromDate, LocalDateTime toDate, int page, int size) {
+        logger.info("Getting refund history - Receiver Phone: {}, Status: {}, From Date: {}, To Date: {}, Page: {}, Size: {}", 
+            receiverPhone, status, fromDate, toDate, page, size);
+        
+        // Build dynamic query using EntityManager (similar to getTransactions)
+        StringBuilder queryBuilder = new StringBuilder();
+        queryBuilder.append("SELECT r FROM EfasheRefundHistory r WHERE 1=1 ");
+        
+        // Add receiver phone filter if provided
+        String normalizedPhone = null;
+        if (receiverPhone != null && !receiverPhone.trim().isEmpty()) {
+            normalizedPhone = normalizePhoneTo12Digits(receiverPhone.trim());
+            queryBuilder.append("AND r.receiverPhone = :receiverPhone ");
+        }
+        
+        // Add status filter if provided
+        if (status != null && !status.trim().isEmpty()) {
+            queryBuilder.append("AND r.status = :status ");
+        }
+        
+        // Add date range filters if provided
+        if (fromDate != null) {
+            queryBuilder.append("AND r.createdAt >= :fromDate ");
+        }
+        if (toDate != null) {
+            queryBuilder.append("AND r.createdAt <= :toDate ");
+        }
+        
+        queryBuilder.append("ORDER BY r.createdAt DESC");
+        
+        // Create query
+        Query query = entityManager.createQuery(queryBuilder.toString(), EfasheRefundHistory.class);
+        
+        // Set parameters
+        if (normalizedPhone != null) {
+            query.setParameter("receiverPhone", normalizedPhone);
+        }
+        if (status != null && !status.trim().isEmpty()) {
+            query.setParameter("status", status.trim());
+        }
+        if (fromDate != null) {
+            query.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            query.setParameter("toDate", toDate);
+        }
+        
+        // Build count query for pagination
+        StringBuilder countQueryBuilder = new StringBuilder();
+        countQueryBuilder.append("SELECT COUNT(r) FROM EfasheRefundHistory r WHERE 1=1 ");
+        
+        if (normalizedPhone != null) {
+            countQueryBuilder.append("AND r.receiverPhone = :receiverPhone ");
+        }
+        if (status != null && !status.trim().isEmpty()) {
+            countQueryBuilder.append("AND r.status = :status ");
+        }
+        if (fromDate != null) {
+            countQueryBuilder.append("AND r.createdAt >= :fromDate ");
+        }
+        if (toDate != null) {
+            countQueryBuilder.append("AND r.createdAt <= :toDate ");
+        }
+        
+        Query countQuery = entityManager.createQuery(countQueryBuilder.toString(), Long.class);
+        
+        // Set count query parameters
+        if (normalizedPhone != null) {
+            countQuery.setParameter("receiverPhone", normalizedPhone);
+        }
+        if (status != null && !status.trim().isEmpty()) {
+            countQuery.setParameter("status", status.trim());
+        }
+        if (fromDate != null) {
+            countQuery.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            countQuery.setParameter("toDate", toDate);
+        }
+        
+        // Get total count
+        long totalElements = (Long) countQuery.getSingleResult();
+        
+        // Apply pagination
+        int offset = page * size;
+        query.setFirstResult(offset);
+        query.setMaxResults(size);
+        
+        @SuppressWarnings("unchecked")
+        List<EfasheRefundHistory> refundHistoryList = (List<EfasheRefundHistory>) query.getResultList();
+        
+        // Convert to response DTOs
+        List<EfasheRefundHistoryResponse> refundHistoryResponses = refundHistoryList.stream()
+            .map(this::mapToRefundHistoryResponse)
+            .collect(Collectors.toList());
+        
+        // Calculate pagination metadata
+        int totalPages = (int) Math.ceil((double) totalElements / size);
+        
+        PaginatedResponse<EfasheRefundHistoryResponse> paginatedResponse = new PaginatedResponse<>();
+        paginatedResponse.setContent(refundHistoryResponses);
+        paginatedResponse.setTotalElements(totalElements);
+        paginatedResponse.setTotalPages(totalPages);
+        paginatedResponse.setCurrentPage(page);
+        paginatedResponse.setPageSize(size);
+        paginatedResponse.setFirst(page == 0);
+        paginatedResponse.setLast(page >= totalPages - 1);
+        
+        logger.info("Retrieved {} refund history records (total: {})", refundHistoryResponses.size(), totalElements);
+        return paginatedResponse;
+    }
+    
+    /**
+     * Map EfasheRefundHistory entity to EfasheRefundHistoryResponse DTO
+     */
+    private EfasheRefundHistoryResponse mapToRefundHistoryResponse(EfasheRefundHistory refundHistory) {
+        return EfasheRefundHistoryResponse.builder()
+            .id(refundHistory.getId())
+            .efasheTransactionId(refundHistory.getEfasheTransaction() != null ? 
+                refundHistory.getEfasheTransaction().getId() : null)
+            .originalTransactionId(refundHistory.getOriginalTransactionId())
+            .refundTransactionId(refundHistory.getRefundTransactionId())
+            .refundAmount(refundHistory.getRefundAmount())
+            .adminPhone(refundHistory.getAdminPhone())
+            .receiverPhone(refundHistory.getReceiverPhone())
+            .message(refundHistory.getMessage())
+            .status(refundHistory.getStatus())
+            .mopayStatus(refundHistory.getMopayStatus())
+            .errorMessage(refundHistory.getErrorMessage())
+            .createdAt(refundHistory.getCreatedAt())
+            .updatedAt(refundHistory.getUpdatedAt())
+            .build();
     }
 }
 

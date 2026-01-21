@@ -4,6 +4,8 @@ import com.pocketmoney.pocketmoney.dto.ApiResponse;
 import com.pocketmoney.pocketmoney.dto.EfasheInitiateRequest;
 import com.pocketmoney.pocketmoney.dto.EfasheInitiateForOtherRequest;
 import com.pocketmoney.pocketmoney.dto.EfasheInitiateResponse;
+import com.pocketmoney.pocketmoney.dto.EfasheRefundRequest;
+import com.pocketmoney.pocketmoney.dto.EfasheRefundHistoryResponse;
 import com.pocketmoney.pocketmoney.dto.EfasheStatusResponse;
 import com.pocketmoney.pocketmoney.dto.EfasheTransactionResponse;
 import com.pocketmoney.pocketmoney.dto.ElectricityTokensResponse;
@@ -288,6 +290,79 @@ public class EfasheController {
         } catch (RuntimeException e) {
             logger.error("Error exporting EFASHE receipt: ", e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    /**
+     * Process refund for an EFASHE transaction
+     * POST /api/efashe/refund/{transactionId}
+     * 
+     * Refunds the amount paid minus cashback (customer cashback + besoft share)
+     * Transfers from adminPhone (DEBIT) to receiverPhone (CREDIT)
+     * 
+     * Request body:
+     *   - adminPhone: Required - Admin phone number (DEBIT - who pays for refund)
+     *   - receiverPhone: Required - Customer phone number (CREDIT - who receives refund)
+     *   - message: Optional - Custom message for the refund
+     * 
+     * Example:
+     *   POST /api/efashe/refund/EFASHE1768575599499902855
+     *   {
+     *     "adminPhone": "250784638201",
+     *     "receiverPhone": "250784638201",
+     *     "message": "Refund for failed transaction"
+     *   }
+     */
+    @PostMapping("/refund/{transactionId}")
+    public ResponseEntity<ApiResponse<String>> processRefund(
+            @PathVariable("transactionId") String transactionId,
+            @Valid @RequestBody EfasheRefundRequest request) {
+        try {
+            String result = efashePaymentService.processRefund(transactionId, request);
+            return ResponseEntity.ok(ApiResponse.success("Refund processed successfully", result));
+        } catch (RuntimeException e) {
+            logger.error("Error processing refund: ", e);
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    /**
+     * Get refund history with optional filtering
+     * GET /api/efashe/refund-history
+     * 
+     * Query parameters:
+     *   - receiverPhone: Optional filter by receiver phone number
+     *   - status: Optional filter by status (PENDING, SUCCESS, FAILED)
+     *   - fromDate: Optional start date filter (ISO 8601 format)
+     *   - toDate: Optional end date filter (ISO 8601 format)
+     *   - page: Page number (default: 0)
+     *   - size: Page size (default: 20)
+     * 
+     * Examples:
+     *   GET /api/efashe/refund-history
+     *   GET /api/efashe/refund-history?receiverPhone=250784638201
+     *   GET /api/efashe/refund-history?status=SUCCESS
+     *   GET /api/efashe/refund-history?receiverPhone=250784638201&status=SUCCESS&fromDate=2026-01-16T00:00:00&toDate=2026-01-16T23:59:59&page=0&size=20
+     */
+    @GetMapping("/refund-history")
+    public ResponseEntity<ApiResponse<PaginatedResponse<EfasheRefundHistoryResponse>>> getRefundHistory(
+            @RequestParam(value = "receiverPhone", required = false) String receiverPhone,
+            @RequestParam(value = "status", required = false) String status,
+            @RequestParam(value = "fromDate", required = false) 
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
+            @RequestParam(value = "toDate", required = false) 
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate,
+            @RequestParam(value = "page", defaultValue = "0") int page,
+            @RequestParam(value = "size", defaultValue = "20") int size) {
+        try {
+            PaginatedResponse<EfasheRefundHistoryResponse> response = 
+                efashePaymentService.getRefundHistory(receiverPhone, status, fromDate, toDate, page, size);
+            return ResponseEntity.ok(ApiResponse.success("Refund history retrieved successfully", response));
+        } catch (RuntimeException e) {
+            logger.error("Error retrieving refund history: ", e);
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
         }
     }
 }
