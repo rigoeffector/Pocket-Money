@@ -806,12 +806,27 @@ public class PaymentService {
                     throw new RuntimeException(errorMsg);
                 }
             } else {
-                // NON-FLEXIBLE MODE: Receiver can process payments even when assignedBalance is 0
-                // They need to sell, and when admin assigns assignedBalance, it's for users to consume
-                // So we only check user balance, not receiver balance
-                logger.info("Receiver is in NON-FLEXIBLE mode - checking user balance only (receiver can sell even with assignedBalance=0)");
-                // Allow payment if user has sufficient balance (merchant + global)
-                // Receiver's assignedBalance is for users to consume, not for blocking sales
+                // NON-FLEXIBLE MODE: Check both user balance AND receiver remaining balance
+                // Merchant MUST have remainingBalance to allow payments (even MOMO payments)
+                // If merchant has no remainingBalance, payment is NOT allowed
+                logger.info("Receiver is in NON-FLEXIBLE mode - checking both user balance AND receiver remaining balance");
+                logger.info("Receiver remaining balance: {}", receiverRemainingBalance);
+                
+                // For NON-FLEXIBLE merchants: Both user balance AND receiver remaining balance must be sufficient
+                // If merchant has no remainingBalance, payment is NOT allowed (even if user has balance)
+                if (!receiverHasBalance) {
+                    String errorMsg = String.format(
+                        "Payment not allowed. Merchant remaining balance: %s, Required: %s. " +
+                        "Please contact the merchant to top up their balance.",
+                        receiverRemainingBalance, request.getAmount());
+                    logger.error("=== PAYMENT BLOCKED (NON-FLEXIBLE MODE - NO MERCHANT BALANCE) ===");
+                    logger.error(errorMsg);
+                    logger.error("Receiver remaining balance from DB: {}", receiverRemainingBalance);
+                    logger.error("User balance: {} (Merchant: {}, Global: {})", totalAvailableBalance, merchantBalance, globalBalance);
+                    throw new RuntimeException(errorMsg);
+                }
+                
+                // Merchant has balance, now check user balance
                 if (!userHasBalance) {
                     String errorMsg = String.format(
                         "Insufficient balance. User balance: %s (Merchant: %s, Global: %s), Required: %s. " +
@@ -821,9 +836,11 @@ public class PaymentService {
                     logger.error(errorMsg);
                     logger.error("User amountRemaining from DB: {}", user.getAmountRemaining());
                     logger.error("Merchant balance from DB: {}", merchantBalance);
-                    logger.info("Note: Receiver can process payments even when assignedBalance is 0 - they need to sell. AssignedBalance is for users to consume.");
                     throw new RuntimeException(errorMsg);
                 }
+                
+                // Both checks passed - merchant has balance and user has balance
+                logger.info("Both checks passed - Merchant remaining balance: {}, User balance: {}", receiverRemainingBalance, totalAvailableBalance);
             }
         }
 

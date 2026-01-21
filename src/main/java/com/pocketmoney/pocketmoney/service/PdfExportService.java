@@ -884,7 +884,7 @@ public class PdfExportService {
                 contentStream.beginText();
                 contentStream.setFont(PDType1Font.HELVETICA, 9);
                 contentStream.newLineAtOffset(margin, currentY);
-                contentStream.showText("www.pochi.info | Support: +250 794 201 373 | only WhatsApp: +250 788 319 169");
+                contentStream.showText("www.pochi.info | Support: +250 794 230 137 | only WhatsApp: +250 788 319 169");
                 contentStream.endText();
                 
             } finally {

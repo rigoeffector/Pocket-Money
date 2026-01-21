@@ -6,6 +6,7 @@ import com.pocketmoney.pocketmoney.dto.EfasheInitiateForOtherRequest;
 import com.pocketmoney.pocketmoney.dto.EfasheInitiateResponse;
 import com.pocketmoney.pocketmoney.dto.EfasheStatusResponse;
 import com.pocketmoney.pocketmoney.dto.EfasheTransactionResponse;
+import com.pocketmoney.pocketmoney.dto.ElectricityTokensResponse;
 import com.pocketmoney.pocketmoney.dto.PaginatedResponse;
 import com.pocketmoney.pocketmoney.entity.EfasheServiceType;
 import com.pocketmoney.pocketmoney.service.EfashePaymentService;
@@ -194,6 +195,36 @@ public class EfasheController {
             return ResponseEntity.ok(ApiResponse.success("EFASHE transactions retrieved successfully", response));
         } catch (RuntimeException e) {
             logger.error("Error retrieving EFASHE transactions: ", e);
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    /**
+     * Get electricity tokens for a meter number (test endpoint)
+     * GET /api/efashe/electricity/tokens?meterNo={meterNumber}&numTokens={numTokens}
+     * 
+     * Query parameters:
+     *   - meterNo: Meter number (required) - e.g., "0215006303691"
+     *   - numTokens: Number of tokens to retrieve (optional, default: 1)
+     * 
+     * Example:
+     *   GET /api/efashe/electricity/tokens?meterNo=0215006303691&numTokens=1
+     */
+    @GetMapping("/electricity/tokens")
+    public ResponseEntity<ApiResponse<ElectricityTokensResponse>> getElectricityTokens(
+            @RequestParam("meterNo") String meterNo,
+            @RequestParam(value = "numTokens", required = false, defaultValue = "1") Integer numTokens) {
+        try {
+            if (meterNo == null || meterNo.trim().isEmpty()) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                        .body(ApiResponse.error("meterNo parameter is required"));
+            }
+            
+            ElectricityTokensResponse response = efashePaymentService.getElectricityTokens(meterNo.trim(), numTokens);
+            return ResponseEntity.ok(ApiResponse.success("Electricity tokens retrieved successfully", response));
+        } catch (RuntimeException e) {
+            logger.error("Error retrieving electricity tokens: ", e);
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.error(e.getMessage()));
         }

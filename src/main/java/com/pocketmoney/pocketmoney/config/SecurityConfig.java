@@ -100,6 +100,7 @@ public class SecurityConfig {
                         .requestMatchers("/api/efashe/status/**").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .requestMatchers("/api/efashe/receipt/**").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .requestMatchers("/api/efashe/transactions", "/api/efashe/transactions/**").hasAnyRole("USER", "RECEIVER", "ADMIN")
+                        .requestMatchers("/api/efashe/electricity/tokens").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .requestMatchers("/api/efashe/settings", "/api/efashe/settings/**").hasRole("ADMIN")
                         .requestMatchers("/api/test/**").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .anyRequest().authenticated()

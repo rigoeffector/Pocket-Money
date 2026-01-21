@@ -2315,6 +2315,17 @@ public class EfashePaymentService {
     }
     
     /**
+     * Get electricity tokens for a meter number (test/debug endpoint)
+     * @param meterNumber Meter number to check tokens for
+     * @param numTokens Number of tokens to retrieve (default: 1)
+     * @return ElectricityTokensResponse with token data
+     */
+    public ElectricityTokensResponse getElectricityTokens(String meterNumber, Integer numTokens) {
+        logger.info("Getting electricity tokens for meter: {}, numTokens: {}", meterNumber, numTokens);
+        return efasheApiService.getElectricityTokens(meterNumber, numTokens);
+    }
+    
+    /**
      * Format token number by grouping digits into groups of 4 with dashes
      * Example: "1234567890123456" -> "1234-5678-9012-3456"
      * @param token The raw token string (may contain non-digit characters)
