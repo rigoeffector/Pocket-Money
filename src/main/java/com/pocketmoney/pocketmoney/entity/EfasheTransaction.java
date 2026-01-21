@@ -78,6 +78,9 @@ public class EfasheTransaction {
     @Column(name = "message", length = 1000)
     private String message;
 
+    @Column(name = "token", length = 100)
+    private String token; // Electricity token number (from /electricity/tokens endpoint)
+
     @Column(name = "error_message", length = 1000)
     private String errorMessage;
 

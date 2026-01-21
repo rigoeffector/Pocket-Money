@@ -840,6 +840,58 @@ public class EfashePaymentService {
                                 }
                                 
                                 transaction.setMessage(messageBuilder.toString());
+                                
+                                // Call /electricity/tokens endpoint to get token and save it
+                                try {
+                                    String meterNumber = transaction.getCustomerAccountNumber();
+                                    if (meterNumber != null && !meterNumber.trim().isEmpty()) {
+                                        logger.info("ELECTRICITY service - Calling /electricity/tokens endpoint for meter: {}", meterNumber);
+                                        ElectricityTokensResponse tokensResponse = efasheApiService.getElectricityTokens(meterNumber, 1);
+                                        
+                                        if (tokensResponse != null && tokensResponse.getData() != null && !tokensResponse.getData().isEmpty()) {
+                                            ElectricityTokensResponse.ElectricityTokenData firstTokenData = tokensResponse.getData().get(0);
+                                            String firstToken = firstTokenData.getToken();
+                                            
+                                            if (firstToken != null && !firstToken.trim().isEmpty()) {
+                                                // Save the first token to the database
+                                                transaction.setToken(firstToken);
+                                                logger.info("ELECTRICITY service - Saved first token from /electricity/tokens (execute): {}", firstToken);
+                                                
+                                                // Update message with the token from tokens endpoint if not already present
+                                                if (token == null || token.isEmpty() || !messageBuilder.toString().contains("Token:")) {
+                                                    if (messageBuilder.length() > 0) {
+                                                        messageBuilder.append(" | ");
+                                                    }
+                                                    messageBuilder.append("Token: ").append(firstToken);
+                                                    transaction.setMessage(messageBuilder.toString());
+                                                    logger.info("ELECTRICITY service - Updated message with token from /electricity/tokens endpoint (execute)");
+                                                }
+                                                
+                                                // Also update KWH if available from tokens response
+                                                if (firstTokenData.getUnits() != null) {
+                                                    String unitsStr = String.format("%.1f", firstTokenData.getUnits());
+                                                    if (!messageBuilder.toString().contains("KWH:")) {
+                                                        if (messageBuilder.length() > 0) {
+                                                            messageBuilder.append(" | ");
+                                                        }
+                                                        messageBuilder.append("KWH: ").append(unitsStr);
+                                                        transaction.setMessage(messageBuilder.toString());
+                                                        logger.info("ELECTRICITY service - Updated message with KWH from /electricity/tokens (execute): {}", unitsStr);
+                                                    }
+                                                }
+                                            } else {
+                                                logger.warn("ELECTRICITY service - First token from /electricity/tokens (execute) is null or empty");
+                                            }
+                                        } else {
+                                            logger.warn("ELECTRICITY service - No token data returned from /electricity/tokens endpoint (execute)");
+                                        }
+                                    } else {
+                                        logger.warn("ELECTRICITY service - Cannot call /electricity/tokens (execute): meter number is null or empty");
+                                    }
+                                } catch (Exception e) {
+                                    logger.error("ELECTRICITY service - Error calling /electricity/tokens endpoint (execute): ", e);
+                                    // Don't fail the transaction if tokens endpoint fails - continue with existing token if available
+                                }
                             } else {
                                 transaction.setMessage(executeResponse.getMessage());
                             }
@@ -1088,6 +1140,24 @@ public class EfashePaymentService {
         }
         
         response.setTransfers(transfers);
+        
+        // For ELECTRICITY transactions, fetch and include electricity tokens response
+        if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
+            try {
+                String meterNumber = transaction.getCustomerAccountNumber();
+                if (meterNumber != null && !meterNumber.trim().isEmpty()) {
+                    logger.info("ELECTRICITY transaction - Fetching tokens for meter: {}", meterNumber);
+                    ElectricityTokensResponse tokensResponse = efasheApiService.getElectricityTokens(meterNumber, 1);
+                    response.setElectricityTokens(tokensResponse);
+                    logger.info("ELECTRICITY transaction - Tokens response added to status response");
+                } else {
+                    logger.warn("ELECTRICITY transaction - Cannot fetch tokens: meter number is null or empty");
+                }
+            } catch (Exception e) {
+                logger.error("ELECTRICITY transaction - Error fetching tokens for status response: ", e);
+                // Don't fail the status check if tokens endpoint fails
+            }
+        }
         
         logger.info("Transaction status check result - Transaction ID: {}, MoPay Status: {}, EFASHE Status: {}, Transfers: {}", 
             transactionId, transaction.getMopayStatus(), transaction.getEfasheStatus(), transfers.size());
@@ -1485,6 +1555,58 @@ public class EfashePaymentService {
                             }
                             
                             transaction.setMessage(messageBuilder.toString());
+                            
+                            // Call /electricity/tokens endpoint to get token and save it
+                            try {
+                                String meterNumber = transaction.getCustomerAccountNumber();
+                                if (meterNumber != null && !meterNumber.trim().isEmpty()) {
+                                    logger.info("ELECTRICITY service - Calling /electricity/tokens endpoint for meter: {}", meterNumber);
+                                    ElectricityTokensResponse tokensResponse = efasheApiService.getElectricityTokens(meterNumber, 1);
+                                    
+                                    if (tokensResponse != null && tokensResponse.getData() != null && !tokensResponse.getData().isEmpty()) {
+                                        ElectricityTokensResponse.ElectricityTokenData firstTokenData = tokensResponse.getData().get(0);
+                                        String firstToken = firstTokenData.getToken();
+                                        
+                                        if (firstToken != null && !firstToken.trim().isEmpty()) {
+                                            // Save the first token to the database
+                                            transaction.setToken(firstToken);
+                                            logger.info("ELECTRICITY service - Saved first token from /electricity/tokens: {}", firstToken);
+                                            
+                                            // Update message with the token from tokens endpoint if not already present
+                                            if (token == null || token.isEmpty() || !messageBuilder.toString().contains("Token:")) {
+                                                if (messageBuilder.length() > 0) {
+                                                    messageBuilder.append(" | ");
+                                                }
+                                                messageBuilder.append("Token: ").append(firstToken);
+                                                transaction.setMessage(messageBuilder.toString());
+                                                logger.info("ELECTRICITY service - Updated message with token from /electricity/tokens endpoint");
+                                            }
+                                            
+                                            // Also update KWH if available from tokens response
+                                            if (firstTokenData.getUnits() != null) {
+                                                String unitsStr = String.format("%.1f", firstTokenData.getUnits());
+                                                if (!messageBuilder.toString().contains("KWH:")) {
+                                                    if (messageBuilder.length() > 0) {
+                                                        messageBuilder.append(" | ");
+                                                    }
+                                                    messageBuilder.append("KWH: ").append(unitsStr);
+                                                    transaction.setMessage(messageBuilder.toString());
+                                                    logger.info("ELECTRICITY service - Updated message with KWH from /electricity/tokens: {}", unitsStr);
+                                                }
+                                            }
+                                        } else {
+                                            logger.warn("ELECTRICITY service - First token from /electricity/tokens is null or empty");
+                                        }
+                                    } else {
+                                        logger.warn("ELECTRICITY service - No token data returned from /electricity/tokens endpoint");
+                                    }
+                                } else {
+                                    logger.warn("ELECTRICITY service - Cannot call /electricity/tokens: meter number is null or empty");
+                                }
+                            } catch (Exception e) {
+                                logger.error("ELECTRICITY service - Error calling /electricity/tokens endpoint: ", e);
+                                // Don't fail the transaction if tokens endpoint fails - continue with existing token if available
+                            }
                         } else {
                             transaction.setMessage(pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction completed successfully");
                         }
@@ -1625,20 +1747,35 @@ public class EfashePaymentService {
             String ownerName = (customerAccountName != null && !customerAccountName.trim().isEmpty()) 
                 ? customerAccountName.trim() : null;
             
+            // Log owner name status for ELECTRICITY transactions
+            if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
+                if (ownerName != null && !ownerName.isEmpty()) {
+                    logger.info("ELECTRICITY - Owner name found: {}", ownerName);
+                } else {
+                    logger.warn("ELECTRICITY - Owner name not available in transaction. CustomerAccountName: {}", customerAccountName);
+                }
+            }
+            
             String message;
             
             // For ELECTRICITY service, include token and KWH information if available
             if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
-                // Extract token and KWH from message if it's stored there
-                // Token format in message: "Token: {token}" or "Token: {token} | KWH: {kwh}"
-                String tokenInfo = "";
-                String kwhInfo = "";
+                // First, try to get token from database field (saved from /electricity/tokens endpoint)
+                String tokenInfo = null;
+                String kwhInfo = null;
                 
-                if (transaction.getMessage() != null) {
+                if (transaction.getToken() != null && !transaction.getToken().trim().isEmpty()) {
+                    // Use token from database (saved from /electricity/tokens endpoint)
+                    tokenInfo = transaction.getToken().trim();
+                    // Format token with dashes every 4 digits
+                    tokenInfo = formatTokenWithDashes(tokenInfo);
+                    logger.info("ELECTRICITY - Using token from database field: {}", tokenInfo);
+                } else if (transaction.getMessage() != null) {
+                    // Fall back to extracting token from message if not in database
                     String messageText = transaction.getMessage();
-                    logger.info("ELECTRICITY - Extracting token and KWH from message: {}", messageText);
+                    logger.info("ELECTRICITY - Token not in database, extracting from message: {}", messageText);
                     
-                    // Extract token
+                    // Extract token - try multiple patterns
                     if (messageText.contains("Token:")) {
                         String[] tokenParts = messageText.split("Token:");
                         if (tokenParts.length > 1) {
@@ -1652,11 +1789,34 @@ public class EfashePaymentService {
                             }
                             // Clean up any trailing separators
                             tokenInfo = tokenInfo.replaceAll("\\|", "").trim();
-                            logger.info("ELECTRICITY - Token extracted: {}", tokenInfo);
+                            // Format token with dashes every 4 digits
+                            tokenInfo = formatTokenWithDashes(tokenInfo);
+                            logger.info("ELECTRICITY - Token extracted and formatted from message: {}", tokenInfo);
+                        }
+                    } else if (messageText.contains("token:")) {
+                        // Try lowercase "token:"
+                        String[] tokenParts = messageText.split("token:");
+                        if (tokenParts.length > 1) {
+                            tokenInfo = tokenParts[1].trim();
+                            if (tokenInfo.contains(" | ")) {
+                                tokenInfo = tokenInfo.split(" \\| ")[0].trim();
+                            }
+                            if (tokenInfo.contains("kwh:")) {
+                                tokenInfo = tokenInfo.split("kwh:")[0].trim();
+                            }
+                            tokenInfo = tokenInfo.replaceAll("\\|", "").trim();
+                            // Format token with dashes every 4 digits
+                            tokenInfo = formatTokenWithDashes(tokenInfo);
+                            logger.info("ELECTRICITY - Token extracted and formatted from message (lowercase): {}", tokenInfo);
                         }
                     }
+                }
+                
+                // Extract KWH from message if available
+                if (transaction.getMessage() != null) {
+                    String messageText = transaction.getMessage();
                     
-                    // Extract KWH
+                    // Extract KWH - try multiple patterns
                     if (messageText.contains("KWH:")) {
                         String[] kwhParts = messageText.split("KWH:");
                         if (kwhParts.length > 1) {
@@ -1675,16 +1835,35 @@ public class EfashePaymentService {
                                 kwhInfo = kwhRaw; // Use as-is if parsing fails
                             }
                         }
+                    } else if (messageText.contains("kwh:")) {
+                        // Try lowercase "kwh:"
+                        String[] kwhParts = messageText.split("kwh:");
+                        if (kwhParts.length > 1) {
+                            String kwhRaw = kwhParts[1].trim();
+                            if (kwhRaw.contains(" | ")) {
+                                kwhRaw = kwhRaw.split(" \\| ")[0].trim();
+                            }
+                            try {
+                                double kwhValue = Double.parseDouble(kwhRaw);
+                                kwhInfo = String.format("%.1f", kwhValue);
+                                logger.info("ELECTRICITY - KWH extracted and formatted (lowercase): {} -> {}", kwhRaw, kwhInfo);
+                            } catch (NumberFormatException e) {
+                                logger.warn("ELECTRICITY - Could not parse KWH value (lowercase): {}", kwhRaw);
+                                kwhInfo = kwhRaw;
+                            }
+                        }
                     }
                 }
                 
                 // Build message with owner name, token, and KWH
-                String ownerInfo = ownerName != null ? " for " + ownerName : "";
+                // Always include owner name if available
+                String ownerInfo = (ownerName != null && !ownerName.isEmpty()) ? " for " + ownerName : "";
                 
+                // Ensure token and owner name are always included when available
                 if (tokenInfo != null && !tokenInfo.isEmpty()) {
                     // Token is available - include it and KWH in the message
                     if (kwhInfo != null && !kwhInfo.isEmpty()) {
-                        // Both token and KWH available
+                        // Both token and KWH available - include owner name if available
                         message = String.format(
                             "Bepay-Efashe-%s You Paid %s RWF for %s%s. Your token is: %s. KWH: %s. Cashback: %s RWF. Thanks for using Bepay POCHI App",
                             serviceName.toUpperCase(),
@@ -1695,9 +1874,10 @@ public class EfashePaymentService {
                             kwhInfo,
                             cashbackAmount
                         );
-                        logger.info("ELECTRICITY - WhatsApp/SMS message with token and KWH: {}", message);
+                        logger.info("ELECTRICITY - WhatsApp/SMS message with token, KWH, and owner name: {}", message);
+                        logger.info("ELECTRICITY - Token: {}, KWH: {}, Owner: {}", tokenInfo, kwhInfo, ownerName != null ? ownerName : "N/A");
                     } else {
-                        // Only token available (KWH not yet available)
+                        // Only token available (KWH not yet available) - include owner name if available
                         message = String.format(
                             "Bepay-Efashe-%s You Paid %s RWF for %s%s. Your token is: %s. Cashback: %s RWF. Thanks for using Bepay POCHI App",
                             serviceName.toUpperCase(),
@@ -1707,11 +1887,13 @@ public class EfashePaymentService {
                             tokenInfo,
                 cashbackAmount
             );
-                        logger.info("ELECTRICITY - WhatsApp/SMS message with token (KWH not available): {}", message);
+                        logger.info("ELECTRICITY - WhatsApp/SMS message with token and owner name (KWH not available): {}", message);
+                        logger.info("ELECTRICITY - Token: {}, Owner: {}", tokenInfo, ownerName != null ? ownerName : "N/A");
                     }
                 } else {
-                    // No token available yet - log warning
+                    // No token available yet - log warning but still include owner name if available
                     logger.warn("ELECTRICITY - Token not found in transaction message. Message: {}", transaction.getMessage());
+                    logger.warn("ELECTRICITY - Will send message without token. Owner name: {}", ownerName != null ? ownerName : "N/A");
                     message = String.format(
                         "Bepay-Efashe-%s You Paid %s RWF for %s%s. Cashback: %s RWF. Thanks for using Bepay POCHI App",
                         serviceName.toUpperCase(),
@@ -1747,7 +1929,7 @@ public class EfashePaymentService {
             // WhatsApp service should handle the format conversion if needed
             String whatsappPhone = normalizedPhone;
             
-            // Log token information for electricity transactions
+            // Log token and owner name information for electricity transactions
             if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
                 logger.info("=== ELECTRICITY TRANSACTION NOTIFICATION ===");
                 logger.info("Service: ELECTRICITY, Phone: {}, Amount: {} RWF", whatsappPhone, amount);
@@ -1756,13 +1938,23 @@ public class EfashePaymentService {
                 } else {
                     logger.warn("⚠️ TOKEN NOT FOUND IN MESSAGE - Token may not be available yet");
                 }
+                if (ownerName != null && !ownerName.isEmpty() && message.contains(" for " + ownerName)) {
+                    logger.info("✅ OWNER NAME IS INCLUDED IN MESSAGE: {} - Will be sent via WhatsApp and SMS", ownerName);
+                } else if (ownerName == null || ownerName.isEmpty()) {
+                    logger.warn("⚠️ OWNER NAME NOT AVAILABLE - Message will be sent without owner name");
+                }
             }
             
             logger.info("=== CALLING WhatsApp Service ===");
             logger.info("WhatsApp Phone: {}", whatsappPhone);
             logger.info("WhatsApp Message: {}", message);
-            if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY && message.contains("token is:")) {
-                logger.info("✅ WhatsApp message includes TOKEN for electricity transaction");
+            if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
+                if (message.contains("token is:")) {
+                    logger.info("✅ WhatsApp message includes TOKEN for electricity transaction");
+                }
+                if (ownerName != null && !ownerName.isEmpty() && message.contains(" for " + ownerName)) {
+                    logger.info("✅ WhatsApp message includes OWNER NAME: {} for electricity transaction", ownerName);
+                }
             }
             
             // Send WhatsApp notification
@@ -1776,8 +1968,13 @@ public class EfashePaymentService {
             logger.info("=== SENDING SMS Notification via Swift.com ===");
             logger.info("SMS Phone: {}", whatsappPhone);
             logger.info("SMS Message: {}", message);
-            if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY && message.contains("token is:")) {
-                logger.info("✅ SMS message (Swift.com) includes TOKEN for electricity transaction");
+            if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
+                if (message.contains("token is:")) {
+                    logger.info("✅ SMS message (Swift.com) includes TOKEN for electricity transaction");
+                }
+                if (ownerName != null && !ownerName.isEmpty() && message.contains(" for " + ownerName)) {
+                    logger.info("✅ SMS message (Swift.com) includes OWNER NAME: {} for electricity transaction", ownerName);
+                }
             }
             try {
                 messagingService.sendSms(message, whatsappPhone);
@@ -2115,6 +2312,38 @@ public class EfashePaymentService {
         }
         
         return null;
+    }
+    
+    /**
+     * Format token number by grouping digits into groups of 4 with dashes
+     * Example: "1234567890123456" -> "1234-5678-9012-3456"
+     * @param token The raw token string (may contain non-digit characters)
+     * @return Formatted token with dashes every 4 digits, or original string if formatting fails
+     */
+    private String formatTokenWithDashes(String token) {
+        if (token == null || token.trim().isEmpty()) {
+            return token;
+        }
+        
+        // Remove all non-digit characters to get only digits
+        String digitsOnly = token.replaceAll("[^0-9]", "");
+        
+        if (digitsOnly.isEmpty()) {
+            // If no digits found, return original token
+            return token;
+        }
+        
+        // Group digits into groups of 4 with dashes
+        StringBuilder formatted = new StringBuilder();
+        for (int i = 0; i < digitsOnly.length(); i++) {
+            if (i > 0 && i % 4 == 0) {
+                formatted.append("-");
+            }
+            formatted.append(digitsOnly.charAt(i));
+        }
+        
+        logger.debug("Token formatted: {} -> {}", token, formatted.toString());
+        return formatted.toString();
     }
 }
 

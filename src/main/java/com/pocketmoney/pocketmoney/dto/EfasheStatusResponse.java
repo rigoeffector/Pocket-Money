@@ -16,6 +16,7 @@ public class EfasheStatusResponse {
     private String pollEndpoint; // EFASHE poll endpoint for async status checking
     private Integer retryAfterSecs; // Retry interval for polling
     private List<TransferInfo> transfers; // List of transfers made for this transaction
+    private ElectricityTokensResponse electricityTokens; // Electricity tokens response (for ELECTRICITY service type only)
     
     @Data
     public static class TransferInfo {

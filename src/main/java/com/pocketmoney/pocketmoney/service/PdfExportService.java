@@ -780,22 +780,24 @@ public class PdfExportService {
                         String token = null;
                         String kwh = null;
                         
-                        if (message.contains("Token:")) {
-                            String[] tokenParts = message.split("Token:");
+                        if (message.contains("Token:") || message.contains("token:")) {
+                            String[] tokenParts = message.split("(?i)Token:");
                             if (tokenParts.length > 1) {
                                 String tokenRaw = tokenParts[1].trim();
                                 if (tokenRaw.contains(" | ")) {
                                     token = tokenRaw.split(" \\| ")[0].trim();
-                                } else if (tokenRaw.contains("KWH:")) {
-                                    token = tokenRaw.split("KWH:")[0].trim();
+                                } else if (tokenRaw.contains("KWH:") || tokenRaw.contains("kwh:")) {
+                                    token = tokenRaw.split("(?i)KWH:")[0].trim();
                                 } else {
                                     token = tokenRaw.replaceAll("\\|", "").trim();
                                 }
+                                // Format token with dashes every 4 digits
+                                token = formatTokenWithDashes(token);
                             }
                         }
                         
-                        if (message.contains("KWH:")) {
-                            String[] kwhParts = message.split("KWH:");
+                        if (message.contains("KWH:") || message.contains("kwh:")) {
+                            String[] kwhParts = message.split("(?i)KWH:");
                             if (kwhParts.length > 1) {
                                 String kwhRaw = kwhParts[1].trim();
                                 if (kwhRaw.contains(" | ")) {
@@ -940,5 +942,36 @@ public class PdfExportService {
             default:
                 return serviceType.toString();
         }
+    }
+    
+    /**
+     * Format token number by grouping digits into groups of 4 with dashes
+     * Example: "1234567890123456" -> "1234-5678-9012-3456"
+     * @param token The raw token string (may contain non-digit characters)
+     * @return Formatted token with dashes every 4 digits, or original string if formatting fails
+     */
+    private String formatTokenWithDashes(String token) {
+        if (token == null || token.trim().isEmpty()) {
+            return token;
+        }
+        
+        // Remove all non-digit characters to get only digits
+        String digitsOnly = token.replaceAll("[^0-9]", "");
+        
+        if (digitsOnly.isEmpty()) {
+            // If no digits found, return original token
+            return token;
+        }
+        
+        // Group digits into groups of 4 with dashes
+        StringBuilder formatted = new StringBuilder();
+        for (int i = 0; i < digitsOnly.length(); i++) {
+            if (i > 0 && i % 4 == 0) {
+                formatted.append("-");
+            }
+            formatted.append(digitsOnly.charAt(i));
+        }
+        
+        return formatted.toString();
     }
 }

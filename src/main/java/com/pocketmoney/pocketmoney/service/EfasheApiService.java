@@ -13,6 +13,7 @@ import org.springframework.web.client.RestTemplate;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
 
 @Service
 public class EfasheApiService {
@@ -620,5 +621,117 @@ public class EfasheApiService {
         
         // If all endpoints failed, throw error
         throw new RuntimeException("Failed to fetch verticals from EFASHE API. Tried multiple endpoints but none returned valid data.");
+    }
+    
+    /**
+     * Get electricity tokens for a meter number
+     * GET /electricity/tokens?meterNo={meterNumber}&numTokens={numTokens}
+     * Uses token authentication
+     */
+    public ElectricityTokensResponse getElectricityTokens(String meterNumber, Integer numTokens) {
+        // Build URL with meter number and numTokens as query parameters
+        // Default numTokens to 1 if not provided
+        if (numTokens == null || numTokens <= 0) {
+            numTokens = 1;
+        }
+        String url = efasheApiUrl + "/electricity/tokens?meterNo=" + meterNumber + "&numTokens=" + numTokens;
+        
+        logger.info("Fetching electricity tokens for meter number: {}", meterNumber);
+        
+        HttpHeaders headers = buildHeadersWithToken();
+        HttpEntity<String> entity = new HttpEntity<>(headers);
+
+        try {
+            ResponseEntity<String> rawResponse = restTemplate.exchange(
+                    url,
+                    HttpMethod.GET,
+                    entity,
+                    String.class
+            );
+            
+            String responseBodyString = rawResponse.getBody();
+            int httpStatusCode = rawResponse.getStatusCode().value();
+            
+            logger.info("EFASHE electricity tokens raw response - Status: {}, Body: {}", httpStatusCode, responseBodyString);
+            
+            // Parse the response
+            ObjectMapper objectMapper = new ObjectMapper();
+            ElectricityTokensResponse tokensResponse;
+            
+            try {
+                JsonNode jsonNode = objectMapper.readTree(responseBodyString);
+                
+                // Handle wrapped response in "data" field
+                if (jsonNode.has("data")) {
+                    tokensResponse = objectMapper.treeToValue(jsonNode, ElectricityTokensResponse.class);
+                } else {
+                    // If response is directly the data array, wrap it
+                    tokensResponse = new ElectricityTokensResponse();
+                    tokensResponse.setData(objectMapper.convertValue(jsonNode, 
+                        objectMapper.getTypeFactory().constructCollectionType(List.class, ElectricityTokensResponse.ElectricityTokenData.class)));
+                    tokensResponse.setStatus(httpStatusCode);
+                }
+            } catch (Exception e) {
+                logger.error("Error parsing electricity tokens response: ", e);
+                throw new RuntimeException("Failed to parse electricity tokens response: " + e.getMessage());
+            }
+            
+            if (tokensResponse != null && tokensResponse.getData() != null && !tokensResponse.getData().isEmpty()) {
+                ElectricityTokensResponse.ElectricityTokenData firstToken = tokensResponse.getData().get(0);
+                logger.info("Electricity tokens retrieved - First token: {}, Meter: {}, Units: {}", 
+                    firstToken.getToken() != null ? firstToken.getToken() : "N/A",
+                    firstToken.getMeterno() != null ? firstToken.getMeterno() : "N/A",
+                    firstToken.getUnits() != null ? firstToken.getUnits() : "N/A");
+            } else {
+                logger.warn("Electricity tokens response is empty or null for meter: {}", meterNumber);
+            }
+            
+            return tokensResponse;
+        } catch (HttpClientErrorException e) {
+            int statusCode = e.getStatusCode().value();
+            String responseBody = e.getResponseBodyAsString();
+            logger.error("EFASHE electricity tokens HTTP error - Status: {}, Response: {}", statusCode, responseBody);
+            
+            // If 401, clear cached token and retry once
+            if (statusCode == 401) {
+                logger.warn("EFASHE token expired or invalid for electricity tokens, clearing cache and retrying authentication");
+                cachedAccessToken = null;
+                tokenExpiresAt = null;
+                
+                // Retry once with new token
+                try {
+                    HttpHeaders retryHeaders = buildHeadersWithToken();
+                    HttpEntity<String> retryEntity = new HttpEntity<>(retryHeaders);
+                    ResponseEntity<String> retryResponse = restTemplate.exchange(
+                            url,
+                            HttpMethod.GET,
+                            retryEntity,
+                            String.class
+                    );
+                    
+                    ObjectMapper objectMapper = new ObjectMapper();
+                    JsonNode jsonNode = objectMapper.readTree(retryResponse.getBody());
+                    ElectricityTokensResponse tokensResponse;
+                    if (jsonNode.has("data")) {
+                        tokensResponse = objectMapper.treeToValue(jsonNode, ElectricityTokensResponse.class);
+                    } else {
+                        tokensResponse = new ElectricityTokensResponse();
+                        tokensResponse.setData(objectMapper.convertValue(jsonNode, 
+                            objectMapper.getTypeFactory().constructCollectionType(List.class, ElectricityTokensResponse.ElectricityTokenData.class)));
+                        tokensResponse.setStatus(retryResponse.getStatusCode().value());
+                    }
+                    return tokensResponse;
+                } catch (Exception retryException) {
+                    logger.error("EFASHE electricity tokens retry failed: ", retryException);
+                    throw new RuntimeException("EFASHE API authentication failed after retry. Please verify API credentials.");
+                }
+            }
+            
+            throw new RuntimeException("Failed to get electricity tokens (Status: " + statusCode + "): " + 
+                (responseBody != null && !responseBody.isEmpty() ? responseBody : e.getMessage()));
+        } catch (Exception e) {
+            logger.error("Error getting electricity tokens: ", e);
+            throw new RuntimeException("Failed to get electricity tokens: " + e.getMessage());
+        }
     }
 }

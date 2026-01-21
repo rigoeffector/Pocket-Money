@@ -806,31 +806,23 @@ public class PaymentService {
                     throw new RuntimeException(errorMsg);
                 }
             } else {
-                // NON-FLEXIBLE MODE: Check both user balance AND receiver balance
-                logger.info("Receiver is in NON-FLEXIBLE mode - checking both user and receiver balance");
-                // Allow payment if:
-                // 1. User has sufficient balance (merchant + global), OR
-                // 2. Receiver has sufficient remaining balance (even if user balance is 0)
-                if (!userHasBalance && !receiverHasBalance) {
+                // NON-FLEXIBLE MODE: Receiver can process payments even when assignedBalance is 0
+                // They need to sell, and when admin assigns assignedBalance, it's for users to consume
+                // So we only check user balance, not receiver balance
+                logger.info("Receiver is in NON-FLEXIBLE mode - checking user balance only (receiver can sell even with assignedBalance=0)");
+                // Allow payment if user has sufficient balance (merchant + global)
+                // Receiver's assignedBalance is for users to consume, not for blocking sales
+                if (!userHasBalance) {
                     String errorMsg = String.format(
-                        "Insufficient balance. User balance: %s (Merchant: %s, Global: %s), Receiver remaining balance: %s, Required: %s. " +
-                        "Please ensure you have sufficient balance in your account or the receiver has sufficient remaining balance.",
-                        totalAvailableBalance, merchantBalance, globalBalance, receiverRemainingBalance, request.getAmount());
+                        "Insufficient balance. User balance: %s (Merchant: %s, Global: %s), Required: %s. " +
+                        "Please ensure you have sufficient balance in your account.",
+                        totalAvailableBalance, merchantBalance, globalBalance, request.getAmount());
                     logger.error("=== INSUFFICIENT BALANCE ERROR (NON-FLEXIBLE MODE) ===");
                     logger.error(errorMsg);
                     logger.error("User amountRemaining from DB: {}", user.getAmountRemaining());
                     logger.error("Merchant balance from DB: {}", merchantBalance);
+                    logger.info("Note: Receiver can process payments even when assignedBalance is 0 - they need to sell. AssignedBalance is for users to consume.");
                     throw new RuntimeException(errorMsg);
-                }
-                
-                // If user has no balance but receiver has balance, we'll proceed with payment
-                // The payment will deduct from receiver's remaining balance only (user balance stays 0)
-                if (!userHasBalance && receiverHasBalance) {
-                    logger.info("User has no balance, but receiver has sufficient balance. Proceeding with payment using receiver's balance.");
-                    // Set balances to 0 so no deduction happens from user
-                    merchantBalance = BigDecimal.ZERO;
-                    globalBalance = BigDecimal.ZERO;
-                    totalAvailableBalance = BigDecimal.ZERO;
                 }
             }
         }
