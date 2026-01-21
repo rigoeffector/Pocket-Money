@@ -841,35 +841,37 @@ public class EfashePaymentService {
                                 
                                 transaction.setMessage(messageBuilder.toString());
                                 
-                                // Call /electricity/tokens endpoint to get token and save it
+                                // Call /electricity/tokens endpoint to get token and save it (get latest by timestamp)
                                 try {
                                     String meterNumber = transaction.getCustomerAccountNumber();
                                     if (meterNumber != null && !meterNumber.trim().isEmpty()) {
-                                        logger.info("ELECTRICITY service - Calling /electricity/tokens endpoint for meter: {}", meterNumber);
-                                        ElectricityTokensResponse tokensResponse = efasheApiService.getElectricityTokens(meterNumber, 1);
+                                        logger.info("ELECTRICITY service - Calling /electricity/tokens endpoint for meter: {} (requesting 10 tokens to find latest)", meterNumber);
+                                        // Request more tokens (10) to find the latest one by timestamp
+                                        ElectricityTokensResponse tokensResponse = efasheApiService.getElectricityTokens(meterNumber, 10);
                                         
                                         if (tokensResponse != null && tokensResponse.getData() != null && !tokensResponse.getData().isEmpty()) {
-                                            ElectricityTokensResponse.ElectricityTokenData firstTokenData = tokensResponse.getData().get(0);
-                                            String firstToken = firstTokenData.getToken();
+                                            // Find the latest token by timestamp
+                                            ElectricityTokensResponse.ElectricityTokenData latestTokenData = getLatestTokenByTimestamp(tokensResponse.getData());
                                             
-                                            if (firstToken != null && !firstToken.trim().isEmpty()) {
-                                                // Save the first token to the database
-                                                transaction.setToken(firstToken);
-                                                logger.info("ELECTRICITY service - Saved first token from /electricity/tokens (execute): {}", firstToken);
+                                            if (latestTokenData != null && latestTokenData.getToken() != null && !latestTokenData.getToken().trim().isEmpty()) {
+                                                String latestToken = latestTokenData.getToken();
+                                                // Save the latest token to the database
+                                                transaction.setToken(latestToken);
+                                                logger.info("ELECTRICITY service - Saved latest token from /electricity/tokens (execute): {} (timestamp: {})", latestToken, latestTokenData.getTstamp());
                                                 
-                                                // Update message with the token from tokens endpoint if not already present
+                                                // Update message with the latest token from tokens endpoint if not already present
                                                 if (token == null || token.isEmpty() || !messageBuilder.toString().contains("Token:")) {
                                                     if (messageBuilder.length() > 0) {
                                                         messageBuilder.append(" | ");
                                                     }
-                                                    messageBuilder.append("Token: ").append(firstToken);
+                                                    messageBuilder.append("Token: ").append(latestToken);
                                                     transaction.setMessage(messageBuilder.toString());
-                                                    logger.info("ELECTRICITY service - Updated message with token from /electricity/tokens endpoint (execute)");
+                                                    logger.info("ELECTRICITY service - Updated message with latest token from /electricity/tokens endpoint (execute)");
                                                 }
                                                 
-                                                // Also update KWH if available from tokens response
-                                                if (firstTokenData.getUnits() != null) {
-                                                    String unitsStr = String.format("%.1f", firstTokenData.getUnits());
+                                                // Also update KWH if available from latest token response
+                                                if (latestTokenData.getUnits() != null) {
+                                                    String unitsStr = String.format("%.1f", latestTokenData.getUnits());
                                                     if (!messageBuilder.toString().contains("KWH:")) {
                                                         if (messageBuilder.length() > 0) {
                                                             messageBuilder.append(" | ");
@@ -880,7 +882,7 @@ public class EfashePaymentService {
                                                     }
                                                 }
                                             } else {
-                                                logger.warn("ELECTRICITY service - First token from /electricity/tokens (execute) is null or empty");
+                                                logger.warn("ELECTRICITY service - Latest token from /electricity/tokens (execute) is null or empty");
                                             }
                                         } else {
                                             logger.warn("ELECTRICITY service - No token data returned from /electricity/tokens endpoint (execute)");
@@ -1066,6 +1068,29 @@ public class EfashePaymentService {
                 }
             }
             
+            // Check if EFASHE is FAILED but MoPay is SUCCESS - need to refund customer
+            if ("FAILED".equalsIgnoreCase(transaction.getEfasheStatus()) 
+                && (transaction.getMopayStatus() != null && ("200".equals(transaction.getMopayStatus()) || "201".equals(transaction.getMopayStatus()) || "SUCCESS".equalsIgnoreCase(transaction.getMopayStatus())))) {
+                
+                // Check if refund has already been processed (to avoid duplicate refunds)
+                if (transaction.getErrorMessage() == null || !transaction.getErrorMessage().contains("REFUND_PROCESSED")) {
+                    logger.info("=== REFUND PROCESSING START ===");
+                    logger.info("EFASHE FAILED but MoPay SUCCESS - Processing refund for transaction: {}", transaction.getTransactionId());
+                    logger.info("Transaction Amount: {}, Customer Phone: {}", transaction.getAmount(), transaction.getCustomerPhone());
+                    
+                    try {
+                        // Process refund - full amount back to customer
+                        processRefund(transaction);
+                        logger.info("=== REFUND PROCESSING COMPLETED ===");
+                    } catch (Exception refundException) {
+                        logger.error("Error processing refund for transaction {}: ", transaction.getTransactionId(), refundException);
+                        // Don't fail the status check if refund fails - log and continue
+                    }
+                } else {
+                    logger.info("Refund already processed for transaction: {}", transaction.getTransactionId());
+                }
+            }
+            
             // Update existing transaction (never create new row)
             efasheTransactionRepository.save(transaction);
             logger.info("Updated existing transaction row - Transaction ID: {}, MoPay Status: {} (Initial: {}), EFASHE Status: {} (Initial: {}), Cashback Sent: {}", 
@@ -1141,15 +1166,34 @@ public class EfashePaymentService {
         
         response.setTransfers(transfers);
         
-        // For ELECTRICITY transactions, fetch and include electricity tokens response
+        // For ELECTRICITY transactions, fetch and include electricity tokens response (get latest token)
         if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
             try {
                 String meterNumber = transaction.getCustomerAccountNumber();
                 if (meterNumber != null && !meterNumber.trim().isEmpty()) {
-                    logger.info("ELECTRICITY transaction - Fetching tokens for meter: {}", meterNumber);
-                    ElectricityTokensResponse tokensResponse = efasheApiService.getElectricityTokens(meterNumber, 1);
-                    response.setElectricityTokens(tokensResponse);
-                    logger.info("ELECTRICITY transaction - Tokens response added to status response");
+                    logger.info("ELECTRICITY transaction - Fetching tokens for meter: {} (requesting 10 tokens to find latest)", meterNumber);
+                    // Request more tokens (10) to find the latest one by timestamp
+                    ElectricityTokensResponse tokensResponse = efasheApiService.getElectricityTokens(meterNumber, 10);
+                    
+                    if (tokensResponse != null && tokensResponse.getData() != null && !tokensResponse.getData().isEmpty()) {
+                        // Find the latest token by timestamp
+                        ElectricityTokensResponse.ElectricityTokenData latestTokenData = getLatestTokenByTimestamp(tokensResponse.getData());
+                        if (latestTokenData != null) {
+                            // Create a new response with only the latest token
+                            ElectricityTokensResponse latestTokenResponse = new ElectricityTokensResponse();
+                            latestTokenResponse.setStatus(tokensResponse.getStatus());
+                            latestTokenResponse.setData(java.util.List.of(latestTokenData));
+                            response.setElectricityTokens(latestTokenResponse);
+                            logger.info("ELECTRICITY transaction - Latest token added to status response (timestamp: {})", latestTokenData.getTstamp());
+                        } else {
+                            // Fallback to original response if we can't determine latest
+                            response.setElectricityTokens(tokensResponse);
+                            logger.warn("ELECTRICITY transaction - Could not determine latest token, using all tokens");
+                        }
+                    } else {
+                        response.setElectricityTokens(tokensResponse);
+                        logger.warn("ELECTRICITY transaction - No token data returned");
+                    }
                 } else {
                     logger.warn("ELECTRICITY transaction - Cannot fetch tokens: meter number is null or empty");
                 }
@@ -1289,6 +1333,101 @@ public class EfashePaymentService {
             e.printStackTrace();
             logger.error("=== END ERROR ===");
             // Don't fail the whole transaction if cashback transfer fails
+        }
+    }
+    
+    /**
+     * Process refund when EFASHE transaction FAILED but MoPay is SUCCESS
+     * Refunds the full amount to customer without deducting anything
+     */
+    private void processRefund(EfasheTransaction transaction) {
+        logger.info("=== processRefund START ===");
+        logger.info("Transaction ID: {}, Amount: {}, Customer Phone: {}", 
+            transaction.getTransactionId(), transaction.getAmount(), transaction.getCustomerPhone());
+        
+        if (transaction.getAmount() == null || transaction.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
+            logger.warn("Cannot process refund - transaction amount is null or zero: {}", transaction.getAmount());
+            return;
+        }
+        
+        if (transaction.getCustomerPhone() == null || transaction.getCustomerPhone().trim().isEmpty()) {
+            logger.warn("Cannot process refund - customer phone is null or empty");
+            return;
+        }
+        
+        if (transaction.getFullAmountPhone() == null || transaction.getFullAmountPhone().trim().isEmpty()) {
+            logger.warn("Cannot process refund - full amount phone is null or empty");
+            return;
+        }
+        
+        try {
+            // Normalize phone numbers
+            String normalizedCustomerPhone = normalizePhoneTo12Digits(transaction.getCustomerPhone());
+            String normalizedFullAmountPhone = normalizePhoneTo12Digits(transaction.getFullAmountPhone());
+            
+            // Full refund amount - no deductions
+            BigDecimal refundAmount = transaction.getAmount();
+            
+            logger.info("Processing refund - Amount: {}, From: {}, To: {}", 
+                refundAmount, normalizedFullAmountPhone, normalizedCustomerPhone);
+            
+            // Create refund transfer using sendCashbackTransfer method
+            String refundTransactionId = transaction.getTransactionId() + "-REFUND";
+            sendCashbackTransfer(
+                normalizedFullAmountPhone,
+                normalizedCustomerPhone,
+                refundAmount,
+                "EFASHE " + transaction.getServiceType() + " - Refund (Transaction Failed)",
+                "REFUND",
+                refundTransactionId
+            );
+            
+            // Mark refund as processed in error message
+            String existingErrorMessage = transaction.getErrorMessage() != null ? transaction.getErrorMessage() : "";
+            transaction.setErrorMessage(existingErrorMessage + " | REFUND_PROCESSED");
+            
+            // Send SMS and WhatsApp notifications about refund
+            try {
+                String serviceName = transaction.getServiceType() != null ? transaction.getServiceType().toString() : "payment";
+                String amountStr = refundAmount.toPlainString();
+                
+                // SMS message
+                String smsMessage = String.format(
+                    "Bepay-Efashe-%s Refund: Your payment of %s RWF for %s has been refunded. Transaction ID: %s. The service failed but your payment was successful. Thanks for using Bepay POCHI App",
+                    serviceName.toUpperCase(),
+                    amountStr,
+                    serviceName,
+                    transaction.getTransactionId()
+                );
+                
+                // WhatsApp message
+                String whatsAppMessage = String.format(
+                    "Bepay-Efashe-%s Refund: Your payment of %s RWF for %s has been refunded. Transaction ID: %s. The service failed but your payment was successful. Thanks for using Bepay POCHI App",
+                    serviceName.toUpperCase(),
+                    amountStr,
+                    serviceName,
+                    transaction.getTransactionId()
+                );
+                
+                messagingService.sendSms(smsMessage, normalizedCustomerPhone);
+                whatsAppService.sendWhatsApp(whatsAppMessage, normalizedCustomerPhone);
+                
+                logger.info("✅ Refund notifications sent - SMS and WhatsApp sent to customer: {}", normalizedCustomerPhone);
+            } catch (Exception notificationException) {
+                logger.error("Error sending refund notifications: ", notificationException);
+                // Don't fail refund if notifications fail
+            }
+            
+            logger.info("✅ Refund processed successfully - Amount: {}, To: {}", refundAmount, normalizedCustomerPhone);
+            logger.info("=== processRefund END ===");
+        } catch (Exception e) {
+            logger.error("=== ERROR in processRefund ===");
+            logger.error("Transaction ID: {}, Amount: {}, Customer Phone: {}", 
+                transaction.getTransactionId(), transaction.getAmount(), transaction.getCustomerPhone());
+            logger.error("Error processing refund: ", e);
+            e.printStackTrace();
+            logger.error("=== END ERROR ===");
+            throw e;
         }
     }
     
@@ -1556,35 +1695,37 @@ public class EfashePaymentService {
                             
                             transaction.setMessage(messageBuilder.toString());
                             
-                            // Call /electricity/tokens endpoint to get token and save it
+                            // Call /electricity/tokens endpoint to get token and save it (get latest by timestamp)
                             try {
                                 String meterNumber = transaction.getCustomerAccountNumber();
                                 if (meterNumber != null && !meterNumber.trim().isEmpty()) {
-                                    logger.info("ELECTRICITY service - Calling /electricity/tokens endpoint for meter: {}", meterNumber);
-                                    ElectricityTokensResponse tokensResponse = efasheApiService.getElectricityTokens(meterNumber, 1);
+                                    logger.info("ELECTRICITY service - Calling /electricity/tokens endpoint for meter: {} (requesting 10 tokens to find latest)", meterNumber);
+                                    // Request more tokens (10) to find the latest one by timestamp
+                                    ElectricityTokensResponse tokensResponse = efasheApiService.getElectricityTokens(meterNumber, 10);
                                     
                                     if (tokensResponse != null && tokensResponse.getData() != null && !tokensResponse.getData().isEmpty()) {
-                                        ElectricityTokensResponse.ElectricityTokenData firstTokenData = tokensResponse.getData().get(0);
-                                        String firstToken = firstTokenData.getToken();
+                                        // Find the latest token by timestamp
+                                        ElectricityTokensResponse.ElectricityTokenData latestTokenData = getLatestTokenByTimestamp(tokensResponse.getData());
                                         
-                                        if (firstToken != null && !firstToken.trim().isEmpty()) {
-                                            // Save the first token to the database
-                                            transaction.setToken(firstToken);
-                                            logger.info("ELECTRICITY service - Saved first token from /electricity/tokens: {}", firstToken);
+                                        if (latestTokenData != null && latestTokenData.getToken() != null && !latestTokenData.getToken().trim().isEmpty()) {
+                                            String latestToken = latestTokenData.getToken();
+                                            // Save the latest token to the database
+                                            transaction.setToken(latestToken);
+                                            logger.info("ELECTRICITY service - Saved latest token from /electricity/tokens: {} (timestamp: {})", latestToken, latestTokenData.getTstamp());
                                             
-                                            // Update message with the token from tokens endpoint if not already present
+                                            // Update message with the latest token from tokens endpoint if not already present
                                             if (token == null || token.isEmpty() || !messageBuilder.toString().contains("Token:")) {
                                                 if (messageBuilder.length() > 0) {
                                                     messageBuilder.append(" | ");
                                                 }
-                                                messageBuilder.append("Token: ").append(firstToken);
+                                                messageBuilder.append("Token: ").append(latestToken);
                                                 transaction.setMessage(messageBuilder.toString());
-                                                logger.info("ELECTRICITY service - Updated message with token from /electricity/tokens endpoint");
+                                                logger.info("ELECTRICITY service - Updated message with latest token from /electricity/tokens endpoint");
                                             }
                                             
-                                            // Also update KWH if available from tokens response
-                                            if (firstTokenData.getUnits() != null) {
-                                                String unitsStr = String.format("%.1f", firstTokenData.getUnits());
+                                            // Also update KWH if available from latest token response
+                                            if (latestTokenData.getUnits() != null) {
+                                                String unitsStr = String.format("%.1f", latestTokenData.getUnits());
                                                 if (!messageBuilder.toString().contains("KWH:")) {
                                                     if (messageBuilder.length() > 0) {
                                                         messageBuilder.append(" | ");
@@ -1595,7 +1736,7 @@ public class EfashePaymentService {
                                                 }
                                             }
                                         } else {
-                                            logger.warn("ELECTRICITY service - First token from /electricity/tokens is null or empty");
+                                            logger.warn("ELECTRICITY service - Latest token from /electricity/tokens is null or empty");
                                         }
                                     } else {
                                         logger.warn("ELECTRICITY service - No token data returned from /electricity/tokens endpoint");
@@ -2323,6 +2464,90 @@ public class EfashePaymentService {
     public ElectricityTokensResponse getElectricityTokens(String meterNumber, Integer numTokens) {
         logger.info("Getting electricity tokens for meter: {}, numTokens: {}", meterNumber, numTokens);
         return efasheApiService.getElectricityTokens(meterNumber, numTokens);
+    }
+    
+    /**
+     * Get the latest token from a list of tokens by comparing timestamps
+     * @param tokens List of token data
+     * @return The token with the latest timestamp, or first token if timestamps can't be compared
+     */
+    private ElectricityTokensResponse.ElectricityTokenData getLatestTokenByTimestamp(
+            List<ElectricityTokensResponse.ElectricityTokenData> tokens) {
+        if (tokens == null || tokens.isEmpty()) {
+            return null;
+        }
+        
+        if (tokens.size() == 1) {
+            return tokens.get(0);
+        }
+        
+        // Find token with latest timestamp
+        ElectricityTokensResponse.ElectricityTokenData latest = tokens.get(0);
+        String latestTimestamp = latest.getTstamp();
+        
+        for (ElectricityTokensResponse.ElectricityTokenData token : tokens) {
+            String tokenTimestamp = token.getTstamp();
+            if (tokenTimestamp != null && !tokenTimestamp.trim().isEmpty()) {
+                if (latestTimestamp == null || latestTimestamp.trim().isEmpty()) {
+                    latest = token;
+                    latestTimestamp = tokenTimestamp;
+                } else {
+                    // Compare timestamps (ISO 8601 format: "2026-01-18T10:30:00" or similar)
+                    try {
+                        // Try to parse and compare timestamps
+                        java.time.LocalDateTime latestTime = parseTimestamp(latestTimestamp);
+                        java.time.LocalDateTime tokenTime = parseTimestamp(tokenTimestamp);
+                        
+                        if (tokenTime != null && latestTime != null && tokenTime.isAfter(latestTime)) {
+                            latest = token;
+                            latestTimestamp = tokenTimestamp;
+                            logger.debug("Found newer token - Timestamp: {}, Previous: {}", tokenTimestamp, latestTimestamp);
+                        }
+                    } catch (Exception e) {
+                        logger.warn("Could not parse timestamp for comparison: {} vs {}, error: {}", 
+                            tokenTimestamp, latestTimestamp, e.getMessage());
+                        // If parsing fails, compare as strings (lexicographic comparison works for ISO 8601)
+                        if (tokenTimestamp.compareTo(latestTimestamp) > 0) {
+                            latest = token;
+                            latestTimestamp = tokenTimestamp;
+                        }
+                    }
+                }
+            }
+        }
+        
+        logger.info("Selected latest token - Timestamp: {}, Token: {}", latestTimestamp, latest.getToken());
+        return latest;
+    }
+    
+    /**
+     * Parse timestamp string to LocalDateTime
+     * Supports various ISO 8601 formats
+     */
+    private java.time.LocalDateTime parseTimestamp(String timestampStr) {
+        if (timestampStr == null || timestampStr.trim().isEmpty()) {
+            return null;
+        }
+        
+        String trimmed = timestampStr.trim();
+        // Try different date formats
+        java.time.format.DateTimeFormatter[] formatters = {
+            java.time.format.DateTimeFormatter.ISO_LOCAL_DATE_TIME,
+            java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"),
+            java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS"),
+            java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSSSS"),
+            java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+        };
+        
+        for (java.time.format.DateTimeFormatter formatter : formatters) {
+            try {
+                return java.time.LocalDateTime.parse(trimmed, formatter);
+            } catch (Exception e) {
+                // Try next format
+            }
+        }
+        
+        return null;
     }
     
     /**
