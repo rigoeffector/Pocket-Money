@@ -22,7 +22,8 @@ public class MessagingService {
     @Value("${sms.api.key:SWQWEkheqFdx31PXeKXbVT9MlTU8jzs7Sgtf3ovpkzxb5dimWLTCx9FLLjnZc4YS}")
     private String smsApiKey;
 
-    @Value("${sms.sender.id:swiftqom}")
+    // @Value("${sms.sender.id:swiftqom}")
+    @Value("${sms.sender.id:BEPAY}")
     private String smsSenderId;
 
     // Bepay SMS Configuration (formerly BeSoft)
