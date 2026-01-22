@@ -51,6 +51,13 @@ public class EfasheApiService {
         }
         
         String authUrl = efasheApiUrl + "/auth";
+        
+        logger.info("═══════════════════════════════════════════════════════════════");
+        logger.info("🔵 EFASHE API REQUEST: /auth");
+        logger.info("═══════════════════════════════════════════════════════════════");
+        logger.info("📤 REQUEST URL: {}", authUrl);
+        logger.info("📤 REQUEST METHOD: POST");
+        logger.info("📤 REQUEST HEADERS:");
         logger.info("Authenticating with EFASHE API to get access token");
         
         EfasheAuthRequest authRequest = new EfasheAuthRequest();
@@ -59,6 +66,26 @@ public class EfasheApiService {
         
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
+        
+        // Log headers
+        headers.forEach((key, values) -> 
+            logger.info("   {}: {}", key, values)
+        );
+        
+        // Log request body (masking secrets)
+        try {
+            ObjectMapper requestMapper = new ObjectMapper();
+            String requestBodyJson = requestMapper.writerWithDefaultPrettyPrinter().writeValueAsString(authRequest);
+            // Mask API secret in logs
+            String maskedBody = requestBodyJson.replace(efasheApiSecret, "***MASKED***");
+            logger.info("📤 REQUEST BODY:");
+            logger.info("{}", maskedBody);
+        } catch (Exception e) {
+            logger.info("📤 REQUEST BODY: [Error serializing request: {}]", e.getMessage());
+            logger.info("   ApiKey: {}***, ApiSecret: ***MASKED***", 
+                efasheApiKey != null && efasheApiKey.length() > 10 ? efasheApiKey.substring(0, 10) : "***");
+        }
+        
         HttpEntity<EfasheAuthRequest> entity = new HttpEntity<>(authRequest, headers);
         
         try {
@@ -72,7 +99,21 @@ public class EfasheApiService {
             String responseBodyString = rawResponse.getBody();
             int httpStatusCode = rawResponse.getStatusCode().value();
             
-            logger.info("EFASHE auth response - Status: {}", httpStatusCode);
+            logger.info("═══════════════════════════════════════════════════════════════");
+            logger.info("🟢 EFASHE API RESPONSE: /auth");
+            logger.info("═══════════════════════════════════════════════════════════════");
+            logger.info("📥 RESPONSE STATUS CODE: {}", httpStatusCode);
+            logger.info("📥 RESPONSE HEADERS:");
+            rawResponse.getHeaders().forEach((key, values) -> 
+                logger.info("   {}: {}", key, values)
+            );
+            logger.info("📥 RESPONSE BODY (RAW):");
+            // Mask access token in response logs
+            String maskedResponse = responseBodyString != null 
+                ? responseBodyString.replaceAll("\"accessToken\"\\s*:\\s*\"([^\"]+)\"", "\"accessToken\":\"***MASKED***\"")
+                : "[NULL]";
+            logger.info("{}", maskedResponse);
+            logger.info("═══════════════════════════════════════════════════════════════");
             
             ObjectMapper objectMapper = new ObjectMapper();
             EfasheAuthResponse authResponse = objectMapper.readValue(responseBodyString, EfasheAuthResponse.class);
@@ -142,10 +183,39 @@ public class EfasheApiService {
     public EfasheValidateResponse validateAccount(EfasheValidateRequest request) {
         String url = efasheApiUrl + "/vend/validate";
         
+        logger.info("═══════════════════════════════════════════════════════════════");
+        logger.info("🔵 EFASHE API REQUEST: /vend/validate");
+        logger.info("═══════════════════════════════════════════════════════════════");
+        logger.info("📤 REQUEST URL: {}", url);
+        logger.info("📤 REQUEST METHOD: POST");
+        logger.info("📤 REQUEST HEADERS:");
+        HttpHeaders headers = buildHeadersWithToken();
+        headers.forEach((key, values) -> {
+            if ("Authorization".equalsIgnoreCase(key)) {
+                // Mask token for security
+                String maskedToken = values.get(0) != null && values.get(0).length() > 20 
+                    ? values.get(0).substring(0, 20) + "..." 
+                    : "***";
+                logger.info("   {}: {}", key, maskedToken);
+            } else {
+                logger.info("   {}: {}", key, values);
+            }
+        });
+        
+        // Log full request body
+        try {
+            ObjectMapper requestMapper = new ObjectMapper();
+            String requestBodyJson = requestMapper.writerWithDefaultPrettyPrinter().writeValueAsString(request);
+            logger.info("📤 REQUEST BODY:");
+            logger.info("{}", requestBodyJson);
+        } catch (Exception e) {
+            logger.info("📤 REQUEST BODY: [Error serializing request: {}]", e.getMessage());
+            logger.info("   Vertical: {}, CustomerAccountNumber: {}", request.getVerticalId(), request.getCustomerAccountNumber());
+        }
+        
         logger.info("Validating EFASHE account - Vertical: {}, Customer Account: {}", 
             request.getVerticalId(), request.getCustomerAccountNumber());
         
-        HttpHeaders headers = buildHeadersWithToken();
         HttpEntity<EfasheValidateRequest> entity = new HttpEntity<>(request, headers);
 
         try {
@@ -160,7 +230,17 @@ public class EfasheApiService {
             String responseBodyString = rawResponse.getBody();
             int httpStatusCode = rawResponse.getStatusCode().value();
             
-            logger.info("EFASHE validate raw response - Status: {}, Body: {}", httpStatusCode, responseBodyString);
+            logger.info("═══════════════════════════════════════════════════════════════");
+            logger.info("🟢 EFASHE API RESPONSE: /vend/validate");
+            logger.info("═══════════════════════════════════════════════════════════════");
+            logger.info("📥 RESPONSE STATUS CODE: {}", httpStatusCode);
+            logger.info("📥 RESPONSE HEADERS:");
+            rawResponse.getHeaders().forEach((key, values) -> 
+                logger.info("   {}: {}", key, values)
+            );
+            logger.info("📥 RESPONSE BODY (RAW):");
+            logger.info("{}", responseBodyString != null ? responseBodyString : "[NULL]");
+            logger.info("═══════════════════════════════════════════════════════════════");
             
             // Parse the response - might be wrapped in "data" object
             ObjectMapper objectMapper = new ObjectMapper();
@@ -193,6 +273,17 @@ public class EfasheApiService {
         } catch (HttpClientErrorException e) {
             int statusCode = e.getStatusCode().value();
             String responseBody = e.getResponseBodyAsString();
+            logger.error("═══════════════════════════════════════════════════════════════");
+            logger.error("🔴 EFASHE API ERROR RESPONSE: /vend/validate");
+            logger.error("═══════════════════════════════════════════════════════════════");
+            logger.error("📥 ERROR STATUS CODE: {}", statusCode);
+            logger.error("📥 ERROR RESPONSE HEADERS:");
+            e.getResponseHeaders().forEach((key, values) -> 
+                logger.error("   {}: {}", key, values)
+            );
+            logger.error("📥 ERROR RESPONSE BODY:");
+            logger.error("{}", responseBody != null ? responseBody : "[NULL]");
+            logger.error("═══════════════════════════════════════════════════════════════");
             logger.error("EFASHE validate HTTP error - Status: {}, Response: {}", statusCode, responseBody);
             
             // If 401, clear cached token and retry once
@@ -256,10 +347,40 @@ public class EfasheApiService {
     public EfasheExecuteResponse executeTransaction(EfasheExecuteRequest request) {
         String url = efasheApiUrl + "/vend/execute";
         
+        logger.info("═══════════════════════════════════════════════════════════════");
+        logger.info("🔵 EFASHE API REQUEST: /vend/execute");
+        logger.info("═══════════════════════════════════════════════════════════════");
+        logger.info("📤 REQUEST URL: {}", url);
+        logger.info("📤 REQUEST METHOD: POST");
+        logger.info("📤 REQUEST HEADERS:");
+        HttpHeaders headers = buildHeadersWithToken();
+        headers.forEach((key, values) -> {
+            if ("Authorization".equalsIgnoreCase(key)) {
+                // Mask token for security
+                String maskedToken = values.get(0) != null && values.get(0).length() > 20 
+                    ? values.get(0).substring(0, 20) + "..." 
+                    : "***";
+                logger.info("   {}: {}", key, maskedToken);
+            } else {
+                logger.info("   {}: {}", key, values);
+            }
+        });
+        
+        // Log full request body
+        try {
+            ObjectMapper requestMapper = new ObjectMapper();
+            String requestBodyJson = requestMapper.writerWithDefaultPrettyPrinter().writeValueAsString(request);
+            logger.info("📤 REQUEST BODY:");
+            logger.info("{}", requestBodyJson);
+        } catch (Exception e) {
+            logger.info("📤 REQUEST BODY: [Error serializing request: {}]", e.getMessage());
+            logger.info("   TrxId: {}, Vertical: {}, Amount: {}, CustomerAccountNumber: {}", 
+                request.getTrxId(), request.getVerticalId(), request.getAmount(), request.getCustomerAccountNumber());
+        }
+        
         logger.info("Executing EFASHE transaction - TrxId: {}, Vertical: {}, Amount: {}, Customer: {}", 
             request.getTrxId(), request.getVerticalId(), request.getAmount(), request.getCustomerAccountNumber());
         
-        HttpHeaders headers = buildHeadersWithToken();
         HttpEntity<EfasheExecuteRequest> entity = new HttpEntity<>(request, headers);
 
         try {
@@ -274,7 +395,17 @@ public class EfasheApiService {
             String responseBodyString = rawResponse.getBody();
             int httpStatusCode = rawResponse.getStatusCode().value();
             
-            logger.info("EFASHE execute raw response - Status: {}, Body: {}", httpStatusCode, responseBodyString);
+            logger.info("═══════════════════════════════════════════════════════════════");
+            logger.info("🟢 EFASHE API RESPONSE: /vend/execute");
+            logger.info("═══════════════════════════════════════════════════════════════");
+            logger.info("📥 RESPONSE STATUS CODE: {}", httpStatusCode);
+            logger.info("📥 RESPONSE HEADERS:");
+            rawResponse.getHeaders().forEach((key, values) -> 
+                logger.info("   {}: {}", key, values)
+            );
+            logger.info("📥 RESPONSE BODY (RAW):");
+            logger.info("{}", responseBodyString != null ? responseBodyString : "[NULL]");
+            logger.info("═══════════════════════════════════════════════════════════════");
             
             // Parse the response - wrapped in "data" object
             ObjectMapper objectMapper = new ObjectMapper();
@@ -342,6 +473,19 @@ public class EfasheApiService {
         } catch (HttpClientErrorException e) {
             int statusCode = e.getStatusCode().value();
             String responseBody = e.getResponseBodyAsString();
+            logger.error("═══════════════════════════════════════════════════════════════");
+            logger.error("🔴 EFASHE API ERROR RESPONSE: /vend/execute");
+            logger.error("═══════════════════════════════════════════════════════════════");
+            logger.error("📥 ERROR STATUS CODE: {}", statusCode);
+            logger.error("📥 ERROR RESPONSE HEADERS:");
+            if (e.getResponseHeaders() != null) {
+                e.getResponseHeaders().forEach((key, values) -> 
+                    logger.error("   {}: {}", key, values)
+                );
+            }
+            logger.error("📥 ERROR RESPONSE BODY:");
+            logger.error("{}", responseBody != null ? responseBody : "[NULL]");
+            logger.error("═══════════════════════════════════════════════════════════════");
             logger.error("EFASHE execute HTTP error - Status: {}, Response: {}", statusCode, responseBody);
             
             // If 401, clear cached token and retry once
@@ -442,11 +586,28 @@ public class EfasheApiService {
             url = efasheApiUrl + "/" + cleanPollEndpoint;
         }
         
-        logger.info("Polling EFASHE transaction status - Endpoint: {}", url);
-        
+        logger.info("═══════════════════════════════════════════════════════════════");
+        logger.info("🔵 EFASHE API REQUEST: Poll Transaction Status");
+        logger.info("═══════════════════════════════════════════════════════════════");
+        logger.info("📤 REQUEST URL: {}", url);
+        logger.info("📤 REQUEST METHOD: GET");
+        logger.info("📤 REQUEST HEADERS:");
         // Poll status endpoint requires token authentication (same as validate and execute)
         // Use headers with Bearer token for authentication
         HttpHeaders headers = buildHeadersWithToken();
+        headers.forEach((key, values) -> {
+            if ("Authorization".equalsIgnoreCase(key)) {
+                // Mask token for security
+                String maskedToken = values.get(0) != null && values.get(0).length() > 20 
+                    ? values.get(0).substring(0, 20) + "..." 
+                    : "***";
+                logger.info("   {}: {}", key, maskedToken);
+            } else {
+                logger.info("   {}: {}", key, values);
+            }
+        });
+        logger.info("📤 REQUEST BODY: [GET request - no body]");
+        logger.info("Polling EFASHE transaction status - Endpoint: {}", url);
         logger.info("EFASHE poll status - Using Bearer token authentication");
         HttpEntity<String> entity = new HttpEntity<>(headers);
 
@@ -462,7 +623,17 @@ public class EfasheApiService {
             String responseBodyString = rawResponse.getBody();
             int httpStatusCode = rawResponse.getStatusCode().value();
             
-            logger.info("EFASHE poll status raw response - Status: {}, Body: {}", httpStatusCode, responseBodyString);
+            logger.info("═══════════════════════════════════════════════════════════════");
+            logger.info("🟢 EFASHE API RESPONSE: Poll Transaction Status");
+            logger.info("═══════════════════════════════════════════════════════════════");
+            logger.info("📥 RESPONSE STATUS CODE: {}", httpStatusCode);
+            logger.info("📥 RESPONSE HEADERS:");
+            rawResponse.getHeaders().forEach((key, values) -> 
+                logger.info("   {}: {}", key, values)
+            );
+            logger.info("📥 RESPONSE BODY (RAW):");
+            logger.info("{}", responseBodyString != null ? responseBodyString : "[NULL]");
+            logger.info("═══════════════════════════════════════════════════════════════");
             
             // Parse the response - might be wrapped in "data" object
             ObjectMapper objectMapper = new ObjectMapper();
@@ -535,6 +706,19 @@ public class EfasheApiService {
         } catch (HttpClientErrorException e) {
             int statusCode = e.getStatusCode().value();
             String responseBody = e.getResponseBodyAsString();
+            logger.error("═══════════════════════════════════════════════════════════════");
+            logger.error("🔴 EFASHE API ERROR RESPONSE: Poll Transaction Status");
+            logger.error("═══════════════════════════════════════════════════════════════");
+            logger.error("📥 ERROR STATUS CODE: {}", statusCode);
+            logger.error("📥 ERROR RESPONSE HEADERS:");
+            if (e.getResponseHeaders() != null) {
+                e.getResponseHeaders().forEach((key, values) -> 
+                    logger.error("   {}: {}", key, values)
+                );
+            }
+            logger.error("📥 ERROR RESPONSE BODY:");
+            logger.error("{}", responseBody != null ? responseBody : "[NULL]");
+            logger.error("═══════════════════════════════════════════════════════════════");
             logger.error("EFASHE poll status HTTP error - Status: {}, Response: {}", statusCode, responseBody);
             
             // If 401, clear cached token and retry once
@@ -714,9 +898,29 @@ public class EfasheApiService {
         }
         String url = efasheApiUrl + "/electricity/tokens?meterNo=" + meterNumber + "&numTokens=" + numTokens;
         
-        logger.info("Fetching electricity tokens for meter number: {}", meterNumber);
-        
+        logger.info("═══════════════════════════════════════════════════════════════");
+        logger.info("🔵 EFASHE API REQUEST: /electricity/tokens");
+        logger.info("═══════════════════════════════════════════════════════════════");
+        logger.info("📤 REQUEST URL: {}", url);
+        logger.info("📤 REQUEST METHOD: GET");
+        logger.info("📤 REQUEST QUERY PARAMETERS:");
+        logger.info("   meterNo: {}", meterNumber);
+        logger.info("   numTokens: {}", numTokens);
+        logger.info("📤 REQUEST HEADERS:");
         HttpHeaders headers = buildHeadersWithToken();
+        headers.forEach((key, values) -> {
+            if ("Authorization".equalsIgnoreCase(key)) {
+                // Mask token for security
+                String maskedToken = values.get(0) != null && values.get(0).length() > 20 
+                    ? values.get(0).substring(0, 20) + "..." 
+                    : "***";
+                logger.info("   {}: {}", key, maskedToken);
+            } else {
+                logger.info("   {}: {}", key, values);
+            }
+        });
+        logger.info("📤 REQUEST BODY: [GET request - no body]");
+        logger.info("Fetching electricity tokens for meter number: {}", meterNumber);
         HttpEntity<String> entity = new HttpEntity<>(headers);
 
         try {
@@ -730,7 +934,17 @@ public class EfasheApiService {
             String responseBodyString = rawResponse.getBody();
             int httpStatusCode = rawResponse.getStatusCode().value();
             
-            logger.info("EFASHE electricity tokens raw response - Status: {}, Body: {}", httpStatusCode, responseBodyString);
+            logger.info("═══════════════════════════════════════════════════════════════");
+            logger.info("🟢 EFASHE API RESPONSE: /electricity/tokens");
+            logger.info("═══════════════════════════════════════════════════════════════");
+            logger.info("📥 RESPONSE STATUS CODE: {}", httpStatusCode);
+            logger.info("📥 RESPONSE HEADERS:");
+            rawResponse.getHeaders().forEach((key, values) -> 
+                logger.info("   {}: {}", key, values)
+            );
+            logger.info("📥 RESPONSE BODY (RAW):");
+            logger.info("{}", responseBodyString != null ? responseBodyString : "[NULL]");
+            logger.info("═══════════════════════════════════════════════════════════════");
             
             // Parse the response
             ObjectMapper objectMapper = new ObjectMapper();
@@ -768,6 +982,19 @@ public class EfasheApiService {
         } catch (HttpClientErrorException e) {
             int statusCode = e.getStatusCode().value();
             String responseBody = e.getResponseBodyAsString();
+            logger.error("═══════════════════════════════════════════════════════════════");
+            logger.error("🔴 EFASHE API ERROR RESPONSE: /electricity/tokens");
+            logger.error("═══════════════════════════════════════════════════════════════");
+            logger.error("📥 ERROR STATUS CODE: {}", statusCode);
+            logger.error("📥 ERROR RESPONSE HEADERS:");
+            if (e.getResponseHeaders() != null) {
+                e.getResponseHeaders().forEach((key, values) -> 
+                    logger.error("   {}: {}", key, values)
+                );
+            }
+            logger.error("📥 ERROR RESPONSE BODY:");
+            logger.error("{}", responseBody != null ? responseBody : "[NULL]");
+            logger.error("═══════════════════════════════════════════════════════════════");
             logger.error("EFASHE electricity tokens HTTP error - Status: {}, Response: {}", statusCode, responseBody);
             
             // If 401, clear cached token and retry once

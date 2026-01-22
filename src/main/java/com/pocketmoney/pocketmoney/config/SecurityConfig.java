@@ -74,6 +74,7 @@ public class SecurityConfig {
                         .requestMatchers("/api/auth/switch-back").hasRole("RECEIVER")
                         .requestMatchers("/api/auth/**").permitAll()
                         .requestMatchers("/api/public/**").permitAll()
+                        .requestMatchers("/api/v1/payments/callback").permitAll() // BizaoPayment webhook callback
                         .requestMatchers("/api/payments/top-up").hasAnyRole("USER", "ADMIN")
                         .requestMatchers("/api/payments/top-up-by-phone").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .requestMatchers("/api/payments/merchant/top-up").hasAnyRole("RECEIVER", "ADMIN")

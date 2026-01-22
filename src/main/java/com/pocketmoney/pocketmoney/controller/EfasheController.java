@@ -328,6 +328,45 @@ public class EfasheController {
     }
 
     /**
+     * Process a validated transaction by calling BizaoPayment
+     * POST /api/efashe/bizao/process/{transactionId}
+     * Updates validated flag to "PROCESS" and initiates BizaoPayment payment
+     */
+    @PostMapping("/bizao/process/{transactionId}")
+    public ResponseEntity<ApiResponse<EfasheInitiateResponse>> processPaymentWithBizao(
+            @PathVariable("transactionId") String transactionId) {
+        try {
+            EfasheInitiateResponse response = efashePaymentService.processPaymentWithBizao(transactionId);
+            return ResponseEntity.ok(ApiResponse.success("EFASHE payment processed successfully with BizaoPayment", response));
+        } catch (RuntimeException e) {
+            logger.error("Error processing EFASHE payment with BizaoPayment: ", e);
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    /**
+     * Check EFASHE transaction status using BizaoPayment transaction ID
+     * GET/POST /api/efashe/bizao/status/{transactionId}
+     * Automatically triggers EFASHE validate and execute when BizaoPayment status is SUCCESS
+     * Supports both GET and POST methods for flexibility
+     */
+    @GetMapping("/bizao/status/{transactionId}")
+    @PostMapping("/bizao/status/{transactionId}")
+    public ResponseEntity<ApiResponse<EfasheStatusResponse>> checkTransactionStatusWithBizao(
+            @PathVariable("transactionId") String transactionId) {
+        try {
+            EfasheStatusResponse response = efashePaymentService.checkTransactionStatusWithBizao(transactionId);
+            return ResponseEntity.ok(ApiResponse.success("Transaction status retrieved successfully", response));
+        } catch (RuntimeException e) {
+            logger.error("Error checking EFASHE transaction status with BizaoPayment: ", e);
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+
+    /**
      * Get refund history with optional filtering
      * GET /api/efashe/refund-history
      * 
