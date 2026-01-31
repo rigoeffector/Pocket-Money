@@ -4,11 +4,14 @@ import com.pocketmoney.pocketmoney.dto.ApiResponse;
 import com.pocketmoney.pocketmoney.dto.CreateReceiverRequest;
 import com.pocketmoney.pocketmoney.dto.CreateUserRequest;
 import com.pocketmoney.pocketmoney.dto.ReceiverLoginRequest;
+import com.pocketmoney.pocketmoney.dto.PaymentResponse;
+import com.pocketmoney.pocketmoney.dto.PublicMomoPaymentRequest;
 import com.pocketmoney.pocketmoney.dto.ReceiverLoginResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverResponse;
 import com.pocketmoney.pocketmoney.dto.UserLoginRequest;
 import com.pocketmoney.pocketmoney.dto.UserLoginResponse;
 import com.pocketmoney.pocketmoney.dto.UserResponse;
+import com.pocketmoney.pocketmoney.service.PaymentService;
 import com.pocketmoney.pocketmoney.service.ReceiverService;
 import com.pocketmoney.pocketmoney.service.UserService;
 import jakarta.validation.Valid;
@@ -22,10 +25,12 @@ public class PublicController {
 
     private final UserService userService;
     private final ReceiverService receiverService;
+    private final PaymentService paymentService;
 
-    public PublicController(UserService userService, ReceiverService receiverService) {
+    public PublicController(UserService userService, ReceiverService receiverService, PaymentService paymentService) {
         this.userService = userService;
         this.receiverService = receiverService;
+        this.paymentService = paymentService;
     }
 
     @PostMapping("/users/signup")
@@ -70,6 +75,35 @@ public class PublicController {
             return ResponseEntity.ok(ApiResponse.success("Login successful", response));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    /**
+     * Public MOMO payment endpoint - no authentication required
+     * POST /api/public/payments/pay/momo
+     * 
+     * Request body:
+     * {
+     *   "phoneNumber": "250781234567",  // Required - Payer phone number
+     *   "paymentCategoryId": "uuid",      // Required
+     *   "amount": 1000.00,               // Required
+     *   "receiverId": "uuid",            // Required
+     *   "receiverPhone": "250794230137", // Optional
+     *   "message": "Payment message"     // Optional
+     * }
+     * 
+     * Note: This endpoint does not require authentication. It's designed for public use,
+     * such as when a user scans a QR code and needs to make a payment.
+     */
+    @PostMapping("/payments/pay/momo")
+    public ResponseEntity<ApiResponse<PaymentResponse>> makePublicMomoPayment(
+            @Valid @RequestBody PublicMomoPaymentRequest request) {
+        try {
+            PaymentResponse response = paymentService.makePublicMomoPayment(request);
+            return ResponseEntity.ok(ApiResponse.success("MOMO payment initiated successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.error(e.getMessage()));
         }
     }

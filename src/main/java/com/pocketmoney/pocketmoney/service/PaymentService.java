@@ -1390,6 +1390,25 @@ public class PaymentService {
         return mapToPaymentResponse(savedTransaction);
     }
 
+    /**
+     * Public MOMO payment - no authentication required
+     * Uses phoneNumber instead of userId
+     */
+    public PaymentResponse makePublicMomoPayment(com.pocketmoney.pocketmoney.dto.PublicMomoPaymentRequest request) {
+        // Create a MomoPaymentRequest from PublicMomoPaymentRequest
+        MomoPaymentRequest momoRequest = new MomoPaymentRequest();
+        momoRequest.setPayerPhone(request.getPhoneNumber());
+        momoRequest.setPaymentCategoryId(request.getPaymentCategoryId());
+        momoRequest.setAmount(request.getAmount());
+        momoRequest.setReceiverId(request.getReceiverId());
+        momoRequest.setReceiverPhone(request.getReceiverPhone());
+        momoRequest.setMessage(request.getMessage());
+        // userId is null for public payments
+        
+        // Use the existing makeMomoPayment method
+        return makeMomoPayment(momoRequest);
+    }
+
     @Transactional(readOnly = true)
     public BalanceResponse checkBalance(UUID userId) {
         User user = userRepository.findById(userId)

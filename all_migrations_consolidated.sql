@@ -232,6 +232,48 @@ WHERE NOT EXISTS (
 );
 
 -- ===================================================================
+-- 9.1. Add GASOLINE, DIESEL, and QR Code categories to payment_categories table
+-- ===================================================================
+-- Add GASOLINE category
+INSERT INTO payment_categories (id, name, description, is_active, created_at, updated_at)
+SELECT 
+    gen_random_uuid(),
+    'GASOLINE',
+    'Payment category for gasoline purchases',
+    true,
+    CURRENT_TIMESTAMP,
+    CURRENT_TIMESTAMP
+WHERE NOT EXISTS (
+    SELECT 1 FROM payment_categories WHERE name = 'GASOLINE'
+);
+
+-- Add DIESEL category
+INSERT INTO payment_categories (id, name, description, is_active, created_at, updated_at)
+SELECT 
+    gen_random_uuid(),
+    'DIESEL',
+    'Payment category for diesel purchases',
+    true,
+    CURRENT_TIMESTAMP,
+    CURRENT_TIMESTAMP
+WHERE NOT EXISTS (
+    SELECT 1 FROM payment_categories WHERE name = 'DIESEL'
+);
+
+-- Add QR Code category
+INSERT INTO payment_categories (id, name, description, is_active, created_at, updated_at)
+SELECT 
+    gen_random_uuid(),
+    'QR Code',
+    'Payment category for QR code payments',
+    true,
+    CURRENT_TIMESTAMP,
+    CURRENT_TIMESTAMP
+WHERE NOT EXISTS (
+    SELECT 1 FROM payment_categories WHERE name = 'QR Code'
+);
+
+-- ===================================================================
 -- 10. Create EFASHE Settings table
 -- ===================================================================
 CREATE TABLE IF NOT EXISTS efashe_settings (

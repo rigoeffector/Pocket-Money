@@ -36,6 +36,9 @@ ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${REMOTE_USER}@$
     psql -h localhost -U ${DB_USER} -d ${DB_NAME} -c "\d balance_assignment_history" || echo "Table may already exist"
     psql -h localhost -U ${DB_USER} -d ${DB_NAME} -c "\d merchant_user_balances" || echo "Table may already exist"
     psql -h localhost -U ${DB_USER} -d ${DB_NAME} -c "\d loans" || echo "Table may already exist"
+    echo ""
+    echo "Checking payment_categories for EFASHE, GASOLINE, DIESEL, and QR Code:"
+    psql -h localhost -U ${DB_USER} -d ${DB_NAME} -c "SELECT name FROM payment_categories WHERE name IN ('EFASHE', 'GASOLINE', 'DIESEL', 'QR Code');" 2>/dev/null | grep -E '(EFASHE|GASOLINE|DIESEL|QR Code)' && echo "✅ Payment categories verified" || echo "⚠️  Some categories may not exist"
 EOFSSH
 
 echo ""

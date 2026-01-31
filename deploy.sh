@@ -269,6 +269,10 @@ apply_migrations() {
             echo 'Checking payment_categories for EFASHE:'
             psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c \"SELECT name FROM payment_categories WHERE name = 'EFASHE';\" 2>/dev/null | grep -q EFASHE && echo '✅ EFASHE category exists' || echo '⚠️  EFASHE category may not exist'
             
+            echo ''
+            echo 'Checking payment_categories for GASOLINE, DIESEL, and QR Code:'
+            psql -h ${DB_HOST} -U ${DB_USER} -d ${DB_NAME} -c \"SELECT name FROM payment_categories WHERE name IN ('GASOLINE', 'DIESEL', 'QR Code');\" 2>/dev/null | grep -E '(GASOLINE|DIESEL|QR Code)' && echo '✅ GASOLINE, DIESEL, and QR Code categories exist' || echo '⚠️  Some categories may not exist'
+            
             # Clean up migration file
             rm -f /tmp/all_migrations_consolidated.sql
             echo ''
