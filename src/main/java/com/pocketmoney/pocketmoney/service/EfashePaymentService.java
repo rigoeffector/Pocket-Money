@@ -2505,44 +2505,27 @@ public class EfashePaymentService {
     }
     
     private boolean pollUntilSuccess(EfasheTransaction transaction, String pollEndpoint, Integer initialRetryAfterSecs) {
-        logger.info("=== START Automatic Polling with Retry Mechanism ===");
-        logger.info("Transaction ID: {}, Poll Endpoint: {}, Initial Retry After: {}s", 
-            transaction.getTransactionId(), pollEndpoint, initialRetryAfterSecs);
+        logger.info("=== START Single Poll Check (Background Polling Removed) ===");
+        logger.info("Transaction ID: {}, Poll Endpoint: {}", 
+            transaction.getTransactionId(), pollEndpoint);
+        logger.info("NOTE: Background polling removed. Performing single status check only.");
         
-        int maxRetries = 10; // Maximum number of retry attempts
-        int retryCount = 0;
-        int retryAfterSecs = initialRetryAfterSecs != null && initialRetryAfterSecs > 0 ? initialRetryAfterSecs : 10;
-        
-        // Wait before first poll
-        if (retryAfterSecs > 0) {
-            try {
-                logger.info("Waiting {} seconds before first poll...", retryAfterSecs);
-                Thread.sleep(retryAfterSecs * 1000L);
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                logger.warn("Interrupted while waiting to poll EFASHE status");
-                return false;
-            }
-        }
-        
-        // Poll loop - retry until SUCCESS or max retries
-        while (retryCount < maxRetries) {
-            retryCount++;
-            logger.info("Poll attempt {}/{} - Transaction ID: {}", retryCount, maxRetries, transaction.getTransactionId());
+        // Single poll check - no retries to prevent issues with MoPay server
+        try {
+            logger.info("Polling EFASHE status - Transaction ID: {}", transaction.getTransactionId());
             
-            try {
-                // Poll the status endpoint
-                EfashePollStatusResponse pollResponse = efasheApiService.pollTransactionStatus(pollEndpoint);
-                
-                if (pollResponse != null) {
-                    String pollStatus = pollResponse.getStatus();
-                    logger.info("EFASHE poll response [{}/{}] - Status: {}, Message: {}, TrxId: {}", 
-                        retryCount, maxRetries, pollStatus, pollResponse.getMessage(), pollResponse.getTrxId());
+            // Poll the status endpoint (single check only - no retries)
+            EfashePollStatusResponse pollResponse = efasheApiService.pollTransactionStatus(pollEndpoint);
+            
+            if (pollResponse != null) {
+                String pollStatus = pollResponse.getStatus();
+                logger.info("EFASHE poll response - Status: {}, Message: {}, TrxId: {}", 
+                    pollStatus, pollResponse.getMessage(), pollResponse.getTrxId());
                     
                     // Check if status is SUCCESS (case-insensitive, trim whitespace)
                     String trimmedStatus = pollStatus != null ? pollStatus.trim() : null;
                     if (trimmedStatus != null && "SUCCESS".equalsIgnoreCase(trimmedStatus)) {
-                        logger.info("✅ EFASHE transaction SUCCESS confirmed on attempt {}/{}", retryCount, maxRetries);
+                        logger.info("✅ EFASHE transaction SUCCESS confirmed");
                         
                         // Always execute the transaction to deliver the service when poll returns SUCCESS
                         // Poll SUCCESS means the transaction record exists, but we need to execute to actually deliver the service
@@ -2709,14 +2692,14 @@ public class EfashePaymentService {
                         
                         // Update transaction
                         efasheTransactionRepository.save(transaction);
-                        logger.info("Updated transaction - Transaction ID: {}, EFASHE Status: SUCCESS (from poll attempt {}), Execute Successful: {}", 
-                            transaction.getTransactionId(), retryCount, executeSuccessful);
+                        logger.info("Updated transaction - Transaction ID: {}, EFASHE Status: SUCCESS, Execute Successful: {}", 
+                            transaction.getTransactionId(), executeSuccessful);
                         
                         // Only send notifications if execute was successful
                         if (executeSuccessful) {
                             // Send WhatsApp notification
                             sendWhatsAppNotification(transaction);
-                            logger.info("=== END Automatic Polling (SUCCESS) ===");
+                            logger.info("=== END Single Poll Check (SUCCESS) ===");
                             return true;
                         } else {
                             // Execute failed - throw error, don't send notifications
@@ -2725,52 +2708,35 @@ public class EfashePaymentService {
                         }
                         
                     } else if (trimmedStatus != null && "FAILED".equalsIgnoreCase(trimmedStatus)) {
-                        // Transaction failed - stop retrying
-                        logger.error("❌ EFASHE transaction FAILED on attempt {}/{} - Status: {} - NOT sending notifications. Throwing error.", retryCount, maxRetries, trimmedStatus);
+                        // Transaction failed
+                        logger.error("❌ EFASHE transaction FAILED - Status: {} - NOT sending notifications. Throwing error.", trimmedStatus);
                         transaction.setEfasheStatus("FAILED");
                         transaction.setMessage(pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction failed");
                         transaction.setErrorMessage("EFASHE transaction failed: " + pollResponse.getMessage());
                         efasheTransactionRepository.save(transaction);
-                        logger.info("=== END Automatic Polling (FAILED) ===");
+                        logger.info("=== END Single Poll Check (FAILED) ===");
                         throw new RuntimeException("EFASHE transaction FAILED: " + (pollResponse.getMessage() != null ? pollResponse.getMessage() : "Unknown error") + ". Transaction ID: " + transaction.getTransactionId());
                         
                     } else {
-                        // Still PENDING or other status - continue polling
+                        // Still PENDING or other status - single check only, no retries
                         String actualStatus = trimmedStatus != null ? trimmedStatus : "PENDING";
-                        logger.info("EFASHE status is '{}' (not SUCCESS yet) - Will retry in {}s (attempt {}/{})", 
-                            actualStatus, retryAfterSecs, retryCount, maxRetries);
+                        logger.info("EFASHE status is '{}' (not SUCCESS yet) - Single check completed, no retries", actualStatus);
                         
                         // Update status (might be PENDING or other intermediate status)
                         transaction.setEfasheStatus(actualStatus);
                         transaction.setMessage(pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction is still processing");
                         efasheTransactionRepository.save(transaction);
                         
-                        // Wait before next retry (exponential backoff: increase delay slightly)
-                        if (retryCount < maxRetries) {
-                            try {
-                                int delaySeconds = retryAfterSecs + (retryCount * 2); // Slight increase: 10s, 12s, 14s, etc.
-                                logger.info("Waiting {} seconds before next poll attempt...", delaySeconds);
-                                Thread.sleep(delaySeconds * 1000L);
-                            } catch (InterruptedException ie) {
-                                Thread.currentThread().interrupt();
-                                logger.warn("Interrupted while waiting for next poll retry");
-                                return false;
-                            }
-                        }
+                        logger.info("=== END Single Poll Check (PENDING) ===");
+                        return false; // Return false for PENDING status - no retries
                     }
                 } else {
-                    logger.warn("EFASHE poll response is null on attempt {}/{} - Will retry", retryCount, maxRetries);
-                    
-                    // Wait before retry
-                    if (retryCount < maxRetries) {
-                        try {
-                            int delaySeconds = retryAfterSecs + (retryCount * 2);
-                            Thread.sleep(delaySeconds * 1000L);
-                        } catch (InterruptedException ie) {
-                            Thread.currentThread().interrupt();
-                            return false;
-                        }
-                    }
+                    logger.warn("EFASHE poll response is null - Single check completed");
+                    transaction.setEfasheStatus("PENDING");
+                    transaction.setMessage("EFASHE transaction status check returned null response");
+                    efasheTransactionRepository.save(transaction);
+                    logger.info("=== END Single Poll Check (NULL RESPONSE) ===");
+                    return false;
                 }
                 
             } catch (Exception e) {
@@ -2779,7 +2745,7 @@ public class EfashePaymentService {
                 // Check if this is a 404 error (poll endpoint not found/expired)
                 if (errorMessage != null && (errorMessage.contains("EFASHE_POLL_ENDPOINT_NOT_FOUND") || 
                     (errorMessage.contains("404") && errorMessage.contains("page not found")))) {
-                    logger.error("❌ EFASHE poll endpoint returned 404 (endpoint expired or invalid) - Stopping retries - Transaction ID: {}", 
+                    logger.error("❌ EFASHE poll endpoint returned 404 (endpoint expired or invalid) - Transaction ID: {}", 
                         transaction.getTransactionId());
                     
                     // Mark transaction as failed due to endpoint expiration
@@ -2788,34 +2754,18 @@ public class EfashePaymentService {
                     transaction.setMessage("EFASHE transaction status could not be determined - poll endpoint expired");
                     efasheTransactionRepository.save(transaction);
                     
-                    logger.info("=== END Automatic Polling (ENDPOINT EXPIRED - 404) ===");
-                    return false; // Stop retrying - this is a permanent error
+                    logger.info("=== END Single Poll Check (ENDPOINT EXPIRED - 404) ===");
+                    return false;
                 }
                 
-                logger.error("Error polling EFASHE status on attempt {}/{}: {}", retryCount, maxRetries, e.getMessage(), e);
+                logger.error("Error polling EFASHE status: {}", e.getMessage(), e);
+                transaction.setEfasheStatus("PENDING");
+                transaction.setErrorMessage("Error checking EFASHE status: " + e.getMessage());
+                efasheTransactionRepository.save(transaction);
                 
-                // Wait before retry on error (for non-404 errors)
-                if (retryCount < maxRetries) {
-                    try {
-                        int delaySeconds = retryAfterSecs + (retryCount * 2);
-                        logger.info("Error occurred, waiting {} seconds before retry...", delaySeconds);
-                        Thread.sleep(delaySeconds * 1000L);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        return false;
-                    }
-                }
+                logger.info("=== END Single Poll Check (ERROR) ===");
+                return false;
             }
-        }
-        
-        // Max retries reached - still PENDING
-        logger.warn("⚠️ Max retries ({}) reached - EFASHE status is still PENDING. Transaction ID: {}", 
-            maxRetries, transaction.getTransactionId());
-        transaction.setMessage("EFASHE transaction is still processing after " + maxRetries + " poll attempts");
-        efasheTransactionRepository.save(transaction);
-        
-        logger.info("=== END Automatic Polling (MAX RETRIES REACHED) ===");
-        return false;
     }
     
     /**
@@ -3944,271 +3894,25 @@ public class EfashePaymentService {
      * @param refundHistoryId Refund history ID to update
      */
     private void pollRefundStatus(String refundTransactionId, UUID refundHistoryId) {
-        logger.info("=== BACKGROUND REFUND POLLING START ===");
+        logger.info("=== BACKGROUND REFUND POLLING DISABLED ===");
+        logger.info("Background polling has been removed. Use webhooks or manual status check endpoints instead.");
         logger.info("Refund Transaction ID: {}, Refund History ID: {}", refundTransactionId, refundHistoryId);
-        
-        int maxAttempts = 3;
-        int pollIntervalSeconds = 5;
-        
-        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            try {
-                logger.info("Refund status poll attempt {}/{} - Transaction ID: {}", attempt, maxAttempts, refundTransactionId);
-                
-                // Check refund status using MoPay check-status endpoint
-                MoPayResponse statusResponse = moPayService.checkTransactionStatus(refundTransactionId);
-                
-                if (statusResponse != null) {
-                    Integer statusCode = statusResponse.getStatus();
-                    boolean isSuccess = (statusCode != null && (statusCode == 200 || statusCode == 201))
-                        || (statusResponse.getSuccess() != null && statusResponse.getSuccess());
-                    
-                    logger.info("Refund status check - Transaction ID: {}, Status Code: {}, Success: {}", 
-                        refundTransactionId, statusCode, isSuccess);
-                    
-                    // Update refund history
-                    Optional<EfasheRefundHistory> refundHistoryOpt = efasheRefundHistoryRepository.findById(refundHistoryId);
-                    if (refundHistoryOpt.isPresent()) {
-                        EfasheRefundHistory refundHistory = refundHistoryOpt.get();
-                        refundHistory.setMopayStatus(statusCode != null ? statusCode.toString() : null);
-                        
-                        if (isSuccess) {
-                            refundHistory.setStatus("SUCCESS");
-                            refundHistory.setErrorMessage(null);
-                            efasheRefundHistoryRepository.save(refundHistory);
-                            logger.info("✅ Refund status updated to SUCCESS - Transaction ID: {}", refundTransactionId);
-                            logger.info("=== BACKGROUND REFUND POLLING END (SUCCESS) ===");
-                            return; // Exit polling loop on success
-                        } else {
-                            // Still pending, continue polling
-                            logger.info("Refund status is still PENDING - will retry in {} seconds", pollIntervalSeconds);
-                        }
-                    } else {
-                        logger.warn("Refund history not found - ID: {}", refundHistoryId);
-                        return;
-                    }
-                } else {
-                    logger.warn("MoPay status response is null for refund transaction: {}", refundTransactionId);
-                }
-                
-                // Wait before next attempt (except on last attempt)
-                if (attempt < maxAttempts) {
-                    Thread.sleep(pollIntervalSeconds * 1000);
-                }
-                
-            } catch (InterruptedException e) {
-                logger.error("Refund polling thread interrupted: ", e);
-                Thread.currentThread().interrupt();
-                return;
-            } catch (Exception e) {
-                logger.error("Error checking refund status (attempt {}/{}): ", attempt, maxAttempts, e);
-                // Continue to next attempt even on error
-            }
-        }
-        
-        // If we reach here, all attempts failed or status is still not SUCCESS
-        // Update refund history to FAILED if status is not SUCCESS
-        try {
-            Optional<EfasheRefundHistory> refundHistoryOpt = efasheRefundHistoryRepository.findById(refundHistoryId);
-            if (refundHistoryOpt.isPresent()) {
-                EfasheRefundHistory refundHistory = refundHistoryOpt.get();
-                if (!"SUCCESS".equals(refundHistory.getStatus())) {
-                    refundHistory.setStatus("FAILED");
-                    refundHistory.setErrorMessage("Refund status check failed after " + maxAttempts + " attempts");
-                    efasheRefundHistoryRepository.save(refundHistory);
-                    logger.warn("⚠️ Refund status updated to FAILED after {} attempts - Transaction ID: {}", 
-                        maxAttempts, refundTransactionId);
-                }
-            }
-        } catch (Exception e) {
-            logger.error("Error updating refund history to FAILED: ", e);
-        }
-        
-        logger.info("=== BACKGROUND REFUND POLLING END (MAX ATTEMPTS REACHED) ===");
+        // Background polling removed - no action taken
     }
     
     /**
      * Poll BizaoPayment status in the background
-     * Polls every 5 seconds for 1 minute (12 attempts)
-     * When status is SUCCESS, triggers EFASHE execute and sends notifications
+     * REMOVED: Background polling removed to prevent issues with MoPay server
+     * Status will be checked via webhooks only
      * 
      * @param bizaoTransactionId BizaoPayment transaction ID to poll
      * @param efasheTransactionId EFASHE transaction ID
      */
     private void pollBizaoPaymentStatus(String bizaoTransactionId, String efasheTransactionId) {
-        logger.info("=== BACKGROUND BIZAO PAYMENT POLLING START ===");
-        logger.info("BizaoPayment Transaction ID: {}, EFASHE Transaction ID: {}, Will poll every 5 seconds for up to 60 seconds (1 minute)", 
-            bizaoTransactionId, efasheTransactionId);
-        
-        int maxAttempts = 12; // 60 seconds / 1 minute total (5 seconds per attempt)
-        int pollIntervalSeconds = 5;
-        
-        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            try {
-                logger.info("BizaoPayment status poll attempt {}/{} - Transaction ID: {}", attempt, maxAttempts, bizaoTransactionId);
-                
-                // Check BizaoPayment status
-                BizaoPaymentResponse statusResponse = bizaoPaymentService.checkTransactionStatus(bizaoTransactionId);
-                
-                if (statusResponse != null) {
-                    Integer statusCode = statusResponse.getStatus();
-                    Boolean success = statusResponse.getSuccess();
-                    
-                    logger.info("BizaoPayment status check - Transaction ID: {}, Status Code: {}, Success: {}", 
-                        bizaoTransactionId, statusCode, success);
-                    
-                    // Check if payment is successful
-                    // Consider SUCCESS if status is 200/201 OR success flag is true
-                    boolean isSuccess = (statusCode != null && (statusCode == 200 || statusCode == 201)) 
-                        || (success != null && success);
-                    
-                    if (isSuccess) {
-                        logger.info("✅ BizaoPayment transaction SUCCESS detected - Transaction ID: {}, Status: {}", 
-                            bizaoTransactionId, statusCode);
-                        
-                        // Update transaction status
-                        try {
-                            Optional<EfasheTransaction> transactionOpt = efasheTransactionRepository.findByTransactionId(efasheTransactionId);
-                            if (transactionOpt.isPresent()) {
-                                EfasheTransaction transaction = transactionOpt.get();
-                                
-                                // Update BizaoPayment status
-                                transaction.setMopayStatus(statusCode != null ? statusCode.toString() : "200");
-                                transaction.setMopayTransactionId(bizaoTransactionId);
-                                
-                                // Only proceed with EFASHE execute if EFASHE status is not already SUCCESS
-                                if (!"SUCCESS".equalsIgnoreCase(transaction.getEfasheStatus())) {
-                                    // Trigger EFASHE execute
-                                    try {
-                                        EfasheExecuteRequest executeRequest = new EfasheExecuteRequest();
-                                        executeRequest.setTrxId(transaction.getTrxId());
-                                        executeRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
-                                        executeRequest.setAmount(transaction.getAmount());
-                                        executeRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
-                                        
-                                        String deliveryMethodId = transaction.getDeliveryMethodId();
-                                        if (deliveryMethodId == null || deliveryMethodId.trim().isEmpty()) {
-                                            deliveryMethodId = "direct_topup";
-                                        }
-                                        executeRequest.setDeliveryMethodId(deliveryMethodId);
-                                        
-                                        if ("sms".equals(deliveryMethodId)) {
-                                            executeRequest.setDeliverTo(transaction.getDeliverTo());
-                                        }
-                                        
-                                        EfasheExecuteResponse executeResponse = efasheApiService.executeTransaction(executeRequest);
-                                        
-                                        // Log full execute response
-                                        if (executeResponse != null) {
-                                            try {
-                                                ObjectMapper objectMapper = new ObjectMapper();
-                                                String executeResponseJson = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(executeResponse);
-                                                logger.info("═══════════════════════════════════════════════════════════════");
-                                                logger.info("📋 EFASHE EXECUTE RESPONSE (Parsed) - Webhook Handler");
-                                                logger.info("═══════════════════════════════════════════════════════════════");
-                                                logger.info("{}", executeResponseJson);
-                                                logger.info("═══════════════════════════════════════════════════════════════");
-                                            } catch (Exception logException) {
-                                                logger.warn("Could not serialize execute response to JSON: {}", logException.getMessage());
-                                            }
-                                        }
-                                        
-                                        if (executeResponse != null && executeResponse.getHttpStatusCode() != null 
-                                            && (executeResponse.getHttpStatusCode() == 200 || executeResponse.getHttpStatusCode() == 202)) {
-                                            // Execute successful
-                                            transaction.setEfasheStatus("SUCCESS");
-                                            transaction.setPollEndpoint(executeResponse.getPollEndpoint());
-                                            transaction.setRetryAfterSecs(executeResponse.getRetryAfterSecs());
-                                            
-                                            logger.info("✅ EFASHE execute successful - Transaction ID: {}, Poll Endpoint: {}", 
-                                                efasheTransactionId, executeResponse.getPollEndpoint());
-                                            
-                                            // Send notifications
-                                            sendWhatsAppNotification(transaction);
-                                            
-                                        } else {
-                                            logger.error("❌ EFASHE execute failed - Transaction ID: {}, Response: {}", 
-                                                efasheTransactionId, executeResponse);
-                                            transaction.setEfasheStatus("FAILED");
-                                            transaction.setErrorMessage("EFASHE execute failed after BizaoPayment success");
-                                        }
-                                    } catch (Exception e) {
-                                        logger.error("❌ Error executing EFASHE transaction after BizaoPayment success - Transaction ID: {}", 
-                                            efasheTransactionId, e);
-                                        transaction.setEfasheStatus("FAILED");
-                                        transaction.setErrorMessage("EFASHE execute error: " + e.getMessage());
-                                    }
-                                } else {
-                                    logger.info("EFASHE transaction already SUCCESS - Transaction ID: {}", efasheTransactionId);
-                                }
-                                
-                                efasheTransactionRepository.save(transaction);
-                                logger.info("✅ Transaction updated after BizaoPayment SUCCESS - Transaction ID: {}", efasheTransactionId);
-                            } else {
-                                logger.warn("⚠️ Transaction not found for BizaoPayment polling - EFASHE Transaction ID: {}", efasheTransactionId);
-                            }
-                        } catch (Exception e) {
-                            logger.error("Error updating transaction after BizaoPayment success: ", e);
-                        }
-                        
-                        logger.info("=== BACKGROUND BIZAO PAYMENT POLLING END (SUCCESS) ===");
-                        return;
-                    } else {
-                        // Check if it's explicitly failed
-                        if (statusCode != null && statusCode >= 400) {
-                            logger.warn("⚠️ BizaoPayment status is FAILED - Transaction ID: {}, Status Code: {}", 
-                                bizaoTransactionId, statusCode);
-                            
-                            // Update transaction status
-                            try {
-                                Optional<EfasheTransaction> transactionOpt = efasheTransactionRepository.findByTransactionId(efasheTransactionId);
-                                if (transactionOpt.isPresent()) {
-                                    EfasheTransaction transaction = transactionOpt.get();
-                                    transaction.setMopayStatus(statusCode.toString());
-                                    transaction.setEfasheStatus("FAILED");
-                                    transaction.setErrorMessage("BizaoPayment status failed: " + statusCode);
-                                    efasheTransactionRepository.save(transaction);
-                                }
-                            } catch (Exception e) {
-                                logger.error("Error updating transaction after BizaoPayment failure: ", e);
-                            }
-                            
-                            logger.info("=== BACKGROUND BIZAO PAYMENT POLLING END (FAILED) ===");
-                            return;
-                        }
-                        // Still pending, continue polling
-                        logger.info("BizaoPayment status is still PENDING - will retry in {} second(s)", pollIntervalSeconds);
-                    }
-                } else {
-                    logger.warn("BizaoPayment status response is null for transaction: {}", bizaoTransactionId);
-                }
-                
-                // Wait before next attempt (except on last attempt)
-                if (attempt < maxAttempts) {
-                    Thread.sleep(pollIntervalSeconds * 1000);
-                }
-                
-            } catch (InterruptedException e) {
-                logger.error("BizaoPayment polling thread interrupted: ", e);
-                Thread.currentThread().interrupt();
-                return;
-            } catch (Exception e) {
-                logger.error("Error checking BizaoPayment status (attempt {}/{}): ", attempt, maxAttempts, e);
-                // Continue to next attempt even on error
-                if (attempt < maxAttempts) {
-                    try {
-                        Thread.sleep(pollIntervalSeconds * 1000);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        return;
-                    }
-                }
-            }
-        }
-        
-        // If we reach here, all attempts completed but status is still not SUCCESS
-        logger.warn("⚠️ BizaoPayment status check completed but status is still not SUCCESS after {} attempts - Transaction ID: {}", 
-            maxAttempts, bizaoTransactionId);
-        logger.info("=== BACKGROUND BIZAO PAYMENT POLLING END (MAX ATTEMPTS REACHED) ===");
+        logger.info("=== BACKGROUND BIZAO PAYMENT POLLING DISABLED ===");
+        logger.info("Background polling has been removed. Use webhooks instead.");
+        logger.info("BizaoPayment Transaction ID: {}, EFASHE Transaction ID: {}", bizaoTransactionId, efasheTransactionId);
+        // Background polling removed - no action taken
     }
     
     /**
