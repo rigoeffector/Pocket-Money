@@ -1921,6 +1921,165 @@ public class PaymentService {
         return response;
     }
 
+    /**
+     * Get GASOLINE or DIESEL transactions from the transactions table (same source as Daily Report).
+     * These fuel payments are stored in transactions with payment_category, NOT in efashe_transactions.
+     * Supports ADMIN, RECEIVER, and USER roles with appropriate filtering.
+     */
+    @Transactional(readOnly = true)
+    public PaginatedResponse<PaymentResponse> getTransactionsByPaymentCategoryForFuel(
+            String paymentCategoryName, int page, int size, String search, 
+            LocalDateTime fromDate, LocalDateTime toDate, String phoneFilter) {
+        // Verify user is ADMIN, RECEIVER, or USER
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication == null || !authentication.isAuthenticated()) {
+            throw new RuntimeException("User not authenticated");
+        }
+        
+        boolean isAdmin = authentication.getAuthorities().stream()
+                .anyMatch(a -> a.getAuthority().equals("ROLE_ADMIN"));
+        boolean isReceiver = authentication.getAuthorities().stream()
+                .anyMatch(a -> a.getAuthority().equals("ROLE_RECEIVER"));
+        boolean isUser = !isAdmin && !isReceiver && authentication.getAuthorities().stream()
+                .anyMatch(a -> a.getAuthority().equals("ROLE_USER"));
+        
+        if (!isAdmin && !isReceiver && !isUser) {
+            throw new RuntimeException("User must have ADMIN, RECEIVER, or USER role");
+        }
+        
+        String normalizedPhone = null;
+        if (isUser) {
+            // USER: filter by their own phone number
+            String userPhone = authentication.getName();
+            if (userPhone != null && !userPhone.trim().isEmpty()) {
+                try {
+                    normalizedPhone = normalizePhoneTo12Digits(userPhone);
+                } catch (Exception e) {
+                    throw new RuntimeException("Unable to determine user phone number for filtering");
+                }
+            }
+        } else if ((isAdmin || isReceiver) && phoneFilter != null && !phoneFilter.trim().isEmpty()) {
+            // ADMIN/RECEIVER: optional phone filter
+            try {
+                normalizedPhone = normalizePhoneTo12Digits(phoneFilter);
+            } catch (Exception e) {
+                throw new RuntimeException("Invalid phone number format: " + phoneFilter);
+            }
+        }
+        
+        // Build query - same filters as Daily Report: payment_category, PAYMENT type, SUCCESS status
+        StringBuilder queryBuilder = new StringBuilder();
+        queryBuilder.append("SELECT t FROM Transaction t ");
+        queryBuilder.append("LEFT JOIN FETCH t.user u ");
+        queryBuilder.append("LEFT JOIN FETCH t.paymentCategory pc ");
+        queryBuilder.append("LEFT JOIN FETCH t.receiver r ");
+        queryBuilder.append("WHERE pc.name = :paymentCategoryName ");
+        queryBuilder.append("AND t.transactionType = 'PAYMENT' ");
+        queryBuilder.append("AND t.status = 'SUCCESS' ");
+        
+        if (normalizedPhone != null) {
+            queryBuilder.append("AND (u.phoneNumber = :normalizedPhone OR t.phoneNumber = :normalizedPhone) ");
+        }
+        
+        if (search != null && !search.trim().isEmpty()) {
+            queryBuilder.append("AND (LOWER(u.fullNames) LIKE LOWER(:search) ");
+            queryBuilder.append("OR LOWER(u.phoneNumber) LIKE LOWER(:search) ");
+            queryBuilder.append("OR LOWER(r.companyName) LIKE LOWER(:search) ");
+            queryBuilder.append("OR LOWER(t.mopayTransactionId) LIKE LOWER(:search) ");
+            queryBuilder.append("OR LOWER(t.phoneNumber) LIKE LOWER(:search)) ");
+        }
+        
+        if (fromDate != null) {
+            queryBuilder.append("AND t.createdAt >= :fromDate ");
+        }
+        if (toDate != null) {
+            queryBuilder.append("AND t.createdAt <= :toDate ");
+        }
+        
+        queryBuilder.append("ORDER BY t.createdAt DESC");
+        
+        Query query = entityManager.createQuery(queryBuilder.toString(), Transaction.class);
+        query.setParameter("paymentCategoryName", paymentCategoryName);
+        if (normalizedPhone != null) {
+            query.setParameter("normalizedPhone", normalizedPhone);
+        }
+        if (search != null && !search.trim().isEmpty()) {
+            query.setParameter("search", "%" + search.trim() + "%");
+        }
+        if (fromDate != null) {
+            query.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            query.setParameter("toDate", toDate);
+        }
+        
+        // Count query
+        StringBuilder countQueryBuilder = new StringBuilder();
+        countQueryBuilder.append("SELECT COUNT(t) FROM Transaction t ");
+        countQueryBuilder.append("LEFT JOIN t.paymentCategory pc ");
+        countQueryBuilder.append("LEFT JOIN t.user u ");
+        countQueryBuilder.append("LEFT JOIN t.receiver r ");
+        countQueryBuilder.append("WHERE pc.name = :paymentCategoryName ");
+        countQueryBuilder.append("AND t.transactionType = 'PAYMENT' ");
+        countQueryBuilder.append("AND t.status = 'SUCCESS' ");
+        
+        if (normalizedPhone != null) {
+            countQueryBuilder.append("AND (u.phoneNumber = :normalizedPhone OR t.phoneNumber = :normalizedPhone) ");
+        }
+        if (search != null && !search.trim().isEmpty()) {
+            countQueryBuilder.append("AND (LOWER(u.fullNames) LIKE LOWER(:search) ");
+            countQueryBuilder.append("OR LOWER(u.phoneNumber) LIKE LOWER(:search) ");
+            countQueryBuilder.append("OR LOWER(r.companyName) LIKE LOWER(:search) ");
+            countQueryBuilder.append("OR LOWER(t.mopayTransactionId) LIKE LOWER(:search) ");
+            countQueryBuilder.append("OR LOWER(t.phoneNumber) LIKE LOWER(:search)) ");
+        }
+        if (fromDate != null) {
+            countQueryBuilder.append("AND t.createdAt >= :fromDate ");
+        }
+        if (toDate != null) {
+            countQueryBuilder.append("AND t.createdAt <= :toDate ");
+        }
+        
+        Query countQuery = entityManager.createQuery(countQueryBuilder.toString(), Long.class);
+        countQuery.setParameter("paymentCategoryName", paymentCategoryName);
+        if (normalizedPhone != null) {
+            countQuery.setParameter("normalizedPhone", normalizedPhone);
+        }
+        if (search != null && !search.trim().isEmpty()) {
+            countQuery.setParameter("search", "%" + search.trim() + "%");
+        }
+        if (fromDate != null) {
+            countQuery.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            countQuery.setParameter("toDate", toDate);
+        }
+        
+        long totalElements = (Long) countQuery.getSingleResult();
+        
+        int offset = page * size;
+        query.setFirstResult(offset);
+        query.setMaxResults(size);
+        
+        @SuppressWarnings("unchecked")
+        List<Transaction> transactions = (List<Transaction>) query.getResultList();
+        List<PaymentResponse> content = transactions.stream()
+                .map(this::mapToPaymentResponse)
+                .collect(Collectors.toList());
+        
+        int totalPages = (int) Math.ceil((double) totalElements / size);
+        
+        PaginatedResponse<PaymentResponse> response = new PaginatedResponse<>();
+        response.setContent(content);
+        response.setCurrentPage(page);
+        response.setPageSize(size);
+        response.setTotalElements(totalElements);
+        response.setTotalPages(totalPages);
+        response.setFirst(page == 0);
+        response.setLast(page >= totalPages - 1);
+        return response;
+    }
+
     public PaginatedResponse<PaymentResponse> getAllTransactions(int page, int size, LocalDateTime fromDate, LocalDateTime toDate) {
         // Build dynamic query using EntityManager
         StringBuilder queryBuilder = new StringBuilder();

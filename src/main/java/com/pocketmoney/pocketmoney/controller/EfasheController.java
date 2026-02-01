@@ -245,6 +245,53 @@ public class EfasheController {
                 return ResponseEntity.ok(ApiResponse.success("PAY_CUSTOMER transactions retrieved successfully", response));
             }
             
+            // Check if serviceType is GASOLINE or DIESEL - these come from transactions table (same source as Daily Report)
+            // NOT from efashe_transactions, since fuel payments use payment_category not EFASHE service_type
+            if (serviceTypeParam != null) {
+                String serviceTypeStr = serviceTypeParam.trim().toUpperCase();
+                if ("GASOLINE".equals(serviceTypeStr) || "DIESEL".equals(serviceTypeStr)) {
+                    PaginatedResponse<PaymentResponse> paymentResponse = paymentService.getTransactionsByPaymentCategoryForFuel(
+                        serviceTypeStr, page, size, search, fromDate, toDate, phone);
+                    
+                    EfasheServiceType fuelServiceType = "GASOLINE".equals(serviceTypeStr) 
+                        ? EfasheServiceType.GASOLINE : EfasheServiceType.DIESEL;
+                    
+                    List<EfasheTransactionResponse> efasheTransactions = paymentResponse.getContent().stream()
+                        .map(payment -> {
+                            EfasheTransactionResponse efashe = new EfasheTransactionResponse();
+                            efashe.setId(payment.getId());
+                            efashe.setTransactionId(payment.getMopayTransactionId() != null ? payment.getMopayTransactionId() : payment.getId().toString());
+                            efashe.setServiceType(fuelServiceType);
+                            efashe.setCustomerPhone(payment.getPayerPhone() != null ? payment.getPayerPhone() : 
+                                (payment.getUser() != null ? payment.getUser().getPhoneNumber() : null));
+                            efashe.setCustomerAccountNumber(payment.getPayerPhone() != null ? payment.getPayerPhone() : "");
+                            efashe.setCustomerAccountName(payment.getUser() != null ? payment.getUser().getFullNames() : null);
+                            efashe.setAmount(payment.getAmount());
+                            efashe.setCurrency("RWF");
+                            efashe.setTrxId(null);
+                            efashe.setMopayTransactionId(payment.getMopayTransactionId());
+                            efashe.setMopayStatus(payment.getStatus() != null ? payment.getStatus().name() : null);
+                            efashe.setEfasheStatus("SUCCESS");
+                            efashe.setMessage(serviceTypeStr + " payment");
+                            efashe.setCreatedAt(payment.getCreatedAt());
+                            efashe.setUpdatedAt(payment.getCreatedAt());
+                            return efashe;
+                        })
+                        .collect(Collectors.toList());
+                    
+                    PaginatedResponse<EfasheTransactionResponse> fuelResponse = new PaginatedResponse<>();
+                    fuelResponse.setContent(efasheTransactions);
+                    fuelResponse.setCurrentPage(paymentResponse.getCurrentPage());
+                    fuelResponse.setPageSize(paymentResponse.getPageSize());
+                    fuelResponse.setTotalElements(paymentResponse.getTotalElements());
+                    fuelResponse.setTotalPages(paymentResponse.getTotalPages());
+                    fuelResponse.setFirst(paymentResponse.isFirst());
+                    fuelResponse.setLast(paymentResponse.isLast());
+                    
+                    return ResponseEntity.ok(ApiResponse.success(serviceTypeStr + " transactions retrieved successfully (from Daily Report data source)", fuelResponse));
+                }
+            }
+            
             // Parse serviceType parameter - allow "ALL" to show all service types
             EfasheServiceType serviceType = null;
             if (serviceTypeParam != null && !serviceTypeParam.trim().isEmpty()) {
