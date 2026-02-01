@@ -152,6 +152,9 @@ public class EfasheController {
      *   - phone: Optional filter by customer phone number (accepts any format, will be normalized)
      *            - For ADMIN/RECEIVER: optional filter
      *            - For USER: ignored, automatically uses their own phone number
+     *   - search: Optional search term to search by phone number, customer name, or transaction ID
+     *            - Searches in: customerPhone, customerAccountName, transactionId
+     *            - Case-insensitive partial match
      *   - page: Page number (default: 0)
      *   - size: Page size (default: 20)
      *   - fromDate: Optional start date filter (ISO 8601 format)
@@ -170,6 +173,7 @@ public class EfasheController {
     public ResponseEntity<ApiResponse<PaginatedResponse<EfasheTransactionResponse>>> getTransactions(
             @RequestParam(value = "serviceType", required = false) String serviceTypeParam,
             @RequestParam(value = "phone", required = false) String phone,
+            @RequestParam(value = "search", required = false) String search,
             @RequestParam(value = "page", defaultValue = "0") int page,
             @RequestParam(value = "size", defaultValue = "20") int size,
             @RequestParam(value = "fromDate", required = false) 
@@ -193,7 +197,7 @@ public class EfasheController {
             }
             
             PaginatedResponse<EfasheTransactionResponse> response = efashePaymentService.getTransactions(
-                serviceType, phone, page, size, fromDate, toDate);
+                serviceType, phone, search, page, size, fromDate, toDate);
             return ResponseEntity.ok(ApiResponse.success("EFASHE transactions retrieved successfully", response));
         } catch (RuntimeException e) {
             logger.error("Error retrieving EFASHE transactions: ", e);

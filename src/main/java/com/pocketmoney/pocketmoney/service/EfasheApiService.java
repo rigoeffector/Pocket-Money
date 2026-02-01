@@ -155,6 +155,15 @@ public class EfasheApiService {
     }
     
     /**
+     * Clear the cached access token to force a fresh token on next request
+     */
+    public void clearTokenCache() {
+        logger.info("Clearing EFASHE token cache to force fresh token");
+        cachedAccessToken = null;
+        tokenExpiresAt = null;
+    }
+    
+    /**
      * Build HTTP headers with EFASHE API token authentication
      * Used for /vend/validate and /vend/execute
      */

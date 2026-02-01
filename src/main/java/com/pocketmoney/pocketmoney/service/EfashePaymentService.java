@@ -1079,22 +1079,54 @@ public class EfashePaymentService {
                     throw new RuntimeException("EFASHE polling failed. Status: " + transaction.getEfasheStatus() + ". Transaction ID: " + transaction.getTransactionId());
                 }
             } else if (isSuccess && !"SUCCESS".equalsIgnoreCase(transaction.getEfasheStatus())) {
-                logger.info("MoPay transaction SUCCESS detected (status: {}, success: {}). Triggering EFASHE execute...", 
+                logger.info("MoPay transaction SUCCESS detected (status: {}, success: {}). Ensuring BOTH validate AND execute happen...", 
                     statusCode, moPayResponse.getSuccess());
                 
                 try {
-                    // Validation was already done during initiate, so we use the stored trxId
+                    // Declare variables at method scope so they can be reused in nested blocks
+                    String verticalId = getVerticalId(transaction.getServiceType());
+                    EfasheValidateRequest validateRequest;
+                    EfasheValidateResponse validateResponse;
+                    String deliveryMethodId;
+                    // executeResponse is already declared at method level (line 969)
+                    
+                    // Always validate first to ensure we have a valid trxId (even if one exists, re-validate to be sure)
                     String trxId = transaction.getTrxId();
-                    if (trxId == null || trxId.trim().isEmpty()) {
-                        // This shouldn't happen if validation was done correctly, but handle gracefully
-                        logger.error("Transaction missing trxId from validate - Cannot execute EFASHE transaction. Transaction ID: {}", 
-                            transaction.getTransactionId());
-                        transaction.setEfasheStatus("FAILED");
-                        transaction.setErrorMessage("Missing trxId - validation may not have been completed during initiate");
-                        efasheTransactionRepository.save(transaction);
+                    boolean needsRevalidation = (trxId == null || trxId.trim().isEmpty());
+                    
+                    if (needsRevalidation) {
+                        logger.info("No trxId found - Validating EFASHE account first before executing...");
+                    } else {
+                        logger.info("Re-validating EFASHE account to ensure we have a fresh trxId before executing...");
                     }
                     
-                    logger.info("Using stored trxId from validate (done during initiate) - TrxId: {}", trxId);
+                    // Always re-validate to get a fresh trxId before executing
+                    validateRequest = new EfasheValidateRequest();
+                    validateRequest.setVerticalId(verticalId);
+                    validateRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
+                    
+                    logger.info("Validating EFASHE account - Vertical: {}, Customer Account: {}", 
+                        verticalId, transaction.getCustomerAccountNumber());
+                    
+                    validateResponse = efasheApiService.validateAccount(validateRequest);
+                    
+                    if (validateResponse != null && validateResponse.getTrxId() != null && !validateResponse.getTrxId().trim().isEmpty()) {
+                        trxId = validateResponse.getTrxId();
+                        logger.info("✅ Got trxId from validate: {} - Updating transaction", trxId);
+                        
+                        // Update transaction with new trxId
+                        transaction.setTrxId(trxId);
+                        efasheTransactionRepository.save(transaction);
+                    } else {
+                        logger.error("❌ Validation failed - Cannot get trxId - NOT sending notifications. Throwing error.");
+                        transaction.setEfasheStatus("FAILED");
+                        transaction.setErrorMessage("Validation failed - Cannot get trxId");
+                        efasheTransactionRepository.save(transaction);
+                        throw new RuntimeException("Validation failed - Cannot get trxId. Transaction ID: " + transaction.getTransactionId());
+                    }
+                    
+                    // Now execute with the validated trxId
+                    logger.info("Executing EFASHE transaction with validated trxId: {}", trxId);
                     
                     // Validate amount is not null
                     if (transaction.getAmount() == null) {
@@ -1102,8 +1134,78 @@ public class EfashePaymentService {
                         throw new RuntimeException("Amount is required for EFASHE execute but is null in transaction");
                     }
                     
-                    // Use executeWithRetry to handle 3-minute window errors
-                    executeResponse = executeWithRetry(transaction);
+                    // Build execute request
+                        EfasheExecuteRequest executeRequest = new EfasheExecuteRequest();
+                    executeRequest.setTrxId(trxId);
+                        executeRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
+                        executeRequest.setAmount(transaction.getAmount());
+                    executeRequest.setVerticalId(verticalId);
+                    
+                    deliveryMethodId = transaction.getDeliveryMethodId();
+                    if (deliveryMethodId == null || deliveryMethodId.trim().isEmpty()) {
+                        deliveryMethodId = "direct_topup";
+                    }
+                    executeRequest.setDeliveryMethodId(deliveryMethodId);
+                    
+                    if ("sms".equals(deliveryMethodId)) {
+                        String deliverTo = transaction.getDeliverTo();
+                        if (deliverTo == null || deliverTo.trim().isEmpty()) {
+                            deliverTo = normalizePhoneTo12Digits(transaction.getCustomerPhone());
+                        }
+                        executeRequest.setDeliverTo(deliverTo);
+                    }
+                    
+                    // Execute the transaction - this MUST succeed for service to be delivered
+                    logger.info("Calling EFASHE /vend/execute to deliver service - TrxId: {}, CustomerAccountNumber: {}, Amount: {}", 
+                        trxId, transaction.getCustomerAccountNumber(), transaction.getAmount());
+                    
+                    try {
+                        executeResponse = efasheApiService.executeTransaction(executeRequest);
+                    } catch (RuntimeException e) {
+                        // Check if it's a 3-minute window error - means execute already happened
+                        if (e.getMessage() != null && 
+                            (e.getMessage().contains("You cannot perform the same transaction within a 3 minute window") ||
+                             e.getMessage().contains("3 minute window"))) {
+                            logger.warn("⚠️ Execute failed with 3-minute window error - This means execute already happened. " +
+                                "Checking poll to confirm service was delivered. Transaction ID: {}", transaction.getTransactionId());
+                            
+                            // If pollEndpoint exists, poll to confirm
+                            if (transaction.getPollEndpoint() != null && !transaction.getPollEndpoint().isEmpty()) {
+                                Integer retryAfterSecs = transaction.getRetryAfterSecs() != null && transaction.getRetryAfterSecs() > 0 
+                                    ? transaction.getRetryAfterSecs() : 10;
+                                
+                                boolean pollSuccess = pollUntilSuccess(transaction, transaction.getPollEndpoint(), retryAfterSecs);
+                                
+                                if (pollSuccess && "SUCCESS".equalsIgnoreCase(transaction.getEfasheStatus())) {
+                                    logger.info("✅ Poll confirmed SUCCESS after 3-minute window error - Service was already delivered. Transaction ID: {}", 
+                                        transaction.getTransactionId());
+                                    // Service was delivered, continue normally
+                                    executeResponse = null; // Set to null to skip execute response handling
+                                } else {
+                                    logger.error("❌ Poll failed after 3-minute window error - Service may not be delivered. Transaction ID: {}", 
+                                        transaction.getTransactionId());
+                                    transaction.setEfasheStatus("FAILED");
+                                    transaction.setErrorMessage("Execute failed with 3-minute window error and polling failed");
+                                    efasheTransactionRepository.save(transaction);
+                                    throw new RuntimeException("Execute failed with 3-minute window error and polling failed. Transaction ID: " + transaction.getTransactionId());
+                                }
+                            } else {
+                                // No pollEndpoint - cannot verify, mark as FAILED
+                                logger.error("❌ Execute failed with 3-minute window error but no pollEndpoint to verify - NOT sending notifications. Throwing error.");
+                                transaction.setEfasheStatus("FAILED");
+                                transaction.setErrorMessage("Execute failed with 3-minute window error but no pollEndpoint to verify");
+                                efasheTransactionRepository.save(transaction);
+                                throw new RuntimeException("Execute failed with 3-minute window error but no pollEndpoint to verify. Transaction ID: " + transaction.getTransactionId());
+                            }
+                        } else {
+                            // Different error - re-throw
+                            logger.error("❌ Execute failed with unexpected error - NOT sending notifications. Throwing error: ", e);
+                            transaction.setEfasheStatus("FAILED");
+                            transaction.setErrorMessage("Execute failed: " + e.getMessage());
+                            efasheTransactionRepository.save(transaction);
+                            throw new RuntimeException("Execute failed: " + e.getMessage() + ". Transaction ID: " + transaction.getTransactionId(), e);
+                        }
+                    }
                         
                         if (executeResponse != null) {
                             // EFASHE execute returns async response with pollEndpoint
@@ -1298,11 +1400,106 @@ public class EfashePaymentService {
                                 }
                             }
                         } else {
+                            // Execute returned null - re-validate and execute again since MoPay is SUCCESS
+                            logger.warn("⚠️ EFASHE execute returned null response. MoPay is SUCCESS, so re-validating and executing again. " +
+                                "Transaction ID: {}", transaction.getTransactionId());
+                            
+                            try {
+                                // Re-validate to get a new trxId (reuse variables from outer scope)
+                                validateRequest = new EfasheValidateRequest();
+                                validateRequest.setVerticalId(verticalId);
+                                validateRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
+                                
+                                logger.info("Re-validating EFASHE account - Vertical: {}, Customer Account: {}", 
+                                    verticalId, transaction.getCustomerAccountNumber());
+                                
+                                validateResponse = efasheApiService.validateAccount(validateRequest);
+                                
+                                if (validateResponse != null && validateResponse.getTrxId() != null && !validateResponse.getTrxId().trim().isEmpty()) {
+                                    String newTrxId = validateResponse.getTrxId();
+                                    logger.info("✅ Got new trxId from re-validation: {} - Updating transaction and executing", newTrxId);
+                                    
+                                    // Update transaction with new trxId
+                                    transaction.setTrxId(newTrxId);
+                                    efasheTransactionRepository.save(transaction);
+                                    
+                                    // Build execute request with new trxId (reuse deliveryMethodId from outer scope)
+                                    deliveryMethodId = transaction.getDeliveryMethodId() != null ? transaction.getDeliveryMethodId() : "direct_topup";
+                                    EfasheExecuteRequest retryExecuteRequest = new EfasheExecuteRequest();
+                                    retryExecuteRequest.setTrxId(newTrxId);
+                                    retryExecuteRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
+                                    retryExecuteRequest.setAmount(transaction.getAmount());
+                                    retryExecuteRequest.setVerticalId(verticalId);
+                                    retryExecuteRequest.setDeliveryMethodId(deliveryMethodId);
+                                    
+                                    if ("sms".equals(deliveryMethodId)) {
+                                        String deliverTo = transaction.getDeliverTo();
+                                        if (deliverTo == null || deliverTo.trim().isEmpty()) {
+                                            deliverTo = normalizePhoneTo12Digits(transaction.getCustomerPhone());
+                                        }
+                                        retryExecuteRequest.setDeliverTo(deliverTo);
+                                    }
+                                    
+                                    // Execute with new trxId
+                                    logger.info("Executing EFASHE transaction with new trxId: {}, CustomerAccountNumber: {}, Amount: {}", 
+                                        newTrxId, transaction.getCustomerAccountNumber(), transaction.getAmount());
+                                    
+                                    EfasheExecuteResponse retryExecuteResponse = efasheApiService.executeTransaction(retryExecuteRequest);
+                                    
+                                    if (retryExecuteResponse != null) {
+                                        // Check if execute was successful
+                                        Integer httpStatusCode = retryExecuteResponse.getHttpStatusCode();
+                                        if (httpStatusCode != null && (httpStatusCode == 200 || httpStatusCode == 202)) {
+                                            logger.info("✅ EFASHE /vend/execute completed successfully after re-validation - HTTP Status: {}, Message: {}", 
+                                                httpStatusCode, retryExecuteResponse.getMessage());
+                                            
+                                            // Update transaction with execute response
+                                            transaction.setEfasheStatus("SUCCESS");
+                                            transaction.setMessage(retryExecuteResponse.getMessage() != null ? retryExecuteResponse.getMessage() : "EFASHE transaction completed successfully");
+                                            
+                                            // Update pollEndpoint if provided
+                                            String pollEndpoint = retryExecuteResponse.getPollEndpoint();
+                                            if (pollEndpoint != null && !pollEndpoint.isEmpty()) {
+                                                if (pollEndpoint.endsWith("/")) {
+                                                    pollEndpoint = pollEndpoint.substring(0, pollEndpoint.length() - 1);
+                                                }
+                                                transaction.setPollEndpoint(pollEndpoint);
+                                                transaction.setRetryAfterSecs(retryExecuteResponse.getRetryAfterSecs());
+                                            }
+                                            
+                                            efasheTransactionRepository.save(transaction);
+                                            logger.info("✅ Transaction marked as SUCCESS after re-validation and execute");
+                                        } else {
+                                            // Execute returned non-success status
+                                            logger.error("❌ EFASHE /vend/execute returned non-success status after re-validation: {} - NOT sending notifications. Throwing error.", httpStatusCode);
                             transaction.setEfasheStatus("FAILED");
-                            transaction.setErrorMessage("EFASHE execute returned null response");
-                            logger.error("❌ EFASHE execute returned null response - NOT sending notifications. Throwing error.");
-                            efasheTransactionRepository.save(transaction);
-                            throw new RuntimeException("EFASHE execute returned null response. Service may not be delivered. Transaction ID: " + transaction.getTransactionId());
+                                            transaction.setErrorMessage("EFASHE execute returned non-success status after re-validation: " + httpStatusCode);
+                                            efasheTransactionRepository.save(transaction);
+                                            throw new RuntimeException("EFASHE execute returned non-success status after re-validation: " + httpStatusCode + ". Transaction ID: " + transaction.getTransactionId());
+                        }
+                    } else {
+                                        // Execute still returned null after re-validation
+                                        logger.error("❌ EFASHE /vend/execute still returned null after re-validation - NOT sending notifications. Throwing error.");
+                        transaction.setEfasheStatus("FAILED");
+                                        transaction.setErrorMessage("EFASHE execute returned null response after re-validation");
+                                        efasheTransactionRepository.save(transaction);
+                                        throw new RuntimeException("EFASHE execute returned null response after re-validation. Service may not be delivered. Transaction ID: " + transaction.getTransactionId());
+                                    }
+                                } else {
+                                    // Re-validation failed
+                                    logger.error("❌ Re-validation failed - Cannot get new trxId - NOT sending notifications. Throwing error.");
+                                    transaction.setEfasheStatus("FAILED");
+                                    transaction.setErrorMessage("Re-validation failed - Cannot get new trxId");
+                                    efasheTransactionRepository.save(transaction);
+                                    throw new RuntimeException("Re-validation failed - Cannot get new trxId. Transaction ID: " + transaction.getTransactionId());
+                                }
+                            } catch (Exception revalidateException) {
+                                logger.error("❌ Error during re-validation/execute: ", revalidateException);
+                                transaction.setEfasheStatus("FAILED");
+                                transaction.setErrorMessage("Failed to re-validate and execute: " + revalidateException.getMessage());
+                                efasheTransactionRepository.save(transaction);
+                                throw new RuntimeException("Failed to re-validate and execute EFASHE transaction: " + revalidateException.getMessage() + ". Transaction ID: " + transaction.getTransactionId(), revalidateException);
+                            }
                         }
                         // Execute response handling continues below (no validate error handling needed since validate is done in initiate)
                 } catch (Exception e) {
@@ -1665,10 +1862,35 @@ public class EfashePaymentService {
                             }
                         }
                     } else {
-                        transaction.setEfasheStatus("FAILED");
-                        transaction.setErrorMessage("EFASHE execute returned null response");
-                        efasheTransactionRepository.save(transaction);
-                        logger.error("EFASHE execute returned null response");
+                        // Execute returned null - check if we can poll instead
+                        if (transaction.getPollEndpoint() != null && !transaction.getPollEndpoint().isEmpty()) {
+                            logger.warn("⚠️ EFASHE execute returned null response, but pollEndpoint exists. Attempting to poll status instead. " +
+                                "Transaction ID: {}, PollEndpoint: {}", transaction.getTransactionId(), transaction.getPollEndpoint());
+                            
+                            // Try polling to check if service was already delivered
+                            Integer retryAfterSecs = transaction.getRetryAfterSecs() != null && transaction.getRetryAfterSecs() > 0 
+                                ? transaction.getRetryAfterSecs() : 10;
+                            
+                            boolean pollSuccess = pollUntilSuccess(transaction, transaction.getPollEndpoint(), retryAfterSecs);
+                            
+                            if (pollSuccess && "SUCCESS".equalsIgnoreCase(transaction.getEfasheStatus())) {
+                                logger.info("✅ Polling succeeded after execute returned null - Service was already delivered. Transaction ID: {}", 
+                                    transaction.getTransactionId());
+                                // Service was delivered, continue normally
+                            } else {
+                                transaction.setEfasheStatus("FAILED");
+                                transaction.setErrorMessage("EFASHE execute returned null response and polling failed");
+                                efasheTransactionRepository.save(transaction);
+                                logger.error("❌ EFASHE execute returned null response and polling failed - Transaction ID: {}", 
+                                    transaction.getTransactionId());
+                            }
+                        } else {
+                            transaction.setEfasheStatus("FAILED");
+                            transaction.setErrorMessage("EFASHE execute returned null response");
+                            efasheTransactionRepository.save(transaction);
+                            logger.error("❌ EFASHE execute returned null response and no pollEndpoint available - Transaction ID: {}. Check logs for detailed error information.", 
+                                transaction.getTransactionId());
+                        }
                     }
                 } catch (Exception e) {
                     transaction.setEfasheStatus("FAILED");
@@ -2340,8 +2562,90 @@ public class EfashePaymentService {
                     }
                 }
             } catch (RuntimeException e) {
+                // Check if error is about invalid/expired trxId - need to re-validate and get new trxId
+                if (e.getMessage() != null && 
+                    (e.getMessage().contains("Invalid or expired trxID") || 
+                     e.getMessage().contains("404") ||
+                     (e.getMessage().contains("trxId") && e.getMessage().contains("not found")) ||
+                     (e.getMessage().contains("trxId") && e.getMessage().contains("expired")))) {
+                    logger.warn("⚠️ EFASHE execute failed with invalid/expired trxId error - Re-validating to get new trxId. " +
+                        "Transaction ID: {}, Old TrxId: {}", transaction.getTransactionId(), transaction.getTrxId());
+                    
+                    try {
+                        // Re-validate to get a new trxId
+                        EfasheValidateRequest validateRequest = new EfasheValidateRequest();
+                        validateRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
+                        validateRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
+                        
+                        logger.info("Re-validating EFASHE transaction due to invalid/expired trxId - Vertical: {}, Customer Account Number: {}", 
+                            validateRequest.getVerticalId(), validateRequest.getCustomerAccountNumber());
+                        
+                        EfasheValidateResponse validateResponse = efasheApiService.validateAccount(validateRequest);
+                        
+                        if (validateResponse != null && validateResponse.getTrxId() != null && !validateResponse.getTrxId().trim().isEmpty()) {
+                            // Get new trxId from validate response
+                            String newTrxId = validateResponse.getTrxId();
+                            
+                            // Update transaction with new trxId
+                            String oldTrxId = transaction.getTrxId();
+                            transaction.setTrxId(newTrxId);
+                            efasheTransactionRepository.save(transaction);
+                            
+                            logger.info("✅ Got new trxId from re-validation: {} (old: {}) - Updated transaction record. Building new execute request with new trxId", 
+                                newTrxId, oldTrxId);
+                            
+                            // Build a fresh execute request with the new trxId and all existing fields
+                            EfasheExecuteRequest retryExecuteRequest = new EfasheExecuteRequest();
+                            retryExecuteRequest.setTrxId(newTrxId); // Use NEW trxId from validate
+                            retryExecuteRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber()); // Use existing
+                            retryExecuteRequest.setAmount(transaction.getAmount()); // Use existing
+                            retryExecuteRequest.setVerticalId(getVerticalId(transaction.getServiceType())); // Use existing
+                            retryExecuteRequest.setDeliveryMethodId(deliveryMethodId); // Use existing
+                            
+                            if ("sms".equals(deliveryMethodId)) {
+                                String deliverTo = transaction.getDeliverTo();
+                                if (deliverTo == null || deliverTo.trim().isEmpty()) {
+                                    deliverTo = normalizePhoneTo12Digits(transaction.getCustomerPhone());
+                                }
+                                retryExecuteRequest.setDeliverTo(deliverTo); // Use existing
+                            }
+                            
+                            logger.info("Retrying execute with NEW trxId: {}, CustomerAccountNumber: {}, Amount: {}, VerticalId: {}, DeliveryMethodId: {}", 
+                                newTrxId, retryExecuteRequest.getCustomerAccountNumber(), retryExecuteRequest.getAmount(), 
+                                retryExecuteRequest.getVerticalId(), retryExecuteRequest.getDeliveryMethodId());
+                            
+                            // Retry execute with new trxId and all existing fields
+                            executeResponse = efasheApiService.executeTransaction(retryExecuteRequest);
+                            
+                            // Log full execute response after retry
+                            if (executeResponse != null) {
+                                try {
+                                    ObjectMapper objectMapper = new ObjectMapper();
+                                    String executeResponseJson = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(executeResponse);
+                                    logger.info("═══════════════════════════════════════════════════════════════");
+                                    logger.info("📋 EFASHE EXECUTE RESPONSE (Parsed) - Retry After Re-validation (Invalid/Expired TrxId)");
+                                    logger.info("═══════════════════════════════════════════════════════════════");
+                                    logger.info("{}", executeResponseJson);
+                                    logger.info("═══════════════════════════════════════════════════════════════");
+                                } catch (Exception logException) {
+                                    logger.warn("Could not serialize execute response to JSON: {}", logException.getMessage());
+                                }
+                            }
+                            
+                            logger.info("✅ EFASHE /vend/execute completed after re-validation (invalid/expired trxId) - HTTP Status: {}, Message: {}", 
+                                executeResponse != null ? executeResponse.getHttpStatusCode() : "null",
+                                executeResponse != null ? executeResponse.getMessage() : "null");
+                        } else {
+                            logger.error("Re-validation failed - Cannot get new trxId");
+                            throw new RuntimeException("Re-validation failed - Cannot get new trxId");
+                        }
+                    } catch (Exception revalidateException) {
+                        logger.error("Error during re-validation for invalid/expired trxId: ", revalidateException);
+                        throw new RuntimeException("Failed to re-validate and retry execute after invalid/expired trxId error: " + revalidateException.getMessage(), revalidateException);
+                    }
+                }
                 // Check if error is about "3 minute window" - need to re-validate and get new trxId
-                if (e.getMessage() != null && e.getMessage().contains("You cannot perform the same transaction within a 3 minute window")) {
+                else if (e.getMessage() != null && e.getMessage().contains("You cannot perform the same transaction within a 3 minute window")) {
                     logger.warn("⚠️ EFASHE execute failed with 3-minute window error - Re-validating to get new trxId");
                     
                     try {
@@ -2410,19 +2714,87 @@ public class EfashePaymentService {
                                     executeResponse != null ? executeResponse.getHttpStatusCode() : "null",
                                     executeResponse != null ? executeResponse.getMessage() : "null");
                             } catch (RuntimeException retryException) {
-                                // If retry still fails with 3-minute window error, it's likely because:
-                                // 1. The service was already delivered (poll returned SUCCESS)
-                                // 2. EFASHE checks customerAccountNumber + amount, not just trxId
-                                // Since poll already returned SUCCESS, we'll log and continue
+                                // If retry still fails with 3-minute window error, try with fresh token
                                 if (retryException.getMessage() != null && 
-                                    retryException.getMessage().contains("You cannot perform the same transaction within a 3 minute window")) {
+                                    (retryException.getMessage().contains("You cannot perform the same transaction within a 3 minute window") ||
+                                     retryException.getMessage().contains("3 minute window"))) {
                                     logger.warn("⚠️ Execute still failed with 3-minute window error after re-validation. " +
-                                        "This is expected if the service was already delivered. Poll returned SUCCESS, so transaction is complete. " +
-                                        "New trxId: {}, CustomerAccountNumber: {}, Amount: {}", 
+                                        "Clearing token cache and retrying with fresh token. " +
+                                        "New trxId: {}, CustomerAccountNumber: {}, Amount: {}.", 
                                         newTrxId, retryExecuteRequest.getCustomerAccountNumber(), retryExecuteRequest.getAmount());
-                                    // Don't throw - poll said SUCCESS, so transaction is complete
-                                    // Return null to indicate execute wasn't needed (service already delivered)
-                                    executeResponse = null;
+                                    
+                                    try {
+                                        // Clear token cache to get fresh token
+                                        efasheApiService.clearTokenCache();
+                                        
+                                        // Re-validate again with fresh token to get a new trxId
+                                        logger.info("Re-validating again with fresh token - Vertical: {}, Customer Account Number: {}", 
+                                            validateRequest.getVerticalId(), validateRequest.getCustomerAccountNumber());
+                                        
+                                        EfasheValidateResponse freshValidateResponse = efasheApiService.validateAccount(validateRequest);
+                                        
+                                        if (freshValidateResponse != null && freshValidateResponse.getTrxId() != null && !freshValidateResponse.getTrxId().trim().isEmpty()) {
+                                            // Get fresh trxId from validate response
+                                            String freshTrxId = freshValidateResponse.getTrxId();
+                                            
+                                            // Update transaction with fresh trxId
+                                            transaction.setTrxId(freshTrxId);
+                                            efasheTransactionRepository.save(transaction);
+                                            
+                                            logger.info("✅ Got fresh trxId from re-validation with fresh token: {} - Building new execute request", freshTrxId);
+                                            
+                                            // Build a fresh execute request with the fresh trxId
+                                            EfasheExecuteRequest freshExecuteRequest = new EfasheExecuteRequest();
+                                            freshExecuteRequest.setTrxId(freshTrxId);
+                                            freshExecuteRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
+                                            freshExecuteRequest.setAmount(transaction.getAmount());
+                                            freshExecuteRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
+                                            freshExecuteRequest.setDeliveryMethodId(deliveryMethodId);
+                                            
+                                            if ("sms".equals(deliveryMethodId)) {
+                                                String deliverTo = transaction.getDeliverTo();
+                                                if (deliverTo == null || deliverTo.trim().isEmpty()) {
+                                                    deliverTo = normalizePhoneTo12Digits(transaction.getCustomerPhone());
+                                                }
+                                                freshExecuteRequest.setDeliverTo(deliverTo);
+                                            }
+                                            
+                                            logger.info("Retrying execute with FRESH token and NEW trxId: {}, CustomerAccountNumber: {}, Amount: {}, VerticalId: {}, DeliveryMethodId: {}", 
+                                                freshTrxId, freshExecuteRequest.getCustomerAccountNumber(), freshExecuteRequest.getAmount(), 
+                                                freshExecuteRequest.getVerticalId(), freshExecuteRequest.getDeliveryMethodId());
+                                            
+                                            // Retry execute with fresh token and fresh trxId
+                                            executeResponse = efasheApiService.executeTransaction(freshExecuteRequest);
+                                            
+                                            // Log full execute response after retry with fresh token
+                                            if (executeResponse != null) {
+                                                try {
+                                                    ObjectMapper objectMapper = new ObjectMapper();
+                                                    String executeResponseJson = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(executeResponse);
+                                                    logger.info("═══════════════════════════════════════════════════════════════");
+                                                    logger.info("📋 EFASHE EXECUTE RESPONSE (Parsed) - Retry After Fresh Token");
+                                                    logger.info("═══════════════════════════════════════════════════════════════");
+                                                    logger.info("{}", executeResponseJson);
+                                                    logger.info("═══════════════════════════════════════════════════════════════");
+                                                } catch (Exception logException) {
+                                                    logger.warn("Could not serialize execute response to JSON: {}", logException.getMessage());
+                                                }
+                                            }
+                                            
+                                            logger.info("✅ EFASHE /vend/execute completed after fresh token retry - HTTP Status: {}, Message: {}", 
+                                                executeResponse != null ? executeResponse.getHttpStatusCode() : "null",
+                                                executeResponse != null ? executeResponse.getMessage() : "null");
+                                        } else {
+                                            logger.error("Re-validation with fresh token failed - Cannot get new trxId");
+                                            throw new RuntimeException("Re-validation with fresh token failed - Cannot get new trxId");
+                                        }
+                                    } catch (Exception freshTokenException) {
+                                        logger.error("Error during re-validation/execute with fresh token: ", freshTokenException);
+                                        logger.warn("⚠️ Fresh token retry failed. This is expected if the service was already delivered. " +
+                                            "Poll returned SUCCESS, so transaction is likely complete. Returning null.");
+                                        // Don't throw - poll said SUCCESS, so transaction is likely complete
+                                        executeResponse = null;
+                                    }
                                 } else {
                                     // Different error, re-throw
                                     throw retryException;
@@ -2447,7 +2819,17 @@ public class EfashePaymentService {
             
             return executeResponse;
         } catch (Exception e) {
-            logger.error("Error in executeWithRetry: ", e);
+            logger.error("═══════════════════════════════════════════════════════════════");
+            logger.error("❌ Error in executeWithRetry - Transaction ID: {}", transaction.getTransactionId());
+            logger.error("═══════════════════════════════════════════════════════════════");
+            logger.error("Error Type: {}", e.getClass().getName());
+            logger.error("Error Message: {}", e.getMessage());
+            if (e.getCause() != null) {
+                logger.error("Caused by: {} - {}", e.getCause().getClass().getName(), e.getCause().getMessage());
+            }
+            logger.error("Stack Trace:", e);
+            logger.error("═══════════════════════════════════════════════════════════════");
+            
             return null;
         }
     }
@@ -2492,64 +2874,16 @@ public class EfashePaymentService {
                     if (trimmedStatus != null && "SUCCESS".equalsIgnoreCase(trimmedStatus)) {
                         logger.info("✅ EFASHE transaction SUCCESS confirmed on attempt {}/{}", retryCount, maxRetries);
                         
-                        // Always execute the transaction to deliver the service when poll returns SUCCESS
-                        // Poll SUCCESS means the transaction record exists, but we need to execute to actually deliver the service
-                        // This applies to all service types: AIRTIME, ELECTRICITY, TV, RRA, MTN, etc.
-                        logger.info("Poll returned SUCCESS - Executing transaction via /vend/execute to deliver service ({})", 
+                        // Poll returned SUCCESS - this means EFASHE already executed the transaction successfully
+                        // Use the SUCCESS from poll directly, don't try to execute again
+                        logger.info("Poll returned SUCCESS - Using SUCCESS from EFASHE poll response. Service was already delivered ({})", 
                             transaction.getServiceType());
                         
-                        boolean executeSuccessful = false;
-                        try {
-                            // Execute the transaction to actually deliver the service (with retry logic for 3-minute window errors)
-                            EfasheExecuteResponse executeResponse = executeWithRetry(transaction);
-                            
-                            if (executeResponse != null) {
-                                // Check if execute was successful (HTTP 200 or 202)
-                                Integer httpStatusCode = executeResponse.getHttpStatusCode();
-                                if (httpStatusCode != null && (httpStatusCode == 200 || httpStatusCode == 202)) {
-                                    executeSuccessful = true;
-                                    logger.info("✅ EFASHE /vend/execute completed successfully - HTTP Status: {}, Message: {}, ServiceType: {}, CustomerAccountNumber: {}", 
-                                        executeResponse.getHttpStatusCode(), executeResponse.getMessage(), 
-                                        transaction.getServiceType(), transaction.getCustomerAccountNumber());
-                                    
-                                    // Update pollEndpoint if provided
-                                    if (executeResponse.getPollEndpoint() != null && !executeResponse.getPollEndpoint().isEmpty()) {
-                                        String cleanPollEndpoint = executeResponse.getPollEndpoint();
-                                        if (cleanPollEndpoint.endsWith("/")) {
-                                            cleanPollEndpoint = cleanPollEndpoint.substring(0, cleanPollEndpoint.length() - 1);
-                                        }
-                                        transaction.setPollEndpoint(cleanPollEndpoint);
-                                        transaction.setRetryAfterSecs(executeResponse.getRetryAfterSecs());
-                                    }
-                                } else {
-                                    logger.warn("⚠️ EFASHE /vend/execute returned non-success status: {} - NOT marking transaction as SUCCESS", httpStatusCode);
-                                }
-                            } else {
-                                logger.warn("⚠️ EFASHE /vend/execute returned null response - NOT marking transaction as SUCCESS");
-                            }
-                        } catch (Exception e) {
-                            logger.error("❌ Error executing EFASHE /vend/execute after poll SUCCESS: ", e);
-                            logger.warn("⚠️ Execute failed - NOT marking transaction as SUCCESS. Poll said SUCCESS but execute failed.");
-                            // Don't mark as SUCCESS if execute fails
-                        }
-                        
-                        // Only set status to SUCCESS if execute was successful
-                        if (executeSuccessful) {
-                            transaction.setEfasheStatus("SUCCESS");
-                            logger.info("✅ Transaction marked as SUCCESS - Execute was successful");
-                        } else {
-                            // Execute failed - don't mark as SUCCESS even though poll said SUCCESS
-                            // Keep current status or set to FAILED
-                            if (!"FAILED".equalsIgnoreCase(transaction.getEfasheStatus())) {
-                                transaction.setEfasheStatus("FAILED");
-                                transaction.setErrorMessage((transaction.getErrorMessage() != null ? transaction.getErrorMessage() + " | " : "") + 
-                                    "Poll returned SUCCESS but execute failed - Service may not be delivered");
-                                logger.warn("⚠️ Transaction NOT marked as SUCCESS - Execute failed. Status set to FAILED.");
-                            }
-                            // DO NOT send notifications if execute failed - throw error instead
-                            logger.error("❌ Execute failed - NOT sending notifications. Throwing error.");
-                            throw new RuntimeException("EFASHE execute failed after poll SUCCESS. Service may not be delivered. Transaction ID: " + transaction.getTransactionId());
-                        }
+                        // Use the SUCCESS from poll - mark transaction as SUCCESS
+                        transaction.setEfasheStatus("SUCCESS");
+                        transaction.setMessage("EFASHE transaction completed successfully - Service delivered (confirmed by poll)");
+                        efasheTransactionRepository.save(transaction);
+                        logger.info("✅ Transaction marked as SUCCESS - Using SUCCESS from EFASHE poll response");
                         
                         // For ELECTRICITY service, extract and store token and KWH information
                         // Only process if execute was successful
@@ -2655,22 +2989,28 @@ public class EfashePaymentService {
                             transaction.setMessage(pollResponse.getMessage() != null ? pollResponse.getMessage() : "EFASHE transaction completed successfully");
                         }
                         
+                        // For ELECTRICITY service, validate that tokens were received
+                        if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
+                            // Check if token is empty - if so, mark as FAILED
+                            if (transaction.getToken() == null || transaction.getToken().trim().isEmpty()) {
+                                logger.error("❌ ELECTRICITY transaction - No token received. Poll returned SUCCESS but electricityTokens.data is empty. Marking as FAILED.");
+                                transaction.setEfasheStatus("FAILED");
+                                transaction.setErrorMessage("Poll returned SUCCESS but no electricity token was received. Service may not be delivered.");
+                                efasheTransactionRepository.save(transaction);
+                                logger.error("❌ ELECTRICITY transaction FAILED - No token. NOT sending notifications. Throwing error.");
+                                throw new RuntimeException("ELECTRICITY transaction: Poll returned SUCCESS but no token was received. Transaction ID: " + transaction.getTransactionId());
+                            }
+                        }
+                        
                         // Update transaction
                         efasheTransactionRepository.save(transaction);
-                        logger.info("Updated transaction - Transaction ID: {}, EFASHE Status: SUCCESS (from poll attempt {}), Execute Successful: {}", 
-                            transaction.getTransactionId(), retryCount, executeSuccessful);
+                        logger.info("Updated transaction - Transaction ID: {}, EFASHE Status: SUCCESS (from poll attempt {})", 
+                            transaction.getTransactionId(), retryCount);
                         
-                        // Only send notifications if execute was successful
-                        if (executeSuccessful) {
-                            // Send WhatsApp notification
-                            sendWhatsAppNotification(transaction);
-                            logger.info("=== END Automatic Polling (SUCCESS) ===");
-                            return true;
-                        } else {
-                            // Execute failed - throw error, don't send notifications
-                            logger.error("❌ Execute failed - NOT sending notifications. Throwing error.");
-                            throw new RuntimeException("EFASHE execute failed after poll SUCCESS. Service may not be delivered. Transaction ID: " + transaction.getTransactionId());
-                        }
+                        // Poll returned SUCCESS - send notifications
+                        sendWhatsAppNotification(transaction);
+                        logger.info("=== END Automatic Polling (SUCCESS) ===");
+                        return true;
                         
                     } else if (trimmedStatus != null && "FAILED".equalsIgnoreCase(trimmedStatus)) {
                         // Transaction failed - stop retrying
@@ -3103,6 +3443,7 @@ public class EfashePaymentService {
     public PaginatedResponse<EfasheTransactionResponse> getTransactions(
             EfasheServiceType serviceType,
             String phone,
+            String search,
             int page,
             int size,
             LocalDateTime fromDate,
@@ -3169,9 +3510,25 @@ public class EfashePaymentService {
             throw new RuntimeException("Unauthorized: User must have ADMIN, RECEIVER, or USER role");
         }
         
+        // Process search term - try to normalize if it looks like a phone number
+        String normalizedSearchPhone = null;
+        if (search != null && !search.trim().isEmpty()) {
+            String searchTerm = search.trim();
+            // Try to normalize if it looks like a phone number (contains only digits, +, spaces, or -)
+            if (searchTerm.matches("^[\\d\\+\\s\\-]+$")) {
+                try {
+                    normalizedSearchPhone = normalizePhoneTo12Digits(searchTerm);
+                    logger.debug("Search term looks like phone number, normalized: {} -> {}", searchTerm, normalizedSearchPhone);
+                } catch (Exception e) {
+                    // Not a valid phone number, use as-is
+                    logger.debug("Search term does not normalize to valid phone, using as-is: {}", searchTerm);
+                }
+            }
+        }
+        
         String roleInfo = isAdmin ? "ADMIN" : (isReceiver ? "RECEIVER" : (isUser ? "USER" : "UNKNOWN"));
-        logger.info("Fetching EFASHE transactions - Role: {}, ServiceType: {}, Phone: {} (normalized: {}), Page: {}, Size: {}, FromDate: {}, ToDate: {}", 
-            roleInfo, serviceType, phone, normalizedPhone, page, size, fromDate, toDate);
+        logger.info("Fetching EFASHE transactions - Role: {}, ServiceType: {}, Phone: {} (normalized: {}), Search: {} (normalized phone: {}), Page: {}, Size: {}, FromDate: {}, ToDate: {}", 
+            roleInfo, serviceType, phone, normalizedPhone, search, normalizedSearchPhone, page, size, fromDate, toDate);
         
         // Build dynamic query to avoid PostgreSQL type inference issues with nullable parameters
         StringBuilder queryBuilder = new StringBuilder();
@@ -3182,9 +3539,20 @@ public class EfashePaymentService {
             queryBuilder.append("AND t.serviceType = :serviceType ");
         }
         
-        // Add phone filter if provided
-        if (normalizedPhone != null && !normalizedPhone.trim().isEmpty()) {
+        // Add phone filter if provided (only if search is not provided, to avoid conflicts)
+        if (normalizedPhone != null && !normalizedPhone.trim().isEmpty() && (search == null || search.trim().isEmpty())) {
             queryBuilder.append("AND t.customerPhone = :customerPhone ");
+        }
+        
+        // Add search filter if provided (searches in phone, name, and transaction ID)
+        if (search != null && !search.trim().isEmpty()) {
+            String searchTerm = search.trim();
+            queryBuilder.append("AND (LOWER(t.customerPhone) LIKE :searchTerm ");
+            if (normalizedSearchPhone != null) {
+                queryBuilder.append("OR t.customerPhone = :normalizedSearchPhone ");
+            }
+            queryBuilder.append("OR LOWER(t.customerAccountName) LIKE :searchTerm ");
+            queryBuilder.append("OR LOWER(t.transactionId) LIKE :searchTerm) ");
         }
         
         // Add date range filters if provided
@@ -3197,7 +3565,8 @@ public class EfashePaymentService {
         
         // Check if any filters are applied (excluding normalizedPhone for USER role, as it's always set)
         boolean hasFilters = serviceType != null || fromDate != null || toDate != null 
-            || (isAdmin || isReceiver) && normalizedPhone != null && !normalizedPhone.trim().isEmpty();
+            || (isAdmin || isReceiver) && normalizedPhone != null && !normalizedPhone.trim().isEmpty()
+            || (search != null && !search.trim().isEmpty());
         
         // Only exclude PENDING transactions when filters are applied
         // When no filtering, show all transactions including PENDING and FAILED
@@ -3217,8 +3586,17 @@ public class EfashePaymentService {
         if (serviceType != null) {
             query.setParameter("serviceType", serviceType);
         }
-        if (normalizedPhone != null && !normalizedPhone.trim().isEmpty()) {
+        if (normalizedPhone != null && !normalizedPhone.trim().isEmpty() && (search == null || search.trim().isEmpty())) {
             query.setParameter("customerPhone", normalizedPhone);
+        }
+        if (search != null && !search.trim().isEmpty()) {
+            String searchTerm = search.trim();
+            query.setParameter("searchTerm", "%" + searchTerm.toLowerCase() + "%");
+            
+            // If search term was normalized to a phone number, also search with normalized version
+            if (normalizedSearchPhone != null) {
+                query.setParameter("normalizedSearchPhone", normalizedSearchPhone);
+            }
         }
         if (fromDate != null) {
             query.setParameter("fromDate", fromDate);
@@ -3234,8 +3612,16 @@ public class EfashePaymentService {
         if (serviceType != null) {
             countQueryBuilder.append("AND t.serviceType = :serviceType ");
         }
-        if (normalizedPhone != null && !normalizedPhone.trim().isEmpty()) {
+        if (normalizedPhone != null && !normalizedPhone.trim().isEmpty() && (search == null || search.trim().isEmpty())) {
             countQueryBuilder.append("AND t.customerPhone = :customerPhone ");
+        }
+        if (search != null && !search.trim().isEmpty()) {
+            countQueryBuilder.append("AND (LOWER(t.customerPhone) LIKE :searchTerm ");
+            if (normalizedSearchPhone != null) {
+                countQueryBuilder.append("OR t.customerPhone = :normalizedSearchPhone ");
+            }
+            countQueryBuilder.append("OR LOWER(t.customerAccountName) LIKE :searchTerm ");
+            countQueryBuilder.append("OR LOWER(t.transactionId) LIKE :searchTerm) ");
         }
         if (fromDate != null) {
             countQueryBuilder.append("AND t.createdAt >= :fromDate ");
@@ -3258,8 +3644,17 @@ public class EfashePaymentService {
         if (serviceType != null) {
             countQuery.setParameter("serviceType", serviceType);
         }
-        if (normalizedPhone != null && !normalizedPhone.trim().isEmpty()) {
+        if (normalizedPhone != null && !normalizedPhone.trim().isEmpty() && (search == null || search.trim().isEmpty())) {
             countQuery.setParameter("customerPhone", normalizedPhone);
+        }
+        if (search != null && !search.trim().isEmpty()) {
+            String searchTerm = search.trim();
+            countQuery.setParameter("searchTerm", "%" + searchTerm.toLowerCase() + "%");
+            
+            // If search term is a phone number, also search with normalized version
+            if (normalizedSearchPhone != null) {
+                countQuery.setParameter("normalizedSearchPhone", normalizedSearchPhone);
+            }
         }
         if (fromDate != null) {
             countQuery.setParameter("fromDate", fromDate);
@@ -3475,13 +3870,27 @@ public class EfashePaymentService {
         }
         
         String trimmed = timestampStr.trim();
-        // Try different date formats
+        // Try different date formats - support all common formats to ensure we can identify the latest token
         java.time.format.DateTimeFormatter[] formatters = {
+            // EFASHE formats: "2/1/2026, 12:51:20 PM" or "12/31/2026, 12:51:20 PM" (M/d/yyyy supports 1-2 digits)
+            java.time.format.DateTimeFormatter.ofPattern("M/d/yyyy, h:mm:ss a", java.util.Locale.ENGLISH),
+            java.time.format.DateTimeFormatter.ofPattern("M/d/yyyy, hh:mm:ss a", java.util.Locale.ENGLISH),
+            java.time.format.DateTimeFormatter.ofPattern("MM/dd/yyyy, h:mm:ss a", java.util.Locale.ENGLISH),
+            java.time.format.DateTimeFormatter.ofPattern("MM/dd/yyyy, hh:mm:ss a", java.util.Locale.ENGLISH),
+            // European format: "dd/MM/yyyy, h:mm:ss a"
+            java.time.format.DateTimeFormatter.ofPattern("d/M/yyyy, h:mm:ss a", java.util.Locale.ENGLISH),
+            java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy, h:mm:ss a", java.util.Locale.ENGLISH),
+            // ISO formats
             java.time.format.DateTimeFormatter.ISO_LOCAL_DATE_TIME,
             java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"),
             java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS"),
             java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSSSS"),
-            java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+            java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"),
+            // Other common formats
+            java.time.format.DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss"),
+            java.time.format.DateTimeFormatter.ofPattern("dd-MM-yyyy HH:mm:ss"),
+            java.time.format.DateTimeFormatter.ofPattern("MM-dd-yyyy HH:mm:ss"),
+            java.time.format.DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss.SSS")
         };
         
         for (java.time.format.DateTimeFormatter formatter : formatters) {

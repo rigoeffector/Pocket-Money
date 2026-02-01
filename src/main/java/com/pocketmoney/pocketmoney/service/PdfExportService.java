@@ -774,28 +774,38 @@ public class PdfExportService {
                 
                 // For ELECTRICITY, extract and display token and KWH if available
                 if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
-                    String message = transaction.getMessage();
-                    if (message != null && !message.trim().isEmpty()) {
-                        // Extract token from message (format: "Token: {token} | KWH: {kwh}")
-                        String token = null;
-                        String kwh = null;
-                        
-                        if (message.contains("Token:") || message.contains("token:")) {
-                            String[] tokenParts = message.split("(?i)Token:");
-                            if (tokenParts.length > 1) {
-                                String tokenRaw = tokenParts[1].trim();
-                                if (tokenRaw.contains(" | ")) {
-                                    token = tokenRaw.split(" \\| ")[0].trim();
-                                } else if (tokenRaw.contains("KWH:") || tokenRaw.contains("kwh:")) {
-                                    token = tokenRaw.split("(?i)KWH:")[0].trim();
-                                } else {
-                                    token = tokenRaw.replaceAll("\\|", "").trim();
+                    // Use token directly from transaction (should be the latest token from /electricity/tokens endpoint)
+                    String token = transaction.getToken();
+                    String kwh = null;
+                    
+                    // If token is not in transaction, try to extract from message
+                    if (token == null || token.trim().isEmpty()) {
+                        String message = transaction.getMessage();
+                        if (message != null && !message.trim().isEmpty()) {
+                            if (message.contains("Token:") || message.contains("token:")) {
+                                String[] tokenParts = message.split("(?i)Token:");
+                                if (tokenParts.length > 1) {
+                                    String tokenRaw = tokenParts[1].trim();
+                                    if (tokenRaw.contains(" | ")) {
+                                        token = tokenRaw.split(" \\| ")[0].trim();
+                                    } else if (tokenRaw.contains("KWH:") || tokenRaw.contains("kwh:")) {
+                                        token = tokenRaw.split("(?i)KWH:")[0].trim();
+                                    } else {
+                                        token = tokenRaw.replaceAll("\\|", "").trim();
+                                    }
                                 }
-                                // Format token with dashes every 4 digits
-                                token = formatTokenWithDashes(token);
                             }
                         }
-                        
+                    }
+                    
+                    // Format token with dashes every 4 digits if we have a token
+                    if (token != null && !token.trim().isEmpty()) {
+                        token = formatTokenWithDashes(token);
+                    }
+                    
+                    // Extract KWH from message
+                    String message = transaction.getMessage();
+                    if (message != null && !message.trim().isEmpty()) {
                         if (message.contains("KWH:") || message.contains("kwh:")) {
                             String[] kwhParts = message.split("(?i)KWH:");
                             if (kwhParts.length > 1) {
@@ -812,26 +822,26 @@ public class PdfExportService {
                                 }
                             }
                         }
-                        
-                        // Display Token if available
-                        if (token != null && !token.isEmpty()) {
-                            contentStream.beginText();
-                            contentStream.setFont(PDType1Font.HELVETICA_BOLD, 10);
-                            contentStream.newLineAtOffset(margin, currentY);
-                            contentStream.showText("Token: " + token);
-                            contentStream.endText();
-                            currentY -= 14;
-                        }
-                        
-                        // Display KWH if available
-                        if (kwh != null && !kwh.isEmpty()) {
-                            contentStream.beginText();
-                            contentStream.setFont(PDType1Font.HELVETICA, 10);
-                            contentStream.newLineAtOffset(margin, currentY);
-                            contentStream.showText("KWH: " + kwh);
-                            contentStream.endText();
-                            currentY -= 14;
-                        }
+                    }
+                    
+                    // Display Token if available
+                    if (token != null && !token.isEmpty()) {
+                        contentStream.beginText();
+                        contentStream.setFont(PDType1Font.HELVETICA_BOLD, 10);
+                        contentStream.newLineAtOffset(margin, currentY);
+                        contentStream.showText("Token: " + token);
+                        contentStream.endText();
+                        currentY -= 14;
+                    }
+                    
+                    // Display KWH if available
+                    if (kwh != null && !kwh.isEmpty()) {
+                        contentStream.beginText();
+                        contentStream.setFont(PDType1Font.HELVETICA, 10);
+                        contentStream.newLineAtOffset(margin, currentY);
+                        contentStream.showText("KWH: " + kwh);
+                        contentStream.endText();
+                        currentY -= 14;
                     }
                 }
                 

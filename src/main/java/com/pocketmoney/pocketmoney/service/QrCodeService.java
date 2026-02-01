@@ -203,8 +203,8 @@ public class QrCodeService {
             PDPage page = new PDPage(PDRectangle.A4);
             document.addPage(page);
             
-            // Generate QR code image
-            BufferedImage qrImage = generateQrCodeBufferedImage(qrCodeUrl, 400, 400);
+            // Generate QR code image - larger size for better visibility
+            BufferedImage qrImage = generateQrCodeBufferedImage(qrCodeUrl, 500, 500);
             ByteArrayOutputStream imageBaos = new ByteArrayOutputStream();
             ImageIO.write(qrImage, "PNG", imageBaos);
             byte[] imageBytes = imageBaos.toByteArray();
@@ -219,42 +219,49 @@ public class QrCodeService {
                 float pageHeight = page.getMediaBox().getHeight();
                 float margin = 50;
                 
-                // Calculate position to center the QR code
-                float imageWidth = 400;
-                float imageHeight = 400;
+                // Calculate position to center the QR code perfectly
+                float imageWidth = 500;
+                float imageHeight = 500;
                 float xPosition = (pageWidth - imageWidth) / 2;
-                float yPosition = (pageHeight - imageHeight) / 2 + 100; // Slightly higher to leave room for text
                 
-                // Add title
+                // Calculate vertical center position
+                // Leave space for title (30px), merchant name (20px), and instruction (30px) above QR code
+                // Leave space for date (20px) below QR code
+                float totalTextHeight = 30 + 20 + 30 + 20; // Title + merchant + instruction + date spacing
+                float availableHeight = pageHeight - (2 * margin) - totalTextHeight;
+                float yPosition = (pageHeight - availableHeight) / 2 + (availableHeight - imageHeight) / 2;
+                
+                // Add title at the top
                 contentStream.beginText();
-                contentStream.setFont(PDType1Font.HELVETICA_BOLD, 20);
-                float titleWidth = PDType1Font.HELVETICA_BOLD.getStringWidth("QR Code Payment") / 1000f * 20;
+                contentStream.setFont(PDType1Font.HELVETICA_BOLD, 24);
+                String title = "QR Code Payment";
+                float titleWidth = PDType1Font.HELVETICA_BOLD.getStringWidth(title) / 1000f * 24;
                 contentStream.newLineAtOffset((pageWidth - titleWidth) / 2, pageHeight - margin - 30);
-                contentStream.showText("QR Code Payment");
+                contentStream.showText(title);
                 contentStream.endText();
                 
-                // Add merchant name
+                // Add merchant name below title
                 contentStream.beginText();
-                contentStream.setFont(PDType1Font.HELVETICA, 14);
+                contentStream.setFont(PDType1Font.HELVETICA, 16);
                 String merchantName = response.getReceiverName();
-                float merchantNameWidth = PDType1Font.HELVETICA.getStringWidth(merchantName) / 1000f * 14;
-                contentStream.newLineAtOffset((pageWidth - merchantNameWidth) / 2, pageHeight - margin - 50);
+                float merchantNameWidth = PDType1Font.HELVETICA.getStringWidth(merchantName) / 1000f * 16;
+                contentStream.newLineAtOffset((pageWidth - merchantNameWidth) / 2, pageHeight - margin - 60);
                 contentStream.showText(merchantName);
                 contentStream.endText();
                 
-                // Draw QR code image
-                contentStream.drawImage(pdImage, xPosition, yPosition - imageHeight, imageWidth, imageHeight);
+                // Draw QR code image - perfectly centered
+                contentStream.drawImage(pdImage, xPosition, yPosition, imageWidth, imageHeight);
                 
-                // Add instructions
+                // Add instructions below QR code
                 contentStream.beginText();
-                contentStream.setFont(PDType1Font.HELVETICA, 12);
+                contentStream.setFont(PDType1Font.HELVETICA, 14);
                 String instruction = "Scan this QR code to make a payment";
-                float instructionWidth = PDType1Font.HELVETICA.getStringWidth(instruction) / 1000f * 12;
-                contentStream.newLineAtOffset((pageWidth - instructionWidth) / 2, yPosition - imageHeight - 30);
+                float instructionWidth = PDType1Font.HELVETICA.getStringWidth(instruction) / 1000f * 14;
+                contentStream.newLineAtOffset((pageWidth - instructionWidth) / 2, yPosition - 40);
                 contentStream.showText(instruction);
                 contentStream.endText();
                 
-                // Add generated date
+                // Add generated date at the bottom
                 contentStream.beginText();
                 contentStream.setFont(PDType1Font.HELVETICA, 10);
                 String dateText = "Generated: " + java.time.LocalDateTime.now().format(
