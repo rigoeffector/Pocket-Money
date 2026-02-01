@@ -89,6 +89,7 @@ public class SecurityConfig {
                         .requestMatchers("/api/payments/top-up").hasAnyRole("USER", "ADMIN")
                         .requestMatchers("/api/payments/top-up-by-phone").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .requestMatchers("/api/payments/merchant/top-up").hasAnyRole("RECEIVER", "ADMIN")
+                        .requestMatchers("/api/payments/pay/customer").hasAnyRole("RECEIVER", "ADMIN")
                         .requestMatchers("/api/payments/loans/user/**").hasAnyRole("USER", "ADMIN")
                         .requestMatchers("/api/payments/loans/merchant/**").hasAnyRole("RECEIVER", "ADMIN")
                         .requestMatchers("/api/payments/loans/pay").hasAnyRole("USER", "ADMIN")

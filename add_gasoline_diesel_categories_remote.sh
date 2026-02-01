@@ -70,6 +70,19 @@ SELECT
 WHERE NOT EXISTS (
     SELECT 1 FROM payment_categories WHERE name = 'QR Code'
 );
+
+-- Add PAY_CUSTOMER category
+INSERT INTO payment_categories (id, name, description, is_active, created_at, updated_at)
+SELECT 
+    gen_random_uuid(),
+    'PAY_CUSTOMER',
+    'Payment category for customer payments',
+    true,
+    CURRENT_TIMESTAMP,
+    CURRENT_TIMESTAMP
+WHERE NOT EXISTS (
+    SELECT 1 FROM payment_categories WHERE name = 'PAY_CUSTOMER'
+);
 EOFSQL
         unset PGPASSWORD
 ENDSSH
@@ -123,6 +136,19 @@ SELECT
     CURRENT_TIMESTAMP
 WHERE NOT EXISTS (
     SELECT 1 FROM payment_categories WHERE name = 'QR Code'
+);
+
+-- Add PAY_CUSTOMER category
+INSERT INTO payment_categories (id, name, description, is_active, created_at, updated_at)
+SELECT 
+    gen_random_uuid(),
+    'PAY_CUSTOMER',
+    'Payment category for customer payments',
+    true,
+    CURRENT_TIMESTAMP,
+    CURRENT_TIMESTAMP
+WHERE NOT EXISTS (
+    SELECT 1 FROM payment_categories WHERE name = 'PAY_CUSTOMER'
 );
 EOFSQL
         unset PGPASSWORD

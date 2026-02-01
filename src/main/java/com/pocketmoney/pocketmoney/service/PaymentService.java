@@ -26,6 +26,7 @@ import com.pocketmoney.pocketmoney.dto.MoPayInitiateRequest;
 import com.pocketmoney.pocketmoney.dto.MoPayResponse;
 import com.pocketmoney.pocketmoney.dto.MomoPaymentRequest;
 import com.pocketmoney.pocketmoney.dto.PaginatedResponse;
+import com.pocketmoney.pocketmoney.dto.PayCustomerRequest;
 import com.pocketmoney.pocketmoney.dto.PayLoanRequest;
 import com.pocketmoney.pocketmoney.dto.PaymentCategoryResponse;
 import com.pocketmoney.pocketmoney.dto.PaymentRequest;
@@ -1465,6 +1466,16 @@ public class PaymentService {
         return response;
     }
 
+    /**
+     * Public transaction status check - no authentication required
+     */
+    @Transactional
+    public PaymentResponse checkPublicTransactionStatus(String mopayTransactionId) {
+        // Use the same logic as the authenticated version
+        return checkTransactionStatus(mopayTransactionId);
+    }
+
+    @Transactional
     public PaymentResponse checkTransactionStatus(String mopayTransactionId) {
         Transaction transaction = transactionRepository.findByMopayTransactionIdWithUser(mopayTransactionId)
                 .orElseThrow(() -> new RuntimeException("Transaction not found"));
@@ -1571,6 +1582,15 @@ public class PaymentService {
                             BigDecimal paymentAmount = transaction.getAmount();
                             BigDecimal userBonusAmount = transaction.getUserBonusAmount() != null ? transaction.getUserBonusAmount() : BigDecimal.ZERO;
                             BigDecimal receiverBalanceAfter = transaction.getReceiverBalanceAfter();
+                            
+                            // Handle null receiverBalanceAfter (e.g., for PAY_CUSTOMER transactions)
+                            if (receiverBalanceAfter == null) {
+                                // Calculate receiver balance after based on current balance and payment amount
+                                BigDecimal receiverBalanceBefore = receiver.getRemainingBalance() != null ? receiver.getRemainingBalance() : BigDecimal.ZERO;
+                                receiverBalanceAfter = receiverBalanceBefore.subtract(paymentAmount);
+                                logger.info("receiverBalanceAfter was null, calculated from current balance: {} - {} = {}", 
+                                    receiverBalanceBefore, paymentAmount, receiverBalanceAfter);
+                            }
                             
                             // Update receiver's own remaining balance (each receiver has separate balance)
                             // Ensure remaining balance never goes below 0
@@ -1744,7 +1764,14 @@ public class PaymentService {
                 transaction.setMopayTransactionId(originalTransactionId);
             }
             
+            // Save the transaction to persist status changes
             transactionRepository.save(transaction);
+            // Explicitly flush to ensure changes are persisted immediately
+            entityManager.flush();
+            logger.info("Transaction status saved to database - ID: {}, Status: {}", transaction.getMopayTransactionId(), transaction.getStatus());
+        } else {
+            // MoPay response is null - log but don't update status
+            logger.warn("MoPay response is null for transaction ID: {}. Status check may be unavailable.", mopayTransactionId);
         }
 
         // Final verification in response
@@ -1758,7 +1785,142 @@ public class PaymentService {
         return response;
     }
 
+    /**
+     * Get all transactions filtered by payment category (ADMIN only)
+     */
     @Transactional(readOnly = true)
+    public PaginatedResponse<PaymentResponse> getAllTransactionsByPaymentCategory(
+            String paymentCategoryName, int page, int size, String search, 
+            LocalDateTime fromDate, LocalDateTime toDate) {
+        // Verify user is ADMIN
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication == null || !authentication.isAuthenticated()) {
+            throw new RuntimeException("User not authenticated");
+        }
+        
+        boolean isAdmin = authentication.getAuthorities().stream()
+                .anyMatch(a -> a.getAuthority().equals("ROLE_ADMIN"));
+        
+        if (!isAdmin) {
+            throw new RuntimeException("Only ADMIN users can access all transactions by payment category");
+        }
+        
+        // Build dynamic query using EntityManager
+        StringBuilder queryBuilder = new StringBuilder();
+        queryBuilder.append("SELECT t FROM Transaction t ");
+        queryBuilder.append("LEFT JOIN FETCH t.user u ");
+        queryBuilder.append("LEFT JOIN FETCH t.paymentCategory pc ");
+        queryBuilder.append("LEFT JOIN FETCH t.receiver r ");
+        queryBuilder.append("WHERE pc.name = :paymentCategoryName ");
+        queryBuilder.append("AND t.transactionType = 'PAYMENT' ");
+        
+        // Add search filter
+        if (search != null && !search.trim().isEmpty()) {
+            queryBuilder.append("AND (LOWER(u.fullNames) LIKE LOWER(:search) ");
+            queryBuilder.append("OR LOWER(u.phoneNumber) LIKE LOWER(:search) ");
+            queryBuilder.append("OR LOWER(r.companyName) LIKE LOWER(:search) ");
+            queryBuilder.append("OR LOWER(t.mopayTransactionId) LIKE LOWER(:search)) ");
+        }
+        
+        // Add date range filters
+        if (fromDate != null) {
+            queryBuilder.append("AND t.createdAt >= :fromDate ");
+        }
+        if (toDate != null) {
+            queryBuilder.append("AND t.createdAt <= :toDate ");
+        }
+        
+        queryBuilder.append("ORDER BY t.createdAt DESC");
+        
+        // Create query
+        Query query = entityManager.createQuery(queryBuilder.toString(), Transaction.class);
+        query.setParameter("paymentCategoryName", paymentCategoryName);
+        
+        // Set search parameter if provided
+        if (search != null && !search.trim().isEmpty()) {
+            String searchPattern = "%" + search.trim() + "%";
+            query.setParameter("search", searchPattern);
+        }
+        
+        // Set date parameters if provided
+        if (fromDate != null) {
+            query.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            query.setParameter("toDate", toDate);
+        }
+        
+        // Get total count (for pagination)
+        StringBuilder countQueryBuilder = new StringBuilder();
+        countQueryBuilder.append("SELECT COUNT(t) FROM Transaction t ");
+        countQueryBuilder.append("LEFT JOIN t.paymentCategory pc ");
+        countQueryBuilder.append("LEFT JOIN t.user u ");
+        countQueryBuilder.append("LEFT JOIN t.receiver r ");
+        countQueryBuilder.append("WHERE pc.name = :paymentCategoryName ");
+        countQueryBuilder.append("AND t.transactionType = 'PAYMENT' ");
+        
+        // Add search filter
+        if (search != null && !search.trim().isEmpty()) {
+            countQueryBuilder.append("AND (LOWER(u.fullNames) LIKE LOWER(:search) ");
+            countQueryBuilder.append("OR LOWER(u.phoneNumber) LIKE LOWER(:search) ");
+            countQueryBuilder.append("OR LOWER(r.companyName) LIKE LOWER(:search) ");
+            countQueryBuilder.append("OR LOWER(t.mopayTransactionId) LIKE LOWER(:search)) ");
+        }
+        
+        if (fromDate != null) {
+            countQueryBuilder.append("AND t.createdAt >= :fromDate ");
+        }
+        if (toDate != null) {
+            countQueryBuilder.append("AND t.createdAt <= :toDate ");
+        }
+        
+        Query countQuery = entityManager.createQuery(countQueryBuilder.toString(), Long.class);
+        countQuery.setParameter("paymentCategoryName", paymentCategoryName);
+        
+        // Set search parameter if provided
+        if (search != null && !search.trim().isEmpty()) {
+            String searchPattern = "%" + search.trim() + "%";
+            countQuery.setParameter("search", searchPattern);
+        }
+        
+        if (fromDate != null) {
+            countQuery.setParameter("fromDate", fromDate);
+        }
+        if (toDate != null) {
+            countQuery.setParameter("toDate", toDate);
+        }
+        
+        long totalElements = (Long) countQuery.getSingleResult();
+        
+        // Apply pagination
+        int offset = page * size;
+        query.setFirstResult(offset);
+        query.setMaxResults(size);
+        
+        @SuppressWarnings("unchecked")
+        List<Transaction> transactions = (List<Transaction>) query.getResultList();
+        
+        // Convert to PaymentResponse
+        List<PaymentResponse> content = transactions.stream()
+                .map(this::mapToPaymentResponse)
+                .collect(Collectors.toList());
+        
+        // Calculate pagination metadata
+        int totalPages = (int) Math.ceil((double) totalElements / size);
+        boolean isFirst = page == 0;
+        boolean isLast = page >= totalPages - 1;
+        
+        PaginatedResponse<PaymentResponse> response = new PaginatedResponse<>();
+        response.setContent(content);
+        response.setCurrentPage(page);
+        response.setPageSize(size);
+        response.setTotalElements(totalElements);
+        response.setTotalPages(totalPages);
+        response.setFirst(isFirst);
+        response.setLast(isLast);
+        return response;
+    }
+
     public PaginatedResponse<PaymentResponse> getAllTransactions(int page, int size, LocalDateTime fromDate, LocalDateTime toDate) {
         // Build dynamic query using EntityManager
         StringBuilder queryBuilder = new StringBuilder();
@@ -1864,7 +2026,7 @@ public class PaymentService {
     }
 
     @Transactional(readOnly = true)
-    public ReceiverTransactionsResponse getTransactionsByReceiver(UUID receiverId, int page, int size, LocalDateTime fromDate, LocalDateTime toDate) {
+    public ReceiverTransactionsResponse getTransactionsByReceiver(UUID receiverId, int page, int size, String paymentCategory, LocalDateTime fromDate, LocalDateTime toDate) {
         // Get current authenticated user
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         if (authentication == null || !authentication.isAuthenticated()) {
@@ -1907,6 +2069,11 @@ public class PaymentService {
         queryBuilder.append("LEFT JOIN FETCH t.receiver r ");
         queryBuilder.append("WHERE t.receiver.id = :receiverId ");
         
+        // Add payment category filter if provided
+        if (paymentCategory != null && !paymentCategory.trim().isEmpty()) {
+            queryBuilder.append("AND pc.name = :paymentCategory ");
+        }
+        
         // Add date range filters
         if (fromDate != null) {
             queryBuilder.append("AND t.createdAt >= :fromDate ");
@@ -1921,6 +2088,11 @@ public class PaymentService {
         Query query = entityManager.createQuery(queryBuilder.toString(), Transaction.class);
         query.setParameter("receiverId", receiverId);
         
+        // Set payment category parameter if provided
+        if (paymentCategory != null && !paymentCategory.trim().isEmpty()) {
+            query.setParameter("paymentCategory", paymentCategory.trim());
+        }
+        
         // Set date parameters if provided
         if (fromDate != null) {
             query.setParameter("fromDate", fromDate);
@@ -1932,7 +2104,13 @@ public class PaymentService {
         // Get total count (for pagination)
         StringBuilder countQueryBuilder = new StringBuilder();
         countQueryBuilder.append("SELECT COUNT(t) FROM Transaction t ");
+        countQueryBuilder.append("LEFT JOIN t.paymentCategory pc ");
         countQueryBuilder.append("WHERE t.receiver.id = :receiverId ");
+        
+        // Add payment category filter if provided
+        if (paymentCategory != null && !paymentCategory.trim().isEmpty()) {
+            countQueryBuilder.append("AND pc.name = :paymentCategory ");
+        }
         
         if (fromDate != null) {
             countQueryBuilder.append("AND t.createdAt >= :fromDate ");
@@ -1943,6 +2121,11 @@ public class PaymentService {
         
         Query countQuery = entityManager.createQuery(countQueryBuilder.toString(), Long.class);
         countQuery.setParameter("receiverId", receiverId);
+        
+        // Set payment category parameter if provided
+        if (paymentCategory != null && !paymentCategory.trim().isEmpty()) {
+            countQuery.setParameter("paymentCategory", paymentCategory.trim());
+        }
         
         if (fromDate != null) {
             countQuery.setParameter("fromDate", fromDate);
@@ -3183,6 +3366,152 @@ public class PaymentService {
         }
 
         return activity;
+    }
+
+    /**
+     * Pay customer - initiate payment to a customer using MoPay
+     * This is different from paying for services - this is paying a customer directly
+     */
+    public PaymentResponse payCustomer(PayCustomerRequest request) {
+        logger.info("Initiating customer payment - Amount: {}, Phone: {}, Transfers: {}", 
+            request.getAmount(), request.getPhone(), request.getTransfers() != null ? request.getTransfers().size() : 0);
+
+        // Get authenticated receiver (merchant)
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication == null || !authentication.isAuthenticated()) {
+            throw new RuntimeException("User not authenticated");
+        }
+
+        Receiver receiver;
+        String username = authentication.getName();
+        
+        // Check if user is ADMIN
+        boolean isAdmin = authentication.getAuthorities().stream()
+            .anyMatch(a -> a.getAuthority().equals("ROLE_ADMIN"));
+        
+        if (isAdmin) {
+            // ADMIN users: receiverId is optional
+            if (request.getReceiverId() != null) {
+                // Use the provided receiverId
+                receiver = receiverRepository.findById(request.getReceiverId())
+                    .orElseThrow(() -> new RuntimeException("Receiver not found with ID: " + request.getReceiverId()));
+            } else {
+                // No receiverId provided - use the first active receiver
+                List<Receiver> activeReceivers = receiverRepository.findByStatus(ReceiverStatus.ACTIVE);
+                if (activeReceivers.isEmpty()) {
+                    throw new RuntimeException("No active receivers found in the system");
+                }
+                receiver = activeReceivers.get(0);
+                logger.info("ADMIN user - No receiverId provided, using first active receiver: {} ({})", 
+                    receiver.getCompanyName(), receiver.getId());
+            }
+        } else {
+            // RECEIVER users use their own receiver account
+            receiver = receiverRepository.findByUsername(username)
+                .orElseThrow(() -> new RuntimeException("Merchant not found with username: " + username));
+            
+            // If receiverId is provided, validate it matches the authenticated receiver
+            if (request.getReceiverId() != null && !receiver.getId().equals(request.getReceiverId())) {
+                throw new RuntimeException("receiverId does not match authenticated merchant");
+            }
+        }
+
+        if (receiver.getStatus() != ReceiverStatus.ACTIVE) {
+            throw new RuntimeException("Merchant is not active. Status: " + receiver.getStatus());
+        }
+
+        // Get PAY_CUSTOMER category
+        PaymentCategory paymentCategory = paymentCategoryRepository.findByName("PAY_CUSTOMER")
+            .orElseThrow(() -> new RuntimeException("PAY_CUSTOMER category not found. Please ensure the category exists in the database."));
+
+        if (!paymentCategory.getIsActive()) {
+            throw new RuntimeException("PAY_CUSTOMER category is not active");
+        }
+
+        // Normalize payer phone (DEBIT)
+        String normalizedPayerPhone = normalizePhoneTo12Digits(request.getPhone());
+        logger.info("Payer phone normalization - Original: '{}', Normalized: '{}'", request.getPhone(), normalizedPayerPhone);
+
+        // Validate transfers
+        if (request.getTransfers() == null || request.getTransfers().isEmpty()) {
+            throw new RuntimeException("At least one transfer is required");
+        }
+
+        // Create MoPay initiate request
+        MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
+        moPayRequest.setTransaction_id(request.getTransaction_id());
+        moPayRequest.setAmount(request.getAmount());
+        moPayRequest.setCurrency(request.getCurrency() != null ? request.getCurrency() : "RWF");
+        moPayRequest.setPhone(normalizedPayerPhone);
+        moPayRequest.setPayment_mode(request.getPayment_mode() != null ? request.getPayment_mode() : "MOBILE");
+        moPayRequest.setMessage(request.getMessage() != null ? request.getMessage() : "Customer payment from " + receiver.getCompanyName());
+        moPayRequest.setCallback_url(request.getCallback_url());
+
+        // Convert transfers - normalize receiver phones
+        List<MoPayInitiateRequest.Transfer> transfers = request.getTransfers().stream()
+            .map(transfer -> {
+                MoPayInitiateRequest.Transfer moPayTransfer = new MoPayInitiateRequest.Transfer();
+                moPayTransfer.setTransaction_id(transfer.getTransaction_id());
+                moPayTransfer.setAmount(transfer.getAmount());
+                // Transfer phone is already Long, but we should validate it's 12 digits
+                String normalizedReceiverPhone = String.valueOf(transfer.getPhone());
+                if (normalizedReceiverPhone.length() != 12) {
+                    // Try to normalize if it's not 12 digits
+                    try {
+                        normalizedReceiverPhone = normalizePhoneTo12Digits(normalizedReceiverPhone);
+                    } catch (Exception e) {
+                        throw new RuntimeException("Invalid receiver phone number: " + transfer.getPhone() + ". Error: " + e.getMessage());
+                    }
+                }
+                moPayTransfer.setPhone(Long.parseLong(normalizedReceiverPhone));
+                moPayTransfer.setMessage(transfer.getMessage() != null ? transfer.getMessage() : "Payment from " + receiver.getCompanyName());
+                return moPayTransfer;
+            })
+            .collect(Collectors.toList());
+
+        moPayRequest.setTransfers(transfers);
+
+        // Initiate payment with MoPay
+        MoPayResponse moPayResponse = moPayService.initiatePayment(moPayRequest);
+
+        // Create transaction record
+        Transaction transaction = new Transaction();
+        transaction.setUser(null); // No user for customer payments
+        transaction.setPaymentCategory(paymentCategory);
+        transaction.setReceiver(receiver);
+        transaction.setTransactionType(TransactionType.PAYMENT);
+        transaction.setAmount(request.getAmount());
+        transaction.setPhoneNumber(normalizedPayerPhone);
+        transaction.setMessage(moPayRequest.getMessage());
+
+        // Generate transaction ID
+        String transactionId = generateTransactionId();
+        transaction.setMopayTransactionId(transactionId);
+
+        // Check MoPay response
+        String mopayTransactionId = moPayResponse != null ? moPayResponse.getTransactionId() : null;
+        if (moPayResponse != null && moPayResponse.getStatus() != null && moPayResponse.getStatus() == 201 
+            && mopayTransactionId != null) {
+            // Successfully initiated
+            String existingMessage = transaction.getMessage() != null ? transaction.getMessage() : "";
+            transaction.setMessage(existingMessage + " | MOPAY_ID:" + mopayTransactionId);
+            transaction.setStatus(TransactionStatus.PENDING);
+        } else {
+            // Initiation failed
+            transaction.setStatus(TransactionStatus.FAILED);
+            String errorMessage = moPayResponse != null && moPayResponse.getMessage() != null 
+                ? moPayResponse.getMessage() 
+                : "Payment initiation failed - status: " + (moPayResponse != null ? moPayResponse.getStatus() : "null") 
+                    + ", mopayTransactionId: " + mopayTransactionId;
+            transaction.setMessage(errorMessage);
+        }
+
+        // Save transaction
+        Transaction savedTransaction = transactionRepository.save(transaction);
+        logger.info("Customer payment transaction created - ID: {}, Status: {}, MoPay ID: {}", 
+            savedTransaction.getId(), savedTransaction.getStatus(), mopayTransactionId);
+
+        return mapToPaymentResponse(savedTransaction);
     }
 }
 

@@ -1282,28 +1282,41 @@ public class EfashePaymentService {
                                                 transaction.setToken(latestToken);
                                                 logger.info("ELECTRICITY service - Saved latest token from /electricity/tokens (execute): {} (timestamp: {})", latestToken, latestTokenData.getTstamp());
                                                 
-                                                // Update message with the latest token from tokens endpoint if not already present
-                                                if (token == null || token.isEmpty() || !messageBuilder.toString().contains("Token:")) {
+                                                // Always update/replace token in message with latest token
+                                                String currentMessage = messageBuilder.toString();
+                                                // Remove old token if exists
+                                                currentMessage = currentMessage.replaceAll("(?i)Token:\\s*[0-9\\-]+", "");
+                                                // Remove any double separators
+                                                currentMessage = currentMessage.replaceAll("\\s*\\|\\s*\\|\\s*", " | ");
+                                                currentMessage = currentMessage.replaceAll("^\\s*\\|\\s*", "").replaceAll("\\s*\\|\\s*$", "");
+                                                messageBuilder = new StringBuilder(currentMessage.trim());
+                                                
+                                                // Add latest token
+                                                if (messageBuilder.length() > 0) {
+                                                    messageBuilder.append(" | ");
+                                                }
+                                                messageBuilder.append("Token: ").append(latestToken);
+                                                
+                                                // Also update/replace KWH if available from latest token response
+                                                if (latestTokenData.getUnits() != null) {
+                                                    String unitsStr = String.format("%.1f", latestTokenData.getUnits());
+                                                    // Remove old KWH if exists
+                                                    String messageStr = messageBuilder.toString();
+                                                    messageStr = messageStr.replaceAll("(?i)KWH:\\s*[0-9.]+", "");
+                                                    messageStr = messageStr.replaceAll("\\s*\\|\\s*\\|\\s*", " | ");
+                                                    messageStr = messageStr.replaceAll("^\\s*\\|\\s*", "").replaceAll("\\s*\\|\\s*$", "");
+                                                    messageBuilder = new StringBuilder(messageStr.trim());
+                                                    
+                                                    // Add latest KWH
                                                     if (messageBuilder.length() > 0) {
                                                         messageBuilder.append(" | ");
                                                     }
-                                                    messageBuilder.append("Token: ").append(latestToken);
-                                                    transaction.setMessage(messageBuilder.toString());
-                                                    logger.info("ELECTRICITY service - Updated message with latest token from /electricity/tokens endpoint (execute)");
+                                                    messageBuilder.append("KWH: ").append(unitsStr);
+                                                    logger.info("ELECTRICITY service - Updated message with latest KWH from /electricity/tokens (execute): {}", unitsStr);
                                                 }
                                                 
-                                                // Also update KWH if available from latest token response
-                                                if (latestTokenData.getUnits() != null) {
-                                                    String unitsStr = String.format("%.1f", latestTokenData.getUnits());
-                                                    if (!messageBuilder.toString().contains("KWH:")) {
-                                                        if (messageBuilder.length() > 0) {
-                                                            messageBuilder.append(" | ");
-                                                        }
-                                                        messageBuilder.append("KWH: ").append(unitsStr);
-                                                        transaction.setMessage(messageBuilder.toString());
-                                                        logger.info("ELECTRICITY service - Updated message with KWH from /electricity/tokens (execute): {}", unitsStr);
-                                                    }
-                                                }
+                                                transaction.setMessage(messageBuilder.toString());
+                                                logger.info("ELECTRICITY service - Updated message with latest token and KWH from /electricity/tokens endpoint (execute)");
                                             } else {
                                                 logger.warn("ELECTRICITY service - Latest token from /electricity/tokens (execute) is null or empty");
                                             }
@@ -2950,28 +2963,41 @@ public class EfashePaymentService {
                                             transaction.setToken(latestToken);
                                             logger.info("ELECTRICITY service - Saved latest token from /electricity/tokens: {} (timestamp: {})", latestToken, latestTokenData.getTstamp());
                                             
-                                            // Update message with the latest token from tokens endpoint if not already present
-                                            if (token == null || token.isEmpty() || !messageBuilder.toString().contains("Token:")) {
+                                            // Always update/replace token in message with latest token
+                                            String currentMessage = messageBuilder.toString();
+                                            // Remove old token if exists
+                                            currentMessage = currentMessage.replaceAll("(?i)Token:\\s*[0-9\\-]+", "");
+                                            // Remove any double separators
+                                            currentMessage = currentMessage.replaceAll("\\s*\\|\\s*\\|\\s*", " | ");
+                                            currentMessage = currentMessage.replaceAll("^\\s*\\|\\s*", "").replaceAll("\\s*\\|\\s*$", "");
+                                            messageBuilder = new StringBuilder(currentMessage.trim());
+                                            
+                                            // Add latest token
+                                            if (messageBuilder.length() > 0) {
+                                                messageBuilder.append(" | ");
+                                            }
+                                            messageBuilder.append("Token: ").append(latestToken);
+                                            
+                                            // Also update/replace KWH if available from latest token response
+                                            if (latestTokenData.getUnits() != null) {
+                                                String unitsStr = String.format("%.1f", latestTokenData.getUnits());
+                                                // Remove old KWH if exists
+                                                String messageStr = messageBuilder.toString();
+                                                messageStr = messageStr.replaceAll("(?i)KWH:\\s*[0-9.]+", "");
+                                                messageStr = messageStr.replaceAll("\\s*\\|\\s*\\|\\s*", " | ");
+                                                messageStr = messageStr.replaceAll("^\\s*\\|\\s*", "").replaceAll("\\s*\\|\\s*$", "");
+                                                messageBuilder = new StringBuilder(messageStr.trim());
+                                                
+                                                // Add latest KWH
                                                 if (messageBuilder.length() > 0) {
                                                     messageBuilder.append(" | ");
                                                 }
-                                                messageBuilder.append("Token: ").append(latestToken);
-                                                transaction.setMessage(messageBuilder.toString());
-                                                logger.info("ELECTRICITY service - Updated message with latest token from /electricity/tokens endpoint");
+                                                messageBuilder.append("KWH: ").append(unitsStr);
+                                                logger.info("ELECTRICITY service - Updated message with latest KWH from /electricity/tokens: {}", unitsStr);
                                             }
                                             
-                                            // Also update KWH if available from latest token response
-                                            if (latestTokenData.getUnits() != null) {
-                                                String unitsStr = String.format("%.1f", latestTokenData.getUnits());
-                                                if (!messageBuilder.toString().contains("KWH:")) {
-                                                    if (messageBuilder.length() > 0) {
-                                                        messageBuilder.append(" | ");
-                                                    }
-                                                    messageBuilder.append("KWH: ").append(unitsStr);
-                                                    transaction.setMessage(messageBuilder.toString());
-                                                    logger.info("ELECTRICITY service - Updated message with KWH from /electricity/tokens: {}", unitsStr);
-                                                }
-                                            }
+                                            transaction.setMessage(messageBuilder.toString());
+                                            logger.info("ELECTRICITY service - Updated message with latest token and KWH from /electricity/tokens endpoint");
                                         } else {
                                             logger.warn("ELECTRICITY service - Latest token from /electricity/tokens is null or empty");
                                         }

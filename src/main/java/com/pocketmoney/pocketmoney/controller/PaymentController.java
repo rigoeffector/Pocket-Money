@@ -27,6 +27,7 @@ import com.pocketmoney.pocketmoney.dto.LoanResponse;
 import com.pocketmoney.pocketmoney.dto.MerchantTopUpRequest;
 import com.pocketmoney.pocketmoney.dto.MomoPaymentRequest;
 import com.pocketmoney.pocketmoney.dto.PaginatedResponse;
+import com.pocketmoney.pocketmoney.dto.PayCustomerRequest;
 import com.pocketmoney.pocketmoney.dto.PayLoanRequest;
 import com.pocketmoney.pocketmoney.dto.PaymentRequest;
 import com.pocketmoney.pocketmoney.dto.PaymentResponse;
@@ -117,6 +118,26 @@ public class PaymentController {
         }
     }
 
+    /**
+     * Pay customer - initiate payment to a customer using MoPay
+     * POST /api/payments/pay/customer
+     * 
+     * This endpoint allows merchants to pay customers directly (not for services).
+     * Requires authentication (RECEIVER role).
+     */
+    @PostMapping("/pay/customer")
+    public ResponseEntity<ApiResponse<PaymentResponse>> payCustomer(
+            @Valid @RequestBody PayCustomerRequest request) {
+        try {
+            PaymentResponse response = paymentService.payCustomer(request);
+            return ResponseEntity.ok(ApiResponse.success("Customer payment initiated successfully", response));
+        } catch (RuntimeException e) {
+            logger.error("Error initiating customer payment: ", e);
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
     @GetMapping("/balance/{userId}")
     public ResponseEntity<ApiResponse<BalanceResponse>> checkBalance(@PathVariable("userId") UUID userId) {
         try {
@@ -182,10 +203,11 @@ public class PaymentController {
             @PathVariable("receiverId") UUID receiverId,
             @RequestParam(value = "page", defaultValue = "0") int page,
             @RequestParam(value = "size", defaultValue = "20") int size,
+            @RequestParam(value = "paymentCategory", required = false) String paymentCategory,
             @RequestParam(value = "fromDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
             @RequestParam(value = "toDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate) {
         try {
-            ReceiverTransactionsResponse response = paymentService.getTransactionsByReceiver(receiverId, page, size, fromDate, toDate);
+            ReceiverTransactionsResponse response = paymentService.getTransactionsByReceiver(receiverId, page, size, paymentCategory, fromDate, toDate);
             return ResponseEntity.ok(ApiResponse.success("Receiver transactions retrieved successfully", response));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)

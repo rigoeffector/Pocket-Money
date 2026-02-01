@@ -10,8 +10,10 @@ import com.pocketmoney.pocketmoney.dto.EfasheStatusResponse;
 import com.pocketmoney.pocketmoney.dto.EfasheTransactionResponse;
 import com.pocketmoney.pocketmoney.dto.ElectricityTokensResponse;
 import com.pocketmoney.pocketmoney.dto.PaginatedResponse;
+import com.pocketmoney.pocketmoney.dto.PaymentResponse;
 import com.pocketmoney.pocketmoney.entity.EfasheServiceType;
 import com.pocketmoney.pocketmoney.service.EfashePaymentService;
+import com.pocketmoney.pocketmoney.service.PaymentService;
 import com.pocketmoney.pocketmoney.service.PdfExportService;
 import jakarta.validation.Valid;
 import org.slf4j.Logger;
@@ -22,6 +24,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDateTime;
+import java.util.List;
+import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/efashe")
@@ -31,10 +35,12 @@ public class EfasheController {
 
     private final EfashePaymentService efashePaymentService;
     private final PdfExportService pdfExportService;
+    private final PaymentService paymentService;
 
-    public EfasheController(EfashePaymentService efashePaymentService, PdfExportService pdfExportService) {
+    public EfasheController(EfashePaymentService efashePaymentService, PdfExportService pdfExportService, PaymentService paymentService) {
         this.efashePaymentService = efashePaymentService;
         this.pdfExportService = pdfExportService;
+        this.paymentService = paymentService;
     }
 
     /**
@@ -181,6 +187,64 @@ public class EfasheController {
             @RequestParam(value = "toDate", required = false) 
             @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate) {
         try {
+            // Check if serviceType is PAY_CUSTOMER (special case for ADMIN only)
+            if (serviceTypeParam != null && "PAY_CUSTOMER".equalsIgnoreCase(serviceTypeParam.trim())) {
+                // Verify user is ADMIN
+                org.springframework.security.core.Authentication authentication = 
+                    org.springframework.security.core.context.SecurityContextHolder.getContext().getAuthentication();
+                if (authentication == null || !authentication.isAuthenticated()) {
+                    return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                            .body(ApiResponse.error("Authentication required"));
+                }
+                
+                boolean isAdmin = authentication.getAuthorities().stream()
+                    .anyMatch(a -> a.getAuthority().equals("ROLE_ADMIN"));
+                
+                if (!isAdmin) {
+                    return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                            .body(ApiResponse.error("Only ADMIN users can access PAY_CUSTOMER transactions via this endpoint"));
+                }
+                
+                // Get transactions by payment category
+                PaginatedResponse<PaymentResponse> paymentResponse = paymentService.getAllTransactionsByPaymentCategory(
+                    "PAY_CUSTOMER", page, size, search, fromDate, toDate);
+                
+                // Map PaymentResponse to EfasheTransactionResponse
+                List<EfasheTransactionResponse> efasheTransactions = paymentResponse.getContent().stream()
+                    .map(payment -> {
+                        EfasheTransactionResponse efashe = new EfasheTransactionResponse();
+                        efashe.setId(payment.getId());
+                        efashe.setTransactionId(payment.getMopayTransactionId() != null ? payment.getMopayTransactionId() : payment.getId().toString());
+                        efashe.setServiceType(null); // PAY_CUSTOMER is not an EFASHE service type
+                        efashe.setCustomerPhone(payment.getPayerPhone() != null ? payment.getPayerPhone() : 
+                            (payment.getUser() != null ? payment.getUser().getPhoneNumber() : null));
+                        efashe.setCustomerAccountNumber(payment.getPayerPhone() != null ? payment.getPayerPhone() : "");
+                        efashe.setCustomerAccountName(payment.getUser() != null ? payment.getUser().getFullNames() : null);
+                        efashe.setAmount(payment.getAmount());
+                        efashe.setCurrency("RWF");
+                        efashe.setTrxId(null);
+                        efashe.setMopayTransactionId(payment.getMopayTransactionId());
+                        efashe.setMopayStatus(payment.getStatus() != null ? payment.getStatus().name() : null);
+                        efashe.setEfasheStatus(null);
+                        efashe.setMessage("PAY_CUSTOMER transaction");
+                        efashe.setCreatedAt(payment.getCreatedAt());
+                        efashe.setUpdatedAt(payment.getCreatedAt());
+                        return efashe;
+                    })
+                    .collect(java.util.stream.Collectors.toList());
+                
+                PaginatedResponse<EfasheTransactionResponse> response = new PaginatedResponse<>();
+                response.setContent(efasheTransactions);
+                response.setCurrentPage(paymentResponse.getCurrentPage());
+                response.setPageSize(paymentResponse.getPageSize());
+                response.setTotalElements(paymentResponse.getTotalElements());
+                response.setTotalPages(paymentResponse.getTotalPages());
+                response.setFirst(paymentResponse.isFirst());
+                response.setLast(paymentResponse.isLast());
+                
+                return ResponseEntity.ok(ApiResponse.success("PAY_CUSTOMER transactions retrieved successfully", response));
+            }
+            
             // Parse serviceType parameter - allow "ALL" to show all service types
             EfasheServiceType serviceType = null;
             if (serviceTypeParam != null && !serviceTypeParam.trim().isEmpty()) {
@@ -190,7 +254,7 @@ public class EfasheController {
                         serviceType = EfasheServiceType.valueOf(serviceTypeStr);
                     } catch (IllegalArgumentException e) {
                         return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                                .body(ApiResponse.error("Invalid serviceType: " + serviceTypeParam + ". Valid values are: AIRTIME, RRA, TV, MTN, ELECTRICITY, or ALL"));
+                                .body(ApiResponse.error("Invalid serviceType: " + serviceTypeParam + ". Valid values are: AIRTIME, RRA, TV, MTN, ELECTRICITY, PAY_CUSTOMER (ADMIN only), or ALL"));
                     }
                 }
                 // If "ALL", serviceType remains null, which means no filter will be applied

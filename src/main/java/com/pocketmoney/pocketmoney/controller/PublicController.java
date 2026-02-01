@@ -107,5 +107,27 @@ public class PublicController {
                     .body(ApiResponse.error(e.getMessage()));
         }
     }
+
+    /**
+     * Public transaction status check endpoint - no authentication required
+     * GET /api/public/payments/status/{transactionId}
+     * 
+     * @param transactionId The MoPay transaction ID to check
+     * @return Transaction status information
+     * 
+     * Note: This endpoint does not require authentication. It's designed for public use,
+     * allowing anyone to check the status of a transaction by its ID.
+     */
+    @GetMapping("/payments/status/{transactionId}")
+    public ResponseEntity<ApiResponse<PaymentResponse>> checkPublicTransactionStatus(
+            @PathVariable("transactionId") String transactionId) {
+        try {
+            PaymentResponse response = paymentService.checkPublicTransactionStatus(transactionId);
+            return ResponseEntity.ok(ApiResponse.success("Transaction status retrieved successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
 }
 
