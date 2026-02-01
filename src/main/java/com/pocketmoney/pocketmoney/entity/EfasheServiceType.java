@@ -5,6 +5,8 @@ public enum EfasheServiceType {
     RRA,
     TV,
     MTN,
-    ELECTRICITY
+    ELECTRICITY,
+    GASOLINE,
+    DIESEL
 }
 

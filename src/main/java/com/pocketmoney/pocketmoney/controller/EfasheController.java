@@ -154,7 +154,7 @@ public class EfasheController {
      *   - USER: Can only see their own transactions (automatically filtered by their phone number)
      * 
      * Query parameters:
-     *   - serviceType: Optional filter by service type (AIRTIME, RRA, TV, MTN, ELECTRICITY, or ALL to show all service types)
+     *   - serviceType: Optional filter by service type (AIRTIME, RRA, TV, MTN, ELECTRICITY, GASOLINE, DIESEL, or ALL to show all service types)
      *   - phone: Optional filter by customer phone number (accepts any format, will be normalized)
      *            - For ADMIN/RECEIVER: optional filter
      *            - For USER: ignored, automatically uses their own phone number
@@ -254,7 +254,7 @@ public class EfasheController {
                         serviceType = EfasheServiceType.valueOf(serviceTypeStr);
                     } catch (IllegalArgumentException e) {
                         return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                                .body(ApiResponse.error("Invalid serviceType: " + serviceTypeParam + ". Valid values are: AIRTIME, RRA, TV, MTN, ELECTRICITY, PAY_CUSTOMER (ADMIN only), or ALL"));
+                                .body(ApiResponse.error("Invalid serviceType: " + serviceTypeParam + ". Valid values are: AIRTIME, RRA, TV, MTN, ELECTRICITY, GASOLINE, DIESEL, PAY_CUSTOMER (ADMIN only), or ALL"));
                     }
                 }
                 // If "ALL", serviceType remains null, which means no filter will be applied
