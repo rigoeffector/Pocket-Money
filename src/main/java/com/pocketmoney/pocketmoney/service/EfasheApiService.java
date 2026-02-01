@@ -589,7 +589,7 @@ public class EfasheApiService {
                 url = efasheApiUrl + cleanEndpoint;
             } else {
                 // Other relative paths - append directly
-                url = efasheApiUrl + cleanEndpoint;
+            url = efasheApiUrl + cleanEndpoint;
             }
         } else {
             url = efasheApiUrl + "/" + cleanPollEndpoint;

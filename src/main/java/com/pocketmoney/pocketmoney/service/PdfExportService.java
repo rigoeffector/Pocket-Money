@@ -1,5 +1,6 @@
 package com.pocketmoney.pocketmoney.service;
 
+import com.pocketmoney.pocketmoney.dto.DailyReportProductSummary;
 import com.pocketmoney.pocketmoney.dto.PaymentResponse;
 import com.pocketmoney.pocketmoney.dto.ReceiverTransactionsResponse;
 import com.pocketmoney.pocketmoney.entity.EfasheServiceType;
@@ -984,4 +985,149 @@ public class PdfExportService {
         
         return formatted.toString();
     }
+
+    /**
+     * Generate daily report PDF for GASOLINE and DIESEL transactions
+     */
+    public byte[] generateDailyReportPdf(Receiver merchant, List<DailyReportProductSummary> productSummaries, 
+                                         java.time.LocalDate date) {
+        try (PDDocument document = new PDDocument();
+             ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+            
+            // Create portrait page (A4)
+            PDPage page = new PDPage(PDRectangle.A4);
+            document.addPage(page);
+            PDPageContentStream contentStream = new PDPageContentStream(document, page);
+            
+            try {
+                float yPosition = PDRectangle.A4.getHeight() - MARGIN;
+                float pageWidth = PDRectangle.A4.getWidth();
+                float pageHeight = PDRectangle.A4.getHeight();
+                
+                // Title: "BEPAY-POCHI" + Merchant Name
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA_BOLD, 18);
+                String title = "BEPAY-POCHI - " + merchant.getCompanyName();
+                float titleWidth = PDType1Font.HELVETICA_BOLD.getStringWidth(title) / 1000f * 18;
+                float titleX = (pageWidth - titleWidth) / 2; // Center the title
+                contentStream.newLineAtOffset(titleX, yPosition);
+                contentStream.showText(title);
+                contentStream.endText();
+                yPosition -= 30;
+                
+                // Report period
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA_BOLD, 12);
+                contentStream.newLineAtOffset(MARGIN, yPosition);
+                String periodText = "START: " + date.format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd")) + 
+                                  "  |  END: " + date.format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd"));
+                contentStream.showText(periodText);
+                contentStream.endText();
+                yPosition -= 25;
+                
+                // Summary totals
+                BigDecimal totalAmount = productSummaries.stream()
+                    .map(DailyReportProductSummary::getAmount)
+                    .reduce(BigDecimal.ZERO, BigDecimal::add);
+                
+                yPosition -= 10;
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA_BOLD, 11);
+                contentStream.newLineAtOffset(MARGIN, yPosition);
+                contentStream.showText("TOTAL AMOUNT: " + formatCurrency(totalAmount));
+                contentStream.endText();
+                yPosition -= 25;
+                
+                // Product-Wise Details table header
+                yPosition -= 10;
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA_BOLD, 12);
+                contentStream.newLineAtOffset(MARGIN, yPosition);
+                contentStream.showText("Product-Wise Details");
+                contentStream.endText();
+                yPosition -= 20;
+                
+                // Table headers
+                float col1X = MARGIN; // Product
+                float col2X = col1X + 150; // Transactions
+                float col3X = col2X + 200; // Amount
+                
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA_BOLD, 10);
+                contentStream.newLineAtOffset(col1X, yPosition);
+                contentStream.showText("Product");
+                contentStream.endText();
+                
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA_BOLD, 10);
+                contentStream.newLineAtOffset(col2X, yPosition);
+                contentStream.showText("Transactions");
+                contentStream.endText();
+                
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA_BOLD, 10);
+                contentStream.newLineAtOffset(col3X, yPosition);
+                contentStream.showText("Amount");
+                contentStream.endText();
+                yPosition -= 20;
+                
+                // Draw line under header
+                contentStream.moveTo(MARGIN, yPosition);
+                contentStream.lineTo(pageWidth - MARGIN, yPosition);
+                contentStream.stroke();
+                yPosition -= 10;
+                
+                // Table rows
+                for (DailyReportProductSummary summary : productSummaries) {
+                    if (yPosition < MARGIN + 50) {
+                        // Need new page
+                        contentStream.close();
+                        page = new PDPage(PDRectangle.A4);
+                        document.addPage(page);
+                        contentStream = new PDPageContentStream(document, page);
+                        yPosition = pageHeight - MARGIN;
+                    }
+                    
+                    contentStream.beginText();
+                    contentStream.setFont(PDType1Font.HELVETICA, 10);
+                    contentStream.newLineAtOffset(col1X, yPosition);
+                    contentStream.showText(summary.getProduct());
+                    contentStream.endText();
+                    
+                    contentStream.beginText();
+                    contentStream.setFont(PDType1Font.HELVETICA, 10);
+                    contentStream.newLineAtOffset(col2X, yPosition);
+                    contentStream.showText(String.valueOf(summary.getTransactions()));
+                    contentStream.endText();
+                    
+                    contentStream.beginText();
+                    contentStream.setFont(PDType1Font.HELVETICA, 10);
+                    contentStream.newLineAtOffset(col3X, yPosition);
+                    contentStream.showText(formatCurrency(summary.getAmount()));
+                    contentStream.endText();
+                    yPosition -= TABLE_ROW_HEIGHT;
+                }
+                
+                // End of report marker
+                yPosition -= 20;
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 10);
+                float endMarkerX = (pageWidth - PDType1Font.HELVETICA.getStringWidth("**** END OF PERIODIC REPORT ****") / 1000f * 10) / 2;
+                contentStream.newLineAtOffset(endMarkerX, yPosition);
+                contentStream.showText("**** END OF PERIODIC REPORT ****");
+                contentStream.endText();
+                
+            } finally {
+                contentStream.close();
+            }
+            
+            document.save(baos);
+            return baos.toByteArray();
+            
+        } catch (Exception e) {
+            logger.error("Error generating daily report PDF", e);
+            throw new RuntimeException("Failed to generate daily report PDF: " + e.getMessage(), e);
+        }
+    }
+
 }

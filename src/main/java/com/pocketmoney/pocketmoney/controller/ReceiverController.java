@@ -15,6 +15,7 @@ import com.pocketmoney.pocketmoney.dto.ResetPasswordRequest;
 import com.pocketmoney.pocketmoney.dto.UpdateReceiverRequest;
 import com.pocketmoney.pocketmoney.entity.ReceiverStatus;
 import com.pocketmoney.pocketmoney.service.ReceiverService;
+import com.pocketmoney.pocketmoney.service.ReportService;
 import jakarta.validation.Valid;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.slf4j.Logger;
@@ -24,6 +25,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
@@ -35,9 +37,11 @@ public class ReceiverController {
     private static final Logger logger = LoggerFactory.getLogger(ReceiverController.class);
 
     private final ReceiverService receiverService;
+    private final ReportService reportService;
 
-    public ReceiverController(ReceiverService receiverService) {
+    public ReceiverController(ReceiverService receiverService, ReportService reportService) {
         this.receiverService = receiverService;
+        this.reportService = reportService;
     }
 
     @PostMapping
@@ -384,6 +388,36 @@ public class ReceiverController {
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    /**
+     * Generate daily report PDF for GASOLINE and DIESEL transactions
+     * GET /api/receivers/daily-report
+     * 
+     * Query parameters:
+     *   - date: Date for the report (format: yyyy-MM-dd, defaults to today)
+     *   - receiverId: Optional receiver ID (for ADMIN users, required; for RECEIVER users, uses authenticated merchant)
+     * 
+     * Access Control:
+     *   - ADMIN: Must provide receiverId
+     *   - RECEIVER: Uses authenticated merchant (main merchant if submerchant)
+     */
+    @GetMapping("/daily-report")
+    public ResponseEntity<byte[]> generateDailyReport(
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
+            @RequestParam(required = false) UUID receiverId) {
+        try {
+            byte[] pdfBytes = reportService.generateDailyReportPdf(date, receiverId);
+            
+            return ResponseEntity.ok()
+                    .header("Content-Type", "application/pdf")
+                    .header("Content-Disposition", "attachment; filename=daily-report-" + 
+                            (date != null ? date.toString() : LocalDate.now().toString()) + ".pdf")
+                    .body(pdfBytes);
+        } catch (RuntimeException e) {
+            logger.error("Error generating daily report: ", e);
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).build();
         }
     }
 }
