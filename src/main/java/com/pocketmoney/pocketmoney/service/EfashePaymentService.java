@@ -261,41 +261,47 @@ public class EfashePaymentService {
         // STEP 2: Store transaction with validated=INITIAL (MoPay will be called later via /process endpoint)
         // ===================================================================
         // Amount is now set: either from request or from vendMin (for RRA)
-        // Calculate amounts based on percentages
+        // For RRA: use fixed charge table. For other services: calculate amounts based on percentages
         BigDecimal customerCashbackAmount = BigDecimal.ZERO;
         BigDecimal agentCommissionAmount = BigDecimal.ZERO;
         BigDecimal besoftShareAmount = BigDecimal.ZERO;
         BigDecimal fullAmountPhoneReceives = BigDecimal.ZERO;
         
         if (amount != null) {
-            // Calculate amounts based on percentages and round to whole numbers (MoPay requirement)
-        BigDecimal agentCommissionPercent = settingsResponse.getAgentCommissionPercentage();
-        BigDecimal customerCashbackPercent = settingsResponse.getCustomerCashbackPercentage();
-        BigDecimal besoftSharePercent = settingsResponse.getBesoftSharePercentage();
+            if (request.getServiceType() == EfasheServiceType.RRA) {
+                // RRA: Use fixed charge based on amount (customer pays amount + charge, charge goes to besoft)
+                BigDecimal rraCharge = getRraCharge(amount);
+                customerCashbackAmount = BigDecimal.ZERO;
+                agentCommissionAmount = BigDecimal.ZERO;
+                besoftShareAmount = rraCharge;
+                fullAmountPhoneReceives = amount; // Full amount phone pays RRA
+                logger.info("RRA amount breakdown - RRA Amount: {}, Charge: {}, Total to debit: {}",
+                    amount, rraCharge, amount.add(rraCharge));
+            } else {
+                // Other services: Calculate amounts based on percentages
+                BigDecimal agentCommissionPercent = settingsResponse.getAgentCommissionPercentage();
+                BigDecimal customerCashbackPercent = settingsResponse.getCustomerCashbackPercentage();
+                BigDecimal besoftSharePercent = settingsResponse.getBesoftSharePercentage();
 
-            customerCashbackAmount = amount.multiply(customerCashbackPercent)
-            .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP)
-            .setScale(0, RoundingMode.HALF_UP); // Round to whole number
-            agentCommissionAmount = amount.multiply(agentCommissionPercent)
-            .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP)
-            .setScale(0, RoundingMode.HALF_UP); // Round to whole number
-            besoftShareAmount = amount.multiply(besoftSharePercent)
-            .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP)
-            .setScale(0, RoundingMode.HALF_UP); // Round to whole number
+                customerCashbackAmount = amount.multiply(customerCashbackPercent)
+                    .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP)
+                    .setScale(0, RoundingMode.HALF_UP);
+                agentCommissionAmount = amount.multiply(agentCommissionPercent)
+                    .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP)
+                    .setScale(0, RoundingMode.HALF_UP);
+                besoftShareAmount = amount.multiply(besoftSharePercent)
+                    .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP)
+                    .setScale(0, RoundingMode.HALF_UP);
+                fullAmountPhoneReceives = amount.subtract(customerCashbackAmount)
+                    .subtract(besoftShareAmount)
+                    .setScale(0, RoundingMode.HALF_UP);
 
-        // Full amount phone receives: amount - (customerCashback + besoftShare)
-        // Customer gets cashback back and Bepay phone gets their share
-        // Agent Commission is included in the full amount phone's portion
-            fullAmountPhoneReceives = amount.subtract(customerCashbackAmount)
-            .subtract(besoftShareAmount)
-            .setScale(0, RoundingMode.HALF_UP); // Round to whole number
+                logger.info("Amount breakdown - Total: {}, Customer Cashback: {}, Bepay Share: {}, Agent Commission: {}, Full Amount Phone: {}",
+                    amount, customerCashbackAmount, besoftShareAmount, agentCommissionAmount, fullAmountPhoneReceives);
 
-        logger.info("Amount breakdown - Total: {}, Customer Cashback: {}, Bepay Share: {}, Agent Commission: {}, Full Amount Phone (remaining after cashback and bepay): {}",
-            amount, customerCashbackAmount, besoftShareAmount, agentCommissionAmount, fullAmountPhoneReceives);
-
-        // Validate that fullAmountPhoneReceives is not negative
-        if (fullAmountPhoneReceives.compareTo(BigDecimal.ZERO) < 0) {
-            throw new RuntimeException("Invalid percentage configuration: Total percentages exceed 100%. Full amount phone would receive negative amount: " + fullAmountPhoneReceives);
+                if (fullAmountPhoneReceives.compareTo(BigDecimal.ZERO) < 0) {
+                    throw new RuntimeException("Invalid percentage configuration: Total percentages exceed 100%. Full amount phone would receive negative amount: " + fullAmountPhoneReceives);
+                }
             }
         } else {
             logger.info("RRA service - Amount is null, skipping amount calculations");
@@ -628,9 +634,20 @@ public class EfashePaymentService {
         
         String normalizedCustomerPhone = transaction.getCustomerPhone();
 
+        // For RRA: total to debit = amount (RRA payment) + charge (besoftShareAmount)
+        // For other services: total to debit = amount
+        BigDecimal totalMoPayAmount = amount;
+        if (transaction.getServiceType() == EfasheServiceType.RRA 
+                && transaction.getBesoftShareAmount() != null 
+                && transaction.getBesoftShareAmount().compareTo(BigDecimal.ZERO) > 0) {
+            totalMoPayAmount = amount.add(transaction.getBesoftShareAmount());
+            logger.info("RRA payment - Total to debit: {} (RRA amount: {} + charge: {})", 
+                totalMoPayAmount, amount, transaction.getBesoftShareAmount());
+        }
+
         // Build MoPay request
         MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
-        moPayRequest.setAmount(amount);
+        moPayRequest.setAmount(totalMoPayAmount);
         moPayRequest.setCurrency(transaction.getCurrency());
         moPayRequest.setPhone(normalizedCustomerPhone);
         moPayRequest.setPayment_mode(transaction.getPaymentMode());
@@ -641,11 +658,17 @@ public class EfashePaymentService {
         List<MoPayInitiateRequest.Transfer> transfers = new ArrayList<>();
 
         // Transfer 1: Full Amount Phone Number
+        // For RRA: fullAmountPhone receives amount (to pay RRA). For others: amount - cashback - besoftShare
         MoPayInitiateRequest.Transfer transfer1 = new MoPayInitiateRequest.Transfer();
-        BigDecimal fullAmountPhoneReceives = amount.subtract(
-            transaction.getCustomerCashbackAmount() != null ? transaction.getCustomerCashbackAmount() : BigDecimal.ZERO)
-            .subtract(transaction.getBesoftShareAmount() != null ? transaction.getBesoftShareAmount() : BigDecimal.ZERO)
-            .setScale(0, RoundingMode.HALF_UP);
+        BigDecimal fullAmountPhoneReceives;
+        if (transaction.getServiceType() == EfasheServiceType.RRA) {
+            fullAmountPhoneReceives = amount; // Full amount goes to pay RRA
+        } else {
+            fullAmountPhoneReceives = amount.subtract(
+                transaction.getCustomerCashbackAmount() != null ? transaction.getCustomerCashbackAmount() : BigDecimal.ZERO)
+                .subtract(transaction.getBesoftShareAmount() != null ? transaction.getBesoftShareAmount() : BigDecimal.ZERO)
+                .setScale(0, RoundingMode.HALF_UP);
+        }
         transfer1.setAmount(fullAmountPhoneReceives);
         String normalizedFullAmountPhone = normalizePhoneTo12Digits(transaction.getFullAmountPhone());
         transfer1.setPhone(Long.parseLong(normalizedFullAmountPhone));
@@ -756,6 +779,16 @@ public class EfashePaymentService {
         
         String normalizedCustomerPhone = transaction.getCustomerPhone();
 
+        // For RRA: total to debit = amount (RRA payment) + charge (besoftShareAmount)
+        BigDecimal totalBizaoAmount = amount;
+        if (transaction.getServiceType() == EfasheServiceType.RRA 
+                && transaction.getBesoftShareAmount() != null 
+                && transaction.getBesoftShareAmount().compareTo(BigDecimal.ZERO) > 0) {
+            totalBizaoAmount = amount.add(transaction.getBesoftShareAmount());
+            logger.info("RRA BizaoPayment - Total to debit: {} (RRA amount: {} + charge: {})", 
+                totalBizaoAmount, amount, transaction.getBesoftShareAmount());
+        }
+
         // Build BizaoPayment request
         BizaoPaymentInitiateRequest bizaoRequest = new BizaoPaymentInitiateRequest();
         bizaoRequest.setTransactionId(transactionId); // Use the transaction ID
@@ -763,7 +796,7 @@ public class EfashePaymentService {
         bizaoRequest.setTitle("EFASHE " + transaction.getServiceType() + " Payment");
         bizaoRequest.setDetails("Payment for " + transaction.getServiceType() + " service");
         bizaoRequest.setPayment_type("momo");
-        bizaoRequest.setAmount(amount);
+        bizaoRequest.setAmount(totalBizaoAmount);
         bizaoRequest.setCurrency(transaction.getCurrency() != null ? transaction.getCurrency() : "RWF");
         bizaoRequest.setMessage(transaction.getMessage() != null ? transaction.getMessage() : 
             "EFASHE " + transaction.getServiceType() + " payment");
@@ -772,11 +805,17 @@ public class EfashePaymentService {
         List<BizaoPaymentInitiateRequest.Transfer> transfers = new ArrayList<>();
 
         // Transfer 1: Full Amount Phone Number
+        // For RRA: fullAmountPhone receives amount (to pay RRA). For others: amount - cashback - besoftShare
         BizaoPaymentInitiateRequest.Transfer transfer1 = new BizaoPaymentInitiateRequest.Transfer();
-        BigDecimal fullAmountPhoneReceives = amount.subtract(
-            transaction.getCustomerCashbackAmount() != null ? transaction.getCustomerCashbackAmount() : BigDecimal.ZERO)
-            .subtract(transaction.getBesoftShareAmount() != null ? transaction.getBesoftShareAmount() : BigDecimal.ZERO)
-            .setScale(0, RoundingMode.HALF_UP);
+        BigDecimal fullAmountPhoneReceives;
+        if (transaction.getServiceType() == EfasheServiceType.RRA) {
+            fullAmountPhoneReceives = amount; // Full amount goes to pay RRA
+        } else {
+            fullAmountPhoneReceives = amount.subtract(
+                transaction.getCustomerCashbackAmount() != null ? transaction.getCustomerCashbackAmount() : BigDecimal.ZERO)
+                .subtract(transaction.getBesoftShareAmount() != null ? transaction.getBesoftShareAmount() : BigDecimal.ZERO)
+                .setScale(0, RoundingMode.HALF_UP);
+        }
         transfer1.setTransactionId(transactionId);
         String normalizedFullAmountPhone = normalizePhoneTo12Digits(transaction.getFullAmountPhone());
         transfer1.setAccount_no(normalizedFullAmountPhone);
@@ -2479,6 +2518,29 @@ public class EfashePaymentService {
         }
         
         throw new RuntimeException("Invalid phone number format. Expected 9, 10, or 12 digits. Got: " + phone + " (normalized: " + digitsOnly + ")");
+    }
+
+    /**
+     * Calculate RRA charge based on payment amount (FRW).
+     * Pricing table:
+     * 1-1,000: 160 | 1,001-10,000: 300 | 10,001-40,000: 500 | 40,001-75,000: 1,000
+     * 75,001-150,000: 1,500 | 150,001-500,000: 2,000 | 500,001-1,000,000: 3,000
+     * 1,000,001-5,000,000: 5,000 | 5,000,001+: 10,000
+     */
+    private BigDecimal getRraCharge(BigDecimal amount) {
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+            return BigDecimal.ZERO;
+        }
+        long amountLong = amount.longValue();
+        if (amountLong <= 1000) return BigDecimal.valueOf(160);
+        if (amountLong <= 10000) return BigDecimal.valueOf(300);
+        if (amountLong <= 40000) return BigDecimal.valueOf(500);
+        if (amountLong <= 75000) return BigDecimal.valueOf(1000);
+        if (amountLong <= 150000) return BigDecimal.valueOf(1500);
+        if (amountLong <= 500000) return BigDecimal.valueOf(2000);
+        if (amountLong <= 1000000) return BigDecimal.valueOf(3000);
+        if (amountLong <= 5000000) return BigDecimal.valueOf(5000);
+        return BigDecimal.valueOf(10000);
     }
 
     /**
