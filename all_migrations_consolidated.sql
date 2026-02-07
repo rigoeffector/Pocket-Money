@@ -14,6 +14,88 @@
 BEGIN;
 
 -- ===================================================================
+-- 0. Base schema (for fresh database - no-op if tables already exist)
+-- SAFE FOR EXISTING DATA: CREATE TABLE IF NOT EXISTS only runs when the
+-- table is missing. If you already have receivers, users, transactions,
+-- etc., this block does nothing and your client data is untouched.
+-- ===================================================================
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    full_names VARCHAR(255) NOT NULL,
+    phone_number VARCHAR(50) NOT NULL UNIQUE,
+    email VARCHAR(255),
+    is_assigned_nfc_card BOOLEAN NOT NULL DEFAULT false,
+    nfc_card_id VARCHAR(255) UNIQUE,
+    amount_on_card NUMERIC(19, 2) NOT NULL DEFAULT 0,
+    amount_remaining NUMERIC(19, 2) NOT NULL DEFAULT 0,
+    pin VARCHAR(255) NOT NULL,
+    otp VARCHAR(50),
+    otp_expires_at TIMESTAMP,
+    status VARCHAR(50) NOT NULL DEFAULT 'ACTIVE',
+    last_transaction_date TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS receivers (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_name VARCHAR(255) NOT NULL,
+    manager_name VARCHAR(255) NOT NULL,
+    username VARCHAR(255) NOT NULL UNIQUE,
+    password VARCHAR(255) NOT NULL,
+    receiver_phone VARCHAR(50) NOT NULL UNIQUE,
+    momo_account_phone VARCHAR(20),
+    account_number VARCHAR(255),
+    status VARCHAR(50) NOT NULL DEFAULT 'NOT_ACTIVE',
+    email VARCHAR(255),
+    address VARCHAR(255),
+    description VARCHAR(255),
+    wallet_balance NUMERIC(19, 2) NOT NULL DEFAULT 0,
+    total_received NUMERIC(19, 2) NOT NULL DEFAULT 0,
+    assigned_balance NUMERIC(19, 2) NOT NULL DEFAULT 0,
+    remaining_balance NUMERIC(19, 2) NOT NULL DEFAULT 0,
+    discount_percentage NUMERIC(5, 2) DEFAULT 0,
+    user_bonus_percentage NUMERIC(5, 2) DEFAULT 0,
+    is_flexible BOOLEAN NOT NULL DEFAULT false,
+    parent_receiver_id UUID,
+    last_transaction_date TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS payment_categories (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(255) NOT NULL UNIQUE,
+    description VARCHAR(255),
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id),
+    payment_category_id UUID REFERENCES payment_categories(id),
+    receiver_id UUID REFERENCES receivers(id),
+    transaction_type VARCHAR(50) NOT NULL,
+    amount NUMERIC(19, 2) NOT NULL,
+    mopay_transaction_id VARCHAR(500),
+    status VARCHAR(50) NOT NULL DEFAULT 'PENDING',
+    phone_number VARCHAR(50),
+    message VARCHAR(1000),
+    balance_before NUMERIC(19, 2),
+    balance_after NUMERIC(19, 2),
+    discount_amount NUMERIC(19, 2),
+    user_bonus_amount NUMERIC(19, 2),
+    admin_income_amount NUMERIC(19, 2),
+    receiver_balance_before NUMERIC(19, 2),
+    receiver_balance_after NUMERIC(19, 2),
+    top_up_type VARCHAR(20),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ===================================================================
 -- 1. Add balance and discount columns to receivers table
 -- ===================================================================
 ALTER TABLE receivers 

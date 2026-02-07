@@ -425,6 +425,103 @@ public class ReceiverService {
             receiver.setUserBonusPercentage(request.getUserBonusPercentage());
         }
 
+        // Handle commission: either commissionSettings array (frontend shape) or flat commissionPercentage + commissionPhoneNumber.
+        if (request.getCommissionSettings() != null) {
+            // Replace receiver's commission settings with the list (same shape as response commissionSettings).
+            BigDecimal discountPercentage = request.getDiscountPercentage() != null
+                ? request.getDiscountPercentage()
+                : (receiver.getDiscountPercentage() != null ? receiver.getDiscountPercentage() : BigDecimal.ZERO);
+            BigDecimal userBonusPercentage = request.getUserBonusPercentage() != null
+                ? request.getUserBonusPercentage()
+                : (receiver.getUserBonusPercentage() != null ? receiver.getUserBonusPercentage() : BigDecimal.ZERO);
+            BigDecimal totalCommission = BigDecimal.ZERO;
+            for (com.pocketmoney.pocketmoney.dto.CommissionInfo item : request.getCommissionSettings()) {
+                if (item == null || item.getCommissionPercentage() == null) continue;
+                if (item.getCommissionPercentage().compareTo(BigDecimal.ZERO) < 0 ||
+                    item.getCommissionPercentage().compareTo(new BigDecimal("100")) > 0) {
+                    throw new RuntimeException("Each commission percentage must be between 0 and 100");
+                }
+                String phone = item.getPhoneNumber() != null ? item.getPhoneNumber().trim() : "";
+                if (phone.isEmpty()) {
+                    throw new RuntimeException("Each commission setting must have a phone number");
+                }
+                totalCommission = totalCommission.add(item.getCommissionPercentage());
+            }
+            if (discountPercentage.compareTo(BigDecimal.ZERO) > 0
+                && userBonusPercentage.add(totalCommission).compareTo(discountPercentage) > 0) {
+                throw new RuntimeException(String.format(
+                    "The sum of user bonus (%.2f%%) and total commission (%.2f%%) cannot exceed discount (%.2f%%).",
+                    userBonusPercentage, totalCommission, discountPercentage));
+            }
+            List<PaymentCommissionSetting> existing = paymentCommissionSettingRepository.findByReceiverId(receiver.getId());
+            java.util.Set<String> newPhones = new java.util.HashSet<>();
+            for (com.pocketmoney.pocketmoney.dto.CommissionInfo item : request.getCommissionSettings()) {
+                if (item == null || item.getPhoneNumber() == null || item.getPhoneNumber().trim().isEmpty() || item.getCommissionPercentage() == null) continue;
+                String normalizedPhone = normalizePhoneTo12Digits(item.getPhoneNumber());
+                newPhones.add(normalizedPhone);
+                if (paymentCommissionSettingRepository.existsByReceiverIdAndPhoneNumber(receiver.getId(), normalizedPhone)) {
+                    paymentCommissionSettingRepository.findByReceiverIdAndPhoneNumber(receiver.getId(), normalizedPhone)
+                        .ifPresent(s -> {
+                            s.setCommissionPercentage(item.getCommissionPercentage());
+                            s.setIsActive(true);
+                            paymentCommissionSettingRepository.save(s);
+                        });
+                } else {
+                    PaymentCommissionSetting s = new PaymentCommissionSetting();
+                    s.setReceiver(receiver);
+                    s.setPhoneNumber(normalizedPhone);
+                    s.setCommissionPercentage(item.getCommissionPercentage());
+                    s.setIsActive(true);
+                    s.setDescription("Created via receiver update");
+                    paymentCommissionSettingRepository.save(s);
+                }
+            }
+            for (PaymentCommissionSetting s : existing) {
+                if (!newPhones.contains(s.getPhoneNumber())) {
+                    s.setIsActive(false);
+                    paymentCommissionSettingRepository.save(s);
+                }
+            }
+        } else if (request.getCommissionPercentage() != null || (request.getCommissionPhoneNumber() != null && !request.getCommissionPhoneNumber().trim().isEmpty())) {
+            if (request.getCommissionPercentage() == null || request.getCommissionPhoneNumber() == null || request.getCommissionPhoneNumber().trim().isEmpty()) {
+                throw new RuntimeException("Both commission percentage and commission phone number must be provided together, or omit both");
+            }
+            if (request.getCommissionPercentage().compareTo(BigDecimal.ZERO) < 0 ||
+                request.getCommissionPercentage().compareTo(new BigDecimal("100")) > 0) {
+                throw new RuntimeException("Commission percentage must be between 0 and 100");
+            }
+            BigDecimal discountPercentage = request.getDiscountPercentage() != null
+                ? request.getDiscountPercentage()
+                : (receiver.getDiscountPercentage() != null ? receiver.getDiscountPercentage() : BigDecimal.ZERO);
+            BigDecimal userBonusPercentage = request.getUserBonusPercentage() != null
+                ? request.getUserBonusPercentage()
+                : (receiver.getUserBonusPercentage() != null ? receiver.getUserBonusPercentage() : BigDecimal.ZERO);
+            BigDecimal totalSplitPercentage = userBonusPercentage.add(request.getCommissionPercentage());
+            if (totalSplitPercentage.compareTo(discountPercentage) > 0) {
+                throw new RuntimeException(String.format(
+                    "The sum of user bonus percentage (%.2f%%) and commission percentage (%.2f%%) cannot exceed discount percentage (%.2f%%). " +
+                    "At least some percentage must remain for admin. Current total: %.2f%%",
+                    userBonusPercentage, request.getCommissionPercentage(), discountPercentage, totalSplitPercentage));
+            }
+            String normalizedCommissionPhone = normalizePhoneTo12Digits(request.getCommissionPhoneNumber());
+            if (paymentCommissionSettingRepository.existsByReceiverIdAndPhoneNumber(receiver.getId(), normalizedCommissionPhone)) {
+                paymentCommissionSettingRepository.findByReceiverIdAndPhoneNumber(receiver.getId(), normalizedCommissionPhone)
+                    .ifPresent(existingSetting -> {
+                        existingSetting.setCommissionPercentage(request.getCommissionPercentage());
+                        existingSetting.setIsActive(true);
+                        paymentCommissionSettingRepository.save(existingSetting);
+                    });
+            } else {
+                PaymentCommissionSetting commissionSetting = new PaymentCommissionSetting();
+                commissionSetting.setReceiver(receiver);
+                commissionSetting.setPhoneNumber(normalizedCommissionPhone);
+                commissionSetting.setCommissionPercentage(request.getCommissionPercentage());
+                commissionSetting.setIsActive(true);
+                commissionSetting.setDescription("Created via receiver update");
+                paymentCommissionSettingRepository.save(commissionSetting);
+            }
+        }
+
         Receiver updatedReceiver = receiverRepository.save(receiver);
         return mapToResponse(updatedReceiver);
     }
