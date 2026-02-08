@@ -1,0 +1,81 @@
+# version: '3'
+
+services:
+  postgres:
+    image: postgres:17.0
+    ports:
+      - "5433:5432"
+    restart: always
+    deploy:
+      mode: replicated
+      replicas: 1
+    environment:
+      POSTGRES_PASSWORD: Br@l!rwa*
+    volumes:
+      - ./db-data/postgresql/:/var/lib/postgresql/data
+    networks:
+      - local-net
+
+  redis:
+    image: redis:alpine3.20
+    restart: always
+    deploy:
+      mode: replicated
+      replicas: 1
+    networks:
+      - local-net
+
+  web-service:
+    build:
+      context: ./services/web-service
+      dockerfile: app.dockerfile
+    restart: always
+    deploy:
+      mode: replicated
+      replicas: 1
+    environment:
+      - LOG_LEVEL=debug
+      - WEB_URL=http://localhost:3000
+      - BACKEND_URL=http://localhost:9080
+    networks:
+      - local-net
+
+  ussd-service:
+    build:
+      context: ./services/ussd-service
+      dockerfile: app.dockerfile
+    ports:
+      - "9000:9000"
+    restart: always
+    deploy:
+      mode: replicated
+      replicas: 1
+    environment:
+      - LOG_LEVEL=debug
+      - WEB_URL=http://localhost:3000
+      - BACKEND_URL=http://localhost:9080
+    networks:
+      - local-net
+
+  logger-service:
+    build:
+      context: ./services/logger-service
+      dockerfile: app.dockerfile
+    restart: always
+    deploy:
+      mode: replicated
+      replicas: 1
+    networks:
+      - local-net
+
+networks:
+  local-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.21.0.0/16
+          gateway: 10.21.0.254
+          ip_range: 10.21.0.0/24
+          # aux_addresses:
+          #   etcd_server: 10.21.0.253
+
