@@ -1,0 +1,16 @@
+{
+    "version": 1,
+    "details": "Bralirwa lottery ussd",
+    "allowed_source_hosts": "127.0.0.1",
+    "use_translation_keys": true,
+    "steps": [
+        {
+            "id": "welcome",
+            "content": "Gahunda ya tombola ya CocaCola lottery campain yarangiye, mukomeze muryoherwe ni ibinyobwa bya BRALIRWA.\nThe Coca-Cola lottery campaign program has ended; continue to enjoy BRALIRWA beverages.",
+            "inputs": [],
+            "allow_back": false,
+            "validation": "",
+            "is_end_session": true
+        }
+    ]
+}

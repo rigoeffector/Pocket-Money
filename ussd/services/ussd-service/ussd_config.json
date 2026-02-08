@@ -1,0 +1,529 @@
+{
+    "version": 1,
+    "details": "Pocket Money USSD",
+    "allowed_source_hosts": "127.0.0.1",
+    "use_translation_keys": true,
+    "steps": [
+        {
+            "id": "home",
+            "content": "home_main_menu",
+            "inputs": [
+                {
+                    "input": 1,
+                    "value": null,
+                    "action": "",
+                    "next_step": "electricity_meter_select"
+                },
+                {
+                    "input": 2,
+                    "value": null,
+                    "action": "",
+                    "next_step": "airtime_menu"
+                },
+                {
+                    "input": 3,
+                    "value": null,
+                    "action": "",
+                    "next_step": "tv_card_select"
+                },
+                {
+                    "input": 4,
+                    "value": null,
+                    "action": "",
+                    "next_step": "merchant_code"
+                },
+                {
+                    "input": 5,
+                    "value": null,
+                    "action": "",
+                    "next_step": "rra_document"
+                },
+                {
+                    "input": 6,
+                    "value": null,
+                    "action": "",
+                    "next_step": "change_lang"
+                }
+            ],
+            "allow_back": false,
+            "validation": "",
+            "is_end_session": false
+        },
+        {
+            "id": "change_lang",
+            "content": "change_lang",
+            "inputs": [
+                {
+                    "input": 0,
+                    "value": null,
+                    "action": "",
+                    "next_step": "home"
+                },
+                {
+                    "input": 1,
+                    "value": "en",
+                    "action": "savePreferredLang",
+                    "next_step": "action_ack"
+                },
+                {
+                    "input": 2,
+                    "value": "rw",
+                    "action": "savePreferredLang",
+                    "next_step": "action_ack"
+                }
+            ],
+            "allow_back": true,
+            "validation": "",
+            "is_end_session": false
+        },
+        {
+            "id": "action_ack",
+            "content": "action_done",
+            "inputs": [
+                {
+                    "input": 1,
+                    "value": null,
+                    "action": "",
+                    "next_step": "home"
+                },
+                {
+                    "input": 2,
+                    "value": null,
+                    "action": "end_session",
+                    "next_step": ""
+                }
+            ],
+            "allow_back": true,
+            "validation": "action_completed",
+            "is_end_session": false
+        },
+        {
+            "id": "electricity_meter_select",
+            "content": "electricity_meter_prompt:fn",
+            "content_type": "dynamic",
+            "inputs": [
+                {
+                    "input": 0,
+                    "value": null,
+                    "action": "",
+                    "next_step": "home"
+                },
+                {
+                    "input": "",
+                    "value": null,
+                    "action": "saveElectricityMeter",
+                    "next_step": "electricity_owner_menu"
+                }
+            ],
+            "allow_back": true,
+            "validation": "",
+            "is_end_session": false
+        },
+        {
+            "id": "electricity_owner_menu",
+            "content": "electricity_owner_menu:fn",
+            "content_type": "dynamic",
+            "inputs": [
+                {
+                    "input": 0,
+                    "value": null,
+                    "action": "",
+                    "next_step": "home"
+                },
+                {
+                    "input": 1,
+                    "value": null,
+                    "action": "",
+                    "next_step": "electricity_amount"
+                },
+                {
+                    "input": 2,
+                    "value": null,
+                    "action": "",
+                    "next_step": "electricity_last_purchases"
+                }
+            ],
+            "allow_back": true,
+            "validation": "",
+            "is_end_session": false
+        },
+        {
+            "id": "electricity_last_purchases",
+            "content": "electricity_last_purchases:fn",
+            "content_type": "dynamic",
+            "inputs": [
+                {
+                    "input": 0,
+                    "value": null,
+                    "action": "",
+                    "next_step": "electricity_owner_menu"
+                }
+            ],
+            "allow_back": true,
+            "validation": "",
+            "is_end_session": false
+        },
+        {
+            "id": "electricity_amount",
+            "content": "enter_amount",
+            "inputs": [
+                {
+                    "input": 0,
+                    "value": null,
+                    "action": "",
+                    "next_step": "electricity_owner_menu"
+                },
+                {
+                    "input": "",
+                    "value": null,
+                    "action": "saveElectricityAmount",
+                    "next_step": "electricity_confirm"
+                }
+            ],
+            "allow_back": true,
+            "validation": "",
+            "is_end_session": false
+        },
+        {
+            "id": "electricity_confirm",
+            "content": "confirm_electricity:fn",
+            "content_type": "dynamic",
+            "inputs": [
+                {
+                    "input": 1,
+                    "value": null,
+                    "action": "submitElectricityPayment",
+                    "next_step": "action_ack"
+                },
+                {
+                    "input": 2,
+                    "value": null,
+                    "action": "",
+                    "next_step": "home"
+                }
+            ],
+            "allow_back": true,
+            "validation": "",
+            "is_end_session": false
+        },
+        {
+            "id": "airtime_menu",
+            "content": "airtime_menu",
+            "inputs": [
+                {
+                    "input": 0,
+                    "value": null,
+                    "action": "",
+                    "next_step": "home"
+                },
+                {
+                    "input": 1,
+                    "value": null,
+                    "action": "setAirtimeSelfPhone",
+                    "next_step": "airtime_amount"
+                },
+                {
+                    "input": 2,
+                    "value": null,
+                    "action": "",
+                    "next_step": "airtime_phone"
+                }
+            ],
+            "allow_back": true,
+            "validation": "",
+            "is_end_session": false
+        },
+        {
+            "id": "airtime_phone",
+            "content": "enter_airtime_phone",
+            "inputs": [
+                {
+                    "input": 0,
+                    "value": null,
+                    "action": "",
+                    "next_step": "airtime_menu"
+                },
+                {
+                    "input": "",
+                    "value": null,
+                    "action": "saveAirtimePhone",
+                    "next_step": "airtime_amount"
+                }
+            ],
+            "allow_back": true,
+            "validation": "",
+            "is_end_session": false
+        },
+        {
+            "id": "airtime_amount",
+            "content": "enter_amount",
+            "inputs": [
+                {
+                    "input": 0,
+                    "value": null,
+                    "action": "",
+                    "next_step": "airtime_menu"
+                },
+                {
+                    "input": "",
+                    "value": null,
+                    "action": "saveAirtimeAmount",
+                    "next_step": "airtime_confirm"
+                }
+            ],
+            "allow_back": true,
+            "validation": "",
+            "is_end_session": false
+        },
+        {
+            "id": "airtime_confirm",
+            "content": "confirm_airtime:fn",
+            "content_type": "dynamic",
+            "inputs": [
+                {
+                    "input": 1,
+                    "value": null,
+                    "action": "submitAirtimePayment",
+                    "next_step": "action_ack"
+                },
+                {
+                    "input": 2,
+                    "value": null,
+                    "action": "",
+                    "next_step": "home"
+                }
+            ],
+            "allow_back": true,
+            "validation": "",
+            "is_end_session": false
+        },
+        {
+            "id": "tv_card_select",
+            "content": "tv_card_prompt:fn",
+            "content_type": "dynamic",
+            "inputs": [
+                {
+                    "input": 0,
+                    "value": null,
+                    "action": "",
+                    "next_step": "home"
+                },
+                {
+                    "input": "",
+                    "value": null,
+                    "action": "saveTvCard",
+                    "next_step": "tv_account_menu"
+                }
+            ],
+            "allow_back": true,
+            "validation": "",
+            "is_end_session": false
+        },
+        {
+            "id": "tv_account_menu",
+            "content": "tv_account_menu:fn",
+            "content_type": "dynamic",
+            "inputs": [
+                {
+                    "input": 0,
+                    "value": null,
+                    "action": "",
+                    "next_step": "home"
+                },
+                {
+                    "input": 1,
+                    "value": "DAILY",
+                    "action": "saveTvPackage",
+                    "next_step": "tv_amount"
+                },
+                {
+                    "input": 2,
+                    "value": "WEEKLY",
+                    "action": "saveTvPackage",
+                    "next_step": "tv_amount"
+                },
+                {
+                    "input": 3,
+                    "value": "MONTHLY",
+                    "action": "saveTvPackage",
+                    "next_step": "tv_amount"
+                }
+            ],
+            "allow_back": true,
+            "validation": "",
+            "is_end_session": false
+        },
+        {
+            "id": "tv_amount",
+            "content": "enter_amount",
+            "inputs": [
+                {
+                    "input": 0,
+                    "value": null,
+                    "action": "",
+                    "next_step": "tv_account_menu"
+                },
+                {
+                    "input": "",
+                    "value": null,
+                    "action": "saveTvAmount",
+                    "next_step": "tv_confirm"
+                }
+            ],
+            "allow_back": true,
+            "validation": "",
+            "is_end_session": false
+        },
+        {
+            "id": "tv_confirm",
+            "content": "confirm_tv:fn",
+            "content_type": "dynamic",
+            "inputs": [
+                {
+                    "input": 1,
+                    "value": null,
+                    "action": "submitTvPayment",
+                    "next_step": "action_ack"
+                },
+                {
+                    "input": 2,
+                    "value": null,
+                    "action": "",
+                    "next_step": "home"
+                }
+            ],
+            "allow_back": true,
+            "validation": "",
+            "is_end_session": false
+        },
+        {
+            "id": "merchant_code",
+            "content": "enter_merchant_code",
+            "inputs": [
+                {
+                    "input": 0,
+                    "value": null,
+                    "action": "",
+                    "next_step": "home"
+                },
+                {
+                    "input": "",
+                    "value": null,
+                    "action": "saveMerchantCode",
+                    "next_step": "merchant_amount"
+                }
+            ],
+            "allow_back": true,
+            "validation": "",
+            "is_end_session": false
+        },
+        {
+            "id": "merchant_amount",
+            "content": "merchant_amount_prompt:fn",
+            "content_type": "dynamic",
+            "inputs": [
+                {
+                    "input": 0,
+                    "value": null,
+                    "action": "",
+                    "next_step": "merchant_code"
+                },
+                {
+                    "input": "",
+                    "value": null,
+                    "action": "saveMerchantAmount",
+                    "next_step": "merchant_confirm"
+                }
+            ],
+            "allow_back": true,
+            "validation": "",
+            "is_end_session": false
+        },
+        {
+            "id": "merchant_confirm",
+            "content": "confirm_merchant:fn",
+            "content_type": "dynamic",
+            "inputs": [
+                {
+                    "input": 1,
+                    "value": null,
+                    "action": "submitMerchantPayment",
+                    "next_step": "action_ack"
+                },
+                {
+                    "input": 2,
+                    "value": null,
+                    "action": "",
+                    "next_step": "home"
+                }
+            ],
+            "allow_back": true,
+            "validation": "",
+            "is_end_session": false
+        },
+        {
+            "id": "rra_document",
+            "content": "enter_rra_document",
+            "inputs": [
+                {
+                    "input": 0,
+                    "value": null,
+                    "action": "",
+                    "next_step": "home"
+                },
+                {
+                    "input": "",
+                    "value": null,
+                    "action": "saveRraDocument",
+                    "next_step": "rra_amount"
+                }
+            ],
+            "allow_back": true,
+            "validation": "",
+            "is_end_session": false
+        },
+        {
+            "id": "rra_amount",
+            "content": "enter_amount",
+            "inputs": [
+                {
+                    "input": 0,
+                    "value": null,
+                    "action": "",
+                    "next_step": "rra_document"
+                },
+                {
+                    "input": "",
+                    "value": null,
+                    "action": "saveRraAmount",
+                    "next_step": "rra_confirm"
+                }
+            ],
+            "allow_back": true,
+            "validation": "",
+            "is_end_session": false
+        },
+        {
+            "id": "rra_confirm",
+            "content": "confirm_rra:fn",
+            "content_type": "dynamic",
+            "inputs": [
+                {
+                    "input": 1,
+                    "value": null,
+                    "action": "submitRraPayment",
+                    "next_step": "action_ack"
+                },
+                {
+                    "input": 2,
+                    "value": null,
+                    "action": "",
+                    "next_step": "home"
+                }
+            ],
+            "allow_back": true,
+            "validation": "",
+            "is_end_session": false
+        }
+    ]
+}
