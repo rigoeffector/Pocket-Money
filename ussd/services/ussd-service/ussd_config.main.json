@@ -376,7 +376,7 @@
                     "input": "",
                     "value": null,
                     "action": "saveTvPackage",
-                    "next_step": "tv_amount"
+                    "next_step": "tv_period"
                 }
             ],
             "allow_back": true,
@@ -384,8 +384,8 @@
             "is_end_session": false
         },
         {
-            "id": "tv_amount",
-            "content": "tv_amount_prompt:fn",
+            "id": "tv_period",
+            "content": "tv_period_prompt:fn",
             "content_type": "dynamic",
             "inputs": [
                 {
@@ -397,7 +397,7 @@
                 {
                     "input": "",
                     "value": null,
-                    "action": "saveTvAmount",
+                    "action": "saveTvPeriod",
                     "next_step": "tv_confirm"
                 }
             ],
