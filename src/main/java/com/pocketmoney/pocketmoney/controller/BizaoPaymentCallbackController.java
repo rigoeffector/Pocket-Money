@@ -28,15 +28,22 @@ public class BizaoPaymentCallbackController {
      * Receives JWT-encoded webhook notifications from BizaoPayment
      */
     @PostMapping("/callback")
-    public ResponseEntity<String> handleBizaoPaymentWebhook(@RequestBody String jwtToken) {
+    public ResponseEntity<java.util.Map<String, Object>> handleBizaoPaymentWebhook(@RequestBody String jwtToken) {
         try {
             logger.info("Received BizaoPayment webhook callback - JWT Token: {}", jwtToken);
             efashePaymentService.handleBizaoPaymentWebhook(jwtToken);
-            return ResponseEntity.ok("Webhook received successfully");
+            java.util.Map<String, Object> response = new java.util.HashMap<>();
+            response.put("status", HttpStatus.OK.value());
+            response.put("message", "Webhook received successfully");
+            response.put("transactionId", null);
+            return ResponseEntity.ok(response);
         } catch (RuntimeException e) {
             logger.error("Error processing BizaoPayment webhook: ", e);
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                    .body("Error processing webhook: " + e.getMessage());
+            java.util.Map<String, Object> response = new java.util.HashMap<>();
+            response.put("status", HttpStatus.BAD_REQUEST.value());
+            response.put("message", e.getMessage() != null ? e.getMessage() : "Error processing webhook");
+            response.put("transactionId", null);
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(response);
         }
     }
 }

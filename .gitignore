@@ -38,3 +38,14 @@ out/
 
 ### DB backups (keep locally, do not commit) ###
 backups/
+
+### Terraform ###
+**/.terraform/
+**/.terraform.lock.hcl
+**/terraform.tfstate
+**/terraform.tfstate.backup
+**/terraform.tfvars
+terraform/ussd-supervisor/config.generated.yml
+terraform/ussd-supervisor/ussd-service.supervisor.conf
+terraform/ussd-supervisor/ussd-service
+terraform/ussd-supervisor/ussd-assets.zip
