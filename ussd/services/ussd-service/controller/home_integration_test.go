@@ -289,9 +289,6 @@ func TestTvFlow(t *testing.T) {
 	saveTvCard(sessionId, "en", &input, phone, nil, "en", "", "MTN")
 	tv_account_menu(sessionId, "en", &input, phone, nil, "en", "", "MTN")
 
-	packageInput := "1"
-	saveTvPackage(sessionId, "en", &packageInput, phone, nil, "en", "", "MTN")
-
 	amountInput := "1200"
 	saveTvAmount(sessionId, "en", &amountInput, phone, nil, "en", "", "MTN")
 	confirmMsg := confirm_tv(sessionId, "en", &amountInput, phone, nil, "en", "", "MTN")
@@ -428,23 +425,13 @@ func TestSaveAirtimePhoneValidation(t *testing.T) {
 	}
 }
 
-func TestSaveTvPackageAndAmount(t *testing.T) {
+func TestSaveTvAmount(t *testing.T) {
 	cleanup := setupIntegration(t)
 	defer cleanup()
 
 	phone := randomPhone()
 	insertUser(t, phone)
 	sessionId := fmt.Sprintf("sess-tv-validate-%d", time.Now().UnixNano())
-
-	invalidPackage := "9"
-	if res := saveTvPackage(sessionId, "en", &invalidPackage, phone, nil, "en", "", "MTN"); res != "fail:invalid_input" {
-		t.Fatalf("expected invalid_input, got %s", res)
-	}
-
-	packageInput := "2"
-	if res := saveTvPackage(sessionId, "en", &packageInput, phone, nil, "en", "", "MTN"); res != "" {
-		t.Fatalf("expected empty result, got %s", res)
-	}
 
 	amountInput := "1200"
 	if res := saveTvAmount(sessionId, "en", &amountInput, phone, nil, "en", "", "MTN"); res != "" {
@@ -483,7 +470,6 @@ func TestTvAccountMenuAndConfirm(t *testing.T) {
 		t.Fatalf("expected tv_account_name in extra data")
 	}
 
-	appendExtraData(sessionId, updated, "tv_package", "MONTHLY")
 	appendExtraData(sessionId, updated, "tv_amount", 1500.0)
 	confirmMsg := confirm_tv(sessionId, "en", nil, phone, nil, "en", "", "MTN")
 	if confirmMsg == "" {
