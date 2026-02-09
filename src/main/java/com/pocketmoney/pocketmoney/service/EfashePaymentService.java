@@ -4718,6 +4718,7 @@ public class EfashePaymentService {
             
             if (!transactionOpt.isPresent()) {
                 logger.warn("⚠️ Transaction not found for BizaoPayment webhook - TransactionId: {}", transactionId);
+                //throw error codes 404 and 400
                 throw new RuntimeException("Transaction not found for transactionId: " + transactionId);
             }
             

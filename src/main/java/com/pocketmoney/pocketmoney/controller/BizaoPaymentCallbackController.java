@@ -40,10 +40,13 @@ public class BizaoPaymentCallbackController {
         } catch (RuntimeException e) {
             logger.error("Error processing BizaoPayment webhook: ", e);
             java.util.Map<String, Object> response = new java.util.HashMap<>();
-            response.put("status", HttpStatus.BAD_REQUEST.value());
+            response.put("status", HttpStatus.NOT_FOUND.value());
             response.put("message", e.getMessage() != null ? e.getMessage() : "Error processing webhook");
             response.put("transactionId", null);
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(response);
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(response);
         }
     }
+
+
+    // USE CASE FOR MANUAL TESTING
 }
