@@ -372,6 +372,7 @@ func callUserFunc(functionName string, args ...interface{}) (string, error) {
 		"saveTvCard":                 saveTvCard,
 		"tv_account_menu":            tv_account_menu,
 		"saveTvPackage":              saveTvPackage,
+		"tv_amount_prompt":           tv_amount_prompt,
 		"saveTvAmount":               saveTvAmount,
 		"confirm_tv":                 confirm_tv,
 		"submitTvPayment":            submitTvPayment,
@@ -554,7 +555,7 @@ func preSavePreferredLang(args ...interface{}) string {
 	return ""
 }
 func appendExtraData(sessionId string, extra map[string]interface{}, key string, value interface{}) error {
-	if len(extra) == 0 {
+	if extra == nil {
 		extra = make(map[string]interface{})
 	}
 	extra[key] = value
@@ -755,16 +756,40 @@ func backendErrorToUserMessage(err error) (string, bool) {
 			return "", true
 		}
 		message := strings.TrimSpace(be.message)
+		if parsed := extractBackendMessage(message); parsed != "" {
+			message = parsed
+		}
 		if message == "" {
 			message = fmt.Sprintf("backend request failed with status %d", be.status)
 		}
 		return message, false
 	}
 	message := strings.TrimSpace(err.Error())
+	if parsed := extractBackendMessage(message); parsed != "" {
+		message = parsed
+	}
 	if message == "" {
 		return "", false
 	}
 	return message, false
+}
+
+func extractBackendMessage(message string) string {
+	start := strings.Index(message, "{")
+	if start == -1 {
+		return ""
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(message[start:]), &payload); err != nil {
+		return ""
+	}
+	if msg, ok := payload["msg"]; ok {
+		return strings.TrimSpace(fmt.Sprintf("%v", msg))
+	}
+	if msg, ok := payload["message"]; ok {
+		return strings.TrimSpace(fmt.Sprintf("%v", msg))
+	}
+	return ""
 }
 
 func callEfasheInitiate(payload interface{}) (*efasheInitiateResponse, error) {
@@ -1275,6 +1300,16 @@ func tv_account_menu(args ...interface{}) string {
 	return utils.Localize(localizer, "tv_account_menu", map[string]interface{}{"CardNumber": cardNumber, "AccountName": accountName})
 }
 
+func tv_amount_prompt(args ...interface{}) string {
+	sessionId := args[0].(string)
+	extra := getExtraDataMap(sessionId)
+	packageName := getStringFromExtra(extra, "tv_package")
+	if packageName == "" {
+		packageName = utils.Localize(localizer, "tv_package_unknown", nil)
+	}
+	return utils.Localize(localizer, "tv_amount_prompt", map[string]interface{}{"Package": packageName})
+}
+
 func saveTvPackage(args ...interface{}) string {
 	sessionId := args[0].(string)
 	input := strings.TrimSpace(*args[2].(*string))
@@ -1313,11 +1348,15 @@ func confirm_tv(args ...interface{}) string {
 	extra := getExtraDataMap(sessionId)
 	cardNumber := getStringFromExtra(extra, "tv_card_number")
 	accountName := getStringFromExtra(extra, "tv_account_name")
+	packageName := getStringFromExtra(extra, "tv_package")
 	amountValue, ok := extra["tv_amount"].(float64)
-	if cardNumber == "" || !ok {
+	if cardNumber == "" || !ok || packageName == "" {
 		return "fail:invalid_input"
 	}
 	message := "USSD TV payment"
+	if packageName != "" {
+		message = fmt.Sprintf("USSD TV payment - %s", packageName)
+	}
 	initiatePayload := map[string]interface{}{
 		"amount":                amountValue,
 		"currency":              "RWF",
@@ -1363,6 +1402,7 @@ func confirm_tv(args ...interface{}) string {
 		"CardNumber":   cardNumber,
 		"AccountName":  accountName,
 		"ProviderName": providerName,
+		"Package":      packageName,
 		"Amount":       formatAmount(amountValue),
 	})
 }
@@ -1485,16 +1525,43 @@ func saveRraDocument(args ...interface{}) string {
 		}
 		return "fail:" + msg
 	}
-	appendExtraData(sessionId, extra, "rra_transaction_id", response.TransactionId)
-	appendExtraData(sessionId, extra, "rra_amount", response.Amount)
-	if response.CustomerAccountName != "" {
-		appendExtraData(sessionId, extra, "rra_account_name", response.CustomerAccountName)
+	if response.TransactionId != "" {
+		appendExtraData(sessionId, extra, "rra_transaction_id", response.TransactionId)
+	}
+	amountValue := response.Amount
+	if amountValue <= 0 {
+		amountValue = getValidateFloat(response.EfasheValidateResponse, "vendMin")
+	}
+	if amountValue > 0 {
+		appendExtraData(sessionId, extra, "rra_amount", amountValue)
+	}
+	accountName := response.CustomerAccountName
+	if accountName == "" {
+		accountName = getValidateString(response.EfasheValidateResponse, "customerAccountName")
+	}
+	accountName = strings.TrimSpace(accountName)
+	if accountName != "" {
+		appendExtraData(sessionId, extra, "rra_account_name", accountName)
 	}
 	charges := response.BesoftShareAmount
-	appendExtraData(sessionId, extra, "rra_charges", formatAmount(charges))
+	if charges > 0 {
+		appendExtraData(sessionId, extra, "rra_charges", formatAmount(charges))
+	}
 	taxType := getValidateExtraInfoString(response.EfasheValidateResponse, "tax_type")
+	if taxType == "" {
+		taxType = getValidateString(response.EfasheValidateResponse, "tax_type")
+	}
+	taxType = strings.TrimSpace(taxType)
 	if taxType != "" {
 		appendExtraData(sessionId, extra, "rra_tax_type", taxType)
+	}
+	if amountValue <= 0 || accountName == "" || taxType == "" {
+		errMsg := getValidateString(response.EfasheValidateResponse, "trxResult")
+		if errMsg == "" {
+			errMsg = "rra_missing_info"
+		}
+		appendExtraData(sessionId, extra, "rra_error_message", errMsg)
+		return "fail:" + errMsg
 	}
 	return ""
 }
@@ -1503,10 +1570,17 @@ func confirm_rra(args ...interface{}) string {
 	sessionId := args[0].(string)
 	extra := getExtraDataMap(sessionId)
 	documentId := getStringFromExtra(extra, "rra_document_id")
-	amountValue, _ := extra["rra_amount"].(float64)
+	amountValue, _ := parseFloatValue(extra["rra_amount"])
 	charges := getStringFromExtra(extra, "rra_charges")
-	accountName := getStringFromExtra(extra, "rra_account_name")
-	taxType := getStringFromExtra(extra, "rra_tax_type")
+	accountName := strings.TrimSpace(getStringFromExtra(extra, "rra_account_name"))
+	taxType := strings.TrimSpace(getStringFromExtra(extra, "rra_tax_type"))
+	if documentId == "" || amountValue <= 0 || accountName == "" || taxType == "" {
+		errMsg := getStringFromExtra(extra, "rra_error_message")
+		if errMsg == "" {
+			errMsg = "rra_missing_info"
+		}
+		return "fail:" + errMsg
+	}
 	if charges == "" {
 		charges = "0"
 	}
