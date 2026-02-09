@@ -1,0 +1,9 @@
+[program:ussd-service]
+command=/usr/local/bin/ussd-service
+directory=/app
+autostart=true
+autorestart=true
+startsecs=5
+user=${run_as_user}
+stdout_logfile=/var/log/ussd-service.out.log
+stderr_logfile=/var/log/ussd-service.err.log
