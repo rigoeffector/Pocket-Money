@@ -183,9 +183,10 @@ func LogMessage(logLevel string, message string, service string, forcedTraceId .
 }
 
 func USSDResponse(c *fiber.Ctx, networkCode string, action string, message string) error {
-	if networkCode == "MTN2" {
+	switch networkCode {
+	case "MTN":
 		return c.JSON(fiber.Map{"action": action, "message": message})
-	} else if networkCode == "MTN" {
+	case "MTN2":
 		c.Set("Content-Type", "text/plain")
 		c.Set("Freeflow", action)
 		c.Set("Cache-Control", "max-age=0")
@@ -195,7 +196,7 @@ func USSDResponse(c *fiber.Ctx, networkCode string, action string, message strin
 		c.SendStatus(200)
 		c.SendString(message)
 		return nil
-	} else if networkCode == "AIRTEL" {
+	case "AIRTEL":
 		c.Set("Content-Type", "text/plain")
 		c.Set("Freeflow", action)
 		c.Set("Cache-Control", "max-age=0")
