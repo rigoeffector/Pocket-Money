@@ -27,5 +27,11 @@ func main() {
 	config.ConnectDb()
 	defer config.DB.Close()
 	server := routes.InitRoutes()
-	server.Listen("0.0.0.0:9000")
+	port := viper.GetInt("port")
+	if port == 0 {
+		port = 9000
+	}
+	if err := server.Listen(fmt.Sprintf("0.0.0.0:%d", port)); err != nil {
+		panic(fmt.Sprintf("server listen failed: %v", err))
+	}
 }
