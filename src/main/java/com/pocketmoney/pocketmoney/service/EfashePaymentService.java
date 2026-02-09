@@ -4657,162 +4657,85 @@ public class EfashePaymentService {
     }
     
     /**
-     * Handle BizaoPayment webhook callback
-     * Verifies JWT signature and processes payment status update
-     * 
-     * @param jwtToken JWT-encoded webhook data from BizaoPayment
+     * Handle BizaoPayment webhook callback.
+     * Accepts either JWT-encoded payload or plain JSON (e.g. {"status": 200, "transactionId": "..."} or {"settings": {...}, "status": 200}).
+     * When callback returns with status, updates the corresponding transaction status.
      */
     @Transactional
-    public void handleBizaoPaymentWebhook(String jwtToken) {
+    public void handleBizaoPaymentWebhook(String body) {
         logger.info("=== BIZAO PAYMENT WEBHOOK RECEIVED ===");
-        logger.info("JWT Token: {}", jwtToken);
-        
+        if (body == null) {
+            body = "";
+        }
+        String trimmed = body.trim();
+
         try {
-            // Verify and parse JWT token
-            SecretKey signingKey = Keys.hmacShaKeyFor(bizaoPaymentWebhookSigningKey.getBytes(StandardCharsets.UTF_8));
-            
-            Claims claims = Jwts.parser()
-                    .verifyWith(signingKey)
-                    .build()
-                    .parseSignedClaims(jwtToken)
-                    .getPayload();
-            
-            logger.info("✅ JWT token verified successfully");
-            
-            // Extract data from claims
-            String dataJson = claims.get("data", String.class);
-            if (dataJson == null || dataJson.isEmpty()) {
-                throw new RuntimeException("Webhook JWT does not contain 'data' field");
-            }
-            
-            logger.info("Webhook data JSON: {}", dataJson);
-            
-            // Parse the data JSON
-            ObjectMapper webhookObjectMapper = new ObjectMapper();
-            @SuppressWarnings("unchecked")
-            java.util.Map<String, Object> webhookData = webhookObjectMapper.readValue(dataJson, java.util.Map.class);
-            
-            String transactionId = (String) webhookData.get("transactionId");
-            Integer status = webhookData.get("status") != null ? ((Number) webhookData.get("status")).intValue() : null;
-            String statusDesc = (String) webhookData.get("statusDesc");
-            Object amountObj = webhookData.get("amount");
-            BigDecimal amount = amountObj != null ? new BigDecimal(amountObj.toString()) : null;
-            String currency = (String) webhookData.get("currency");
-            String paymentType = (String) webhookData.get("paymentType");
-            String transactionType = (String) webhookData.get("transactionType");
-            String referenceId = (String) webhookData.get("referenceId");
-            
-            logger.info("Webhook data extracted - TransactionId: {}, Status: {}, StatusDesc: {}, Amount: {}, Currency: {}", 
-                transactionId, status, statusDesc, amount, currency);
-            
-            if (transactionId == null || transactionId.isEmpty()) {
-                throw new RuntimeException("Webhook data does not contain transactionId");
-            }
-            
-            // Find transaction by BizaoPayment transaction ID
-            Optional<EfasheTransaction> transactionOpt = efasheTransactionRepository.findByMopayTransactionId(transactionId);
-            if (!transactionOpt.isPresent()) {
-                // Try finding by EFASHE transaction ID
-                transactionOpt = efasheTransactionRepository.findByTransactionId(transactionId);
-            }
-            
-            if (!transactionOpt.isPresent()) {
-                logger.warn("⚠️ Transaction not found for BizaoPayment webhook - TransactionId: {}", transactionId);
-                //throw error codes 404 and 400
-                throw new RuntimeException("Transaction not found for transactionId: " + transactionId);
-            }
-            
-            EfasheTransaction transaction = transactionOpt.get();
-            logger.info("Found transaction - EFASHE Transaction ID: {}, Current MoPay Status: {}, Current EFASHE Status: {}", 
-                transaction.getTransactionId(), transaction.getMopayStatus(), transaction.getEfasheStatus());
-            
-            // Update BizaoPayment status
-            if (status != null) {
-                transaction.setMopayStatus(status.toString());
-            }
-            
-            // Check if payment is successful
-            boolean isSuccessful = (status != null && (status == 200 || status == 201)) 
-                || "SUCCESSFUL".equalsIgnoreCase(statusDesc);
-            
-            if (isSuccessful && !"SUCCESS".equalsIgnoreCase(transaction.getEfasheStatus())) {
-                logger.info("✅ BizaoPayment transaction SUCCESS detected - Triggering EFASHE execute...");
-                
-                // Execute EFASHE transaction
-                try {
-                    EfasheExecuteRequest executeRequest = new EfasheExecuteRequest();
-                    executeRequest.setTrxId(transaction.getTrxId());
-                    executeRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
-                    executeRequest.setAmount(transaction.getAmount());
-                    executeRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
-                    
-                    String deliveryMethodId = transaction.getDeliveryMethodId();
-                    if (deliveryMethodId == null || deliveryMethodId.trim().isEmpty()) {
-                        deliveryMethodId = "direct_topup";
-                    }
-                    executeRequest.setDeliveryMethodId(deliveryMethodId);
-                    
-                    if ("sms".equals(deliveryMethodId)) {
-                        executeRequest.setDeliverTo(transaction.getDeliverTo());
-                    }
-                    
-                    EfasheExecuteResponse executeResponse = efasheApiService.executeTransaction(executeRequest);
-                    
-                    // Log full execute response
-                    if (executeResponse != null) {
-                        try {
-                            ObjectMapper objectMapper = new ObjectMapper();
-                            String executeResponseJson = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(executeResponse);
-                            logger.info("═══════════════════════════════════════════════════════════════");
-                            logger.info("📋 EFASHE EXECUTE RESPONSE (Parsed) - checkTransactionStatusWithBizao");
-                            logger.info("═══════════════════════════════════════════════════════════════");
-                            logger.info("{}", executeResponseJson);
-                            logger.info("═══════════════════════════════════════════════════════════════");
-                        } catch (Exception logException) {
-                            logger.warn("Could not serialize execute response to JSON: {}", logException.getMessage());
-                        }
-                    }
-                    
-                    if (executeResponse != null && executeResponse.getHttpStatusCode() != null 
-                        && (executeResponse.getHttpStatusCode() == 200 || executeResponse.getHttpStatusCode() == 202)) {
-                        // Execute successful
-                        transaction.setEfasheStatus("SUCCESS");
-                        transaction.setPollEndpoint(executeResponse.getPollEndpoint());
-                        transaction.setRetryAfterSecs(executeResponse.getRetryAfterSecs());
-                        
-                        logger.info("✅ EFASHE execute successful - Transaction ID: {}, Poll Endpoint: {}", 
-                            transaction.getTransactionId(), executeResponse.getPollEndpoint());
-                        
-                        // Send notifications
-                        sendWhatsAppNotification(transaction);
-                        
-                    } else {
-                        logger.error("❌ EFASHE execute failed - Transaction ID: {}, Response: {}", 
-                            transaction.getTransactionId(), executeResponse);
-                        transaction.setEfasheStatus("FAILED");
-                        transaction.setErrorMessage("EFASHE execute failed after BizaoPayment success");
-                    }
-                } catch (Exception e) {
-                    logger.error("❌ Error executing EFASHE transaction after BizaoPayment success - Transaction ID: {}", 
-                        transaction.getTransactionId(), e);
-                    transaction.setEfasheStatus("FAILED");
-                    transaction.setErrorMessage("EFASHE execute error: " + e.getMessage());
+            String transactionId = null;
+            Integer status = null;
+            String statusDesc = null;
+
+            if (trimmed.startsWith("{")) {
+                // Plain JSON callback (e.g. from MoPay/Bizao when they send JSON instead of JWT)
+                ObjectMapper mapper = new ObjectMapper();
+                @SuppressWarnings("unchecked")
+                java.util.Map<String, Object> json = mapper.readValue(trimmed, java.util.Map.class);
+                status = json.get("status") != null ? ((Number) json.get("status")).intValue() : null;
+                statusDesc = (String) json.get("statusDesc");
+                transactionId = (String) json.get("transactionId");
+                if ((transactionId == null || transactionId.isEmpty()) && json.get("referenceId") != null) {
+                    transactionId = json.get("referenceId").toString();
                 }
-            } else if (!isSuccessful) {
-                // Payment failed
-                logger.warn("⚠️ BizaoPayment transaction FAILED - Transaction ID: {}, Status: {}, StatusDesc: {}", 
-                    transactionId, status, statusDesc);
-                transaction.setEfasheStatus("FAILED");
-                transaction.setErrorMessage("BizaoPayment failed - Status: " + status + ", StatusDesc: " + statusDesc);
+                // Nested "data" object (some providers send { "data": { "transactionId": "...", "status": 200 } })
+                @SuppressWarnings("unchecked")
+                java.util.Map<String, Object> data = (java.util.Map<String, Object>) json.get("data");
+                if (data != null) {
+                    if ((transactionId == null || transactionId.isEmpty()) && data.get("transactionId") != null) {
+                        transactionId = data.get("transactionId").toString();
+                    }
+                    if (status == null && data.get("status") != null) {
+                        status = ((Number) data.get("status")).intValue();
+                    }
+                    if (statusDesc == null && data.get("statusDesc") != null) {
+                        statusDesc = data.get("statusDesc").toString();
+                    }
+                }
+                logger.info("Webhook JSON parsed - TransactionId: {}, Status: {}, StatusDesc: {}", transactionId, status, statusDesc);
+                // Callbacks without transactionId (e.g. settings-only) are acknowledged without updating any transaction
+                if (transactionId == null || transactionId.isEmpty()) {
+                    logger.info("Callback has no transactionId (e.g. settings callback), acknowledging with 200.");
+                    return;
+                }
+            } else {
+                // JWT-encoded payload
+                SecretKey signingKey = Keys.hmacShaKeyFor(bizaoPaymentWebhookSigningKey.getBytes(StandardCharsets.UTF_8));
+                Claims claims = Jwts.parser()
+                        .verifyWith(signingKey)
+                        .build()
+                        .parseSignedClaims(trimmed)
+                        .getPayload();
+                logger.info("✅ JWT token verified successfully");
+                String dataJson = claims.get("data", String.class);
+                if (dataJson == null || dataJson.isEmpty()) {
+                    throw new RuntimeException("Webhook JWT does not contain 'data' field");
+                }
+                ObjectMapper webhookObjectMapper = new ObjectMapper();
+                @SuppressWarnings("unchecked")
+                java.util.Map<String, Object> webhookData = webhookObjectMapper.readValue(dataJson, java.util.Map.class);
+                transactionId = (String) webhookData.get("transactionId");
+                status = webhookData.get("status") != null ? ((Number) webhookData.get("status")).intValue() : null;
+                statusDesc = (String) webhookData.get("statusDesc");
+                if (transactionId == null || transactionId.isEmpty()) {
+                    transactionId = (String) webhookData.get("referenceId");
+                }
+                logger.info("Webhook JWT data extracted - TransactionId: {}, Status: {}, StatusDesc: {}", transactionId, status, statusDesc);
+                if (transactionId == null || transactionId.isEmpty()) {
+                    throw new RuntimeException("Webhook data does not contain transactionId");
+                }
             }
-            
-            // Save transaction
-            efasheTransactionRepository.save(transaction);
-            logger.info("✅ Transaction updated from webhook - Transaction ID: {}, MoPay Status: {}, EFASHE Status: {}", 
-                transaction.getTransactionId(), transaction.getMopayStatus(), transaction.getEfasheStatus());
-            
+
+            processWebhookPayload(transactionId, status, statusDesc);
             logger.info("=== BIZAO PAYMENT WEBHOOK PROCESSED SUCCESSFULLY ===");
-            
+
         } catch (io.jsonwebtoken.security.SecurityException | io.jsonwebtoken.ExpiredJwtException | io.jsonwebtoken.MalformedJwtException e) {
             logger.error("❌ JWT verification failed for BizaoPayment webhook: ", e);
             throw new RuntimeException("Invalid or expired JWT token: " + e.getMessage());
@@ -4820,6 +4743,87 @@ public class EfashePaymentService {
             logger.error("❌ Error processing BizaoPayment webhook: ", e);
             throw new RuntimeException("Failed to process webhook: " + e.getMessage());
         }
+    }
+
+    /**
+     * Apply webhook payload to the matching EFASHE transaction: update status and optionally trigger execute.
+     */
+    private void processWebhookPayload(String transactionId, Integer status, String statusDesc) {
+        Optional<EfasheTransaction> transactionOpt = efasheTransactionRepository.findByMopayTransactionId(transactionId);
+        if (!transactionOpt.isPresent()) {
+            transactionOpt = efasheTransactionRepository.findByTransactionId(transactionId);
+        }
+        if (!transactionOpt.isPresent()) {
+            logger.warn("⚠️ Transaction not found for BizaoPayment webhook - TransactionId: {}", transactionId);
+            throw new RuntimeException("Transaction not found for transactionId: " + transactionId);
+        }
+
+        EfasheTransaction transaction = transactionOpt.get();
+        logger.info("Found transaction - EFASHE Transaction ID: {}, Current MoPay Status: {}, Current EFASHE Status: {}",
+                transaction.getTransactionId(), transaction.getMopayStatus(), transaction.getEfasheStatus());
+
+        if (status != null) {
+            transaction.setMopayStatus(status.toString());
+        }
+
+        boolean isSuccessful = (status != null && (status == 200 || status == 201))
+                || "SUCCESSFUL".equalsIgnoreCase(statusDesc);
+
+        if (isSuccessful && !"SUCCESS".equalsIgnoreCase(transaction.getEfasheStatus())) {
+            logger.info("✅ BizaoPayment transaction SUCCESS detected - Triggering EFASHE execute...");
+            try {
+                EfasheExecuteRequest executeRequest = new EfasheExecuteRequest();
+                executeRequest.setTrxId(transaction.getTrxId());
+                executeRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
+                executeRequest.setAmount(transaction.getAmount());
+                executeRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
+                String deliveryMethodId = transaction.getDeliveryMethodId();
+                if (deliveryMethodId == null || deliveryMethodId.trim().isEmpty()) {
+                    deliveryMethodId = "direct_topup";
+                }
+                executeRequest.setDeliveryMethodId(deliveryMethodId);
+                if ("sms".equals(deliveryMethodId)) {
+                    executeRequest.setDeliverTo(transaction.getDeliverTo());
+                }
+                EfasheExecuteResponse executeResponse = efasheApiService.executeTransaction(executeRequest);
+                if (executeResponse != null) {
+                    try {
+                        ObjectMapper objectMapper = new ObjectMapper();
+                        String executeResponseJson = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(executeResponse);
+                        logger.info("═══════════════════════════════════════════════════════════════");
+                        logger.info("📋 EFASHE EXECUTE RESPONSE (Webhook)");
+                        logger.info("═══════════════════════════════════════════════════════════════");
+                        logger.info("{}", executeResponseJson);
+                        logger.info("═══════════════════════════════════════════════════════════════");
+                    } catch (Exception logException) {
+                        logger.warn("Could not serialize execute response: {}", logException.getMessage());
+                    }
+                }
+                if (executeResponse != null && executeResponse.getHttpStatusCode() != null
+                        && (executeResponse.getHttpStatusCode() == 200 || executeResponse.getHttpStatusCode() == 202)) {
+                    transaction.setEfasheStatus("SUCCESS");
+                    transaction.setPollEndpoint(executeResponse.getPollEndpoint());
+                    transaction.setRetryAfterSecs(executeResponse.getRetryAfterSecs());
+                    logger.info("✅ EFASHE execute successful - Transaction ID: {}", transaction.getTransactionId());
+                    sendWhatsAppNotification(transaction);
+                } else {
+                    transaction.setEfasheStatus("FAILED");
+                    transaction.setErrorMessage("EFASHE execute failed after BizaoPayment success");
+                }
+            } catch (Exception e) {
+                logger.error("❌ Error executing EFASHE transaction after BizaoPayment success - Transaction ID: {}", transaction.getTransactionId(), e);
+                transaction.setEfasheStatus("FAILED");
+                transaction.setErrorMessage("EFASHE execute error: " + e.getMessage());
+            }
+        } else if (!isSuccessful) {
+            logger.warn("⚠️ BizaoPayment transaction FAILED - Transaction ID: {}, Status: {}, StatusDesc: {}", transactionId, status, statusDesc);
+            transaction.setEfasheStatus("FAILED");
+            transaction.setErrorMessage("BizaoPayment failed - Status: " + status + ", StatusDesc: " + statusDesc);
+        }
+
+        efasheTransactionRepository.save(transaction);
+        logger.info("✅ Transaction status updated from callback - Transaction ID: {}, MoPay Status: {}, EFASHE Status: {}",
+                transaction.getTransactionId(), transaction.getMopayStatus(), transaction.getEfasheStatus());
     }
     
     /**
