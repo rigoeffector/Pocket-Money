@@ -289,17 +289,28 @@ func TestTvFlow(t *testing.T) {
 	saveTvCard(sessionId, "en", &input, phone, nil, "en", "", "MTN")
 	tv_account_menu(sessionId, "en", &input, phone, nil, "en", "", "MTN")
 
-	amountInput := "1200"
-	saveTvAmount(sessionId, "en", &amountInput, phone, nil, "en", "", "MTN")
-	confirmMsg := confirm_tv(sessionId, "en", &amountInput, phone, nil, "en", "", "MTN")
-	if confirmMsg == "" {
-		t.Fatalf("expected confirm tv message")
-	}
-	submitTvPayment(sessionId, "en", &amountInput, phone, nil, "en", "", "MTN")
+	packageInput := "2"
+	saveTvPackage(sessionId, "en", &packageInput, phone, nil, "en", "", "MTN")
+	periodInput := "3"
+	saveTvPeriod(sessionId, "en", &periodInput, phone, nil, "en", "", "MTN")
+
 	extra, err := getUssdDataItem(sessionId, "extra")
 	if err != nil || extra == nil {
 		t.Fatalf("expected TV transaction extra")
 	}
+	extraMap, ok := extra.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected extra map")
+	}
+	if amountValue, ok := extraMap["tv_amount"].(float64); !ok || amountValue != 11000 {
+		t.Fatalf("expected tv_amount 11000, got %v", extraMap["tv_amount"])
+	}
+
+	confirmMsg := confirm_tv(sessionId, "en", &periodInput, phone, nil, "en", "", "MTN")
+	if confirmMsg == "" {
+		t.Fatalf("expected confirm tv message")
+	}
+	submitTvPayment(sessionId, "en", &periodInput, phone, nil, "en", "", "MTN")
 }
 
 func TestMerchantFlow(t *testing.T) {
@@ -425,7 +436,7 @@ func TestSaveAirtimePhoneValidation(t *testing.T) {
 	}
 }
 
-func TestSaveTvAmount(t *testing.T) {
+func TestSaveTvPeriod(t *testing.T) {
 	cleanup := setupIntegration(t)
 	defer cleanup()
 
@@ -433,14 +444,18 @@ func TestSaveTvAmount(t *testing.T) {
 	insertUser(t, phone)
 	sessionId := fmt.Sprintf("sess-tv-validate-%d", time.Now().UnixNano())
 
-	amountInput := "1200"
-	if res := saveTvAmount(sessionId, "en", &amountInput, phone, nil, "en", "", "MTN"); res != "" {
+	packageInput := "1"
+	if res := saveTvPackage(sessionId, "en", &packageInput, phone, nil, "en", "", "MTN"); res != "" {
+		t.Fatalf("expected empty result, got %s", res)
+	}
+	periodInput := "2"
+	if res := saveTvPeriod(sessionId, "en", &periodInput, phone, nil, "en", "", "MTN"); res != "" {
 		t.Fatalf("expected empty result, got %s", res)
 	}
 
 	extra := getExtraDataMap(sessionId)
-	if extra["tv_amount"] == nil {
-		t.Fatalf("expected tv_amount in extra data")
+	if amountValue, ok := extra["tv_amount"].(float64); !ok || amountValue != 2700 {
+		t.Fatalf("expected tv_amount 2700, got %v", extra["tv_amount"])
 	}
 }
 
@@ -469,8 +484,14 @@ func TestTvAccountMenuAndConfirm(t *testing.T) {
 	if got := getStringFromExtra(updated, "tv_account_name"); got == "" {
 		t.Fatalf("expected tv_account_name in extra data")
 	}
-
-	appendExtraData(sessionId, updated, "tv_amount", 1500.0)
+	packageInput := "4"
+	if res := saveTvPackage(sessionId, "en", &packageInput, phone, nil, "en", "", "MTN"); res != "" {
+		t.Fatalf("expected empty result, got %s", res)
+	}
+	periodInput := "1"
+	if res := saveTvPeriod(sessionId, "en", &periodInput, phone, nil, "en", "", "MTN"); res != "" {
+		t.Fatalf("expected empty result, got %s", res)
+	}
 	confirmMsg := confirm_tv(sessionId, "en", nil, phone, nil, "en", "", "MTN")
 	if confirmMsg == "" {
 		t.Fatalf("expected confirm tv message")

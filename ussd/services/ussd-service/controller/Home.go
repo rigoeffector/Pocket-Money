@@ -372,6 +372,8 @@ func callUserFunc(functionName string, args ...interface{}) (string, error) {
 		"saveTvCard":                 saveTvCard,
 		"tv_account_menu":            tv_account_menu,
 		"saveTvPackage":              saveTvPackage,
+		"tv_period_prompt":           tv_period_prompt,
+		"saveTvPeriod":               saveTvPeriod,
 		"tv_amount_prompt":           tv_amount_prompt,
 		"saveTvAmount":               saveTvAmount,
 		"confirm_tv":                 confirm_tv,
@@ -1253,6 +1255,90 @@ func submitAirtimePayment(args ...interface{}) string {
 	return ""
 }
 
+type tvPeriodOption struct {
+	Input    string
+	Code     string
+	LabelKey string
+	Amount   float64
+}
+
+type tvPackageInfo struct {
+	Code     string
+	LabelKey string
+	Periods  []tvPeriodOption
+	IsAddon  bool
+}
+
+var tvPackageSelections = map[string]string{
+	"1": "BASIC",
+	"2": "CLASSIC",
+	"3": "FRENCH",
+	"4": "UNIQUE",
+	"5": "SUPER",
+	"6": "CHINESE_ADDON",
+}
+
+var tvPackageCatalog = map[string]tvPackageInfo{
+	"BASIC": {
+		Code:     "BASIC",
+		LabelKey: "tv_package_basic",
+		Periods: []tvPeriodOption{
+			{Input: "1", Code: "DAILY", LabelKey: "tv_period_daily", Amount: 800},
+			{Input: "2", Code: "WEEKLY", LabelKey: "tv_period_weekly", Amount: 2700},
+			{Input: "3", Code: "MONTHLY", LabelKey: "tv_period_monthly", Amount: 8000},
+		},
+	},
+	"CLASSIC": {
+		Code:     "CLASSIC",
+		LabelKey: "tv_package_classic",
+		Periods: []tvPeriodOption{
+			{Input: "1", Code: "DAILY", LabelKey: "tv_period_daily", Amount: 1200},
+			{Input: "2", Code: "WEEKLY", LabelKey: "tv_period_weekly", Amount: 4200},
+			{Input: "3", Code: "MONTHLY", LabelKey: "tv_period_monthly", Amount: 11000},
+		},
+	},
+	"FRENCH": {
+		Code:     "FRENCH",
+		LabelKey: "tv_package_french",
+		Periods: []tvPeriodOption{
+			{Input: "1", Code: "DAILY", LabelKey: "tv_period_daily", Amount: 1500},
+			{Input: "2", Code: "WEEKLY", LabelKey: "tv_period_weekly", Amount: 4700},
+			{Input: "3", Code: "MONTHLY", LabelKey: "tv_period_monthly", Amount: 14000},
+		},
+	},
+	"UNIQUE": {
+		Code:     "UNIQUE",
+		LabelKey: "tv_package_unique",
+		Periods: []tvPeriodOption{
+			{Input: "1", Code: "DAILY", LabelKey: "tv_period_daily", Amount: 1500},
+			{Input: "2", Code: "WEEKLY", LabelKey: "tv_period_weekly", Amount: 4700},
+			{Input: "3", Code: "MONTHLY", LabelKey: "tv_period_monthly", Amount: 14000},
+		},
+	},
+	"SUPER": {
+		Code:     "SUPER",
+		LabelKey: "tv_package_super",
+		Periods: []tvPeriodOption{
+			{Input: "1", Code: "DAILY", LabelKey: "tv_period_daily", Amount: 2100},
+			{Input: "2", Code: "WEEKLY", LabelKey: "tv_period_weekly", Amount: 7700},
+			{Input: "3", Code: "MONTHLY", LabelKey: "tv_period_monthly", Amount: 20000},
+		},
+	},
+	"CHINESE_ADDON": {
+		Code:     "CHINESE_ADDON",
+		LabelKey: "tv_package_chinese_addon",
+		IsAddon:  true,
+		Periods: []tvPeriodOption{
+			{Input: "1", Code: "MONTHLY", LabelKey: "tv_period_monthly", Amount: 15000},
+		},
+	},
+}
+
+func getTvPackageInfo(code string) (tvPackageInfo, bool) {
+	info, ok := tvPackageCatalog[code]
+	return info, ok
+}
+
 func tv_card_prompt(args ...interface{}) string {
 	sessionId := args[0].(string)
 	phone := args[3].(string)
@@ -1313,20 +1399,70 @@ func tv_amount_prompt(args ...interface{}) string {
 func saveTvPackage(args ...interface{}) string {
 	sessionId := args[0].(string)
 	input := strings.TrimSpace(*args[2].(*string))
-	packageName := ""
-	switch input {
-	case "1":
-		packageName = "DAILY"
-	case "2":
-		packageName = "WEEKLY"
-	case "3":
-		packageName = "MONTHLY"
-	}
-	if packageName == "" {
+	packageCode, ok := tvPackageSelections[input]
+	if !ok {
 		return "fail:invalid_input"
 	}
+	packageInfo, ok := getTvPackageInfo(packageCode)
+	if !ok {
+		return "fail:invalid_input"
+	}
+	packageName := utils.Localize(localizer, packageInfo.LabelKey, nil)
 	extra := getExtraDataMap(sessionId)
+	appendExtraData(sessionId, extra, "tv_package_code", packageCode)
 	appendExtraData(sessionId, extra, "tv_package", packageName)
+	return ""
+}
+
+func tv_period_prompt(args ...interface{}) string {
+	sessionId := args[0].(string)
+	extra := getExtraDataMap(sessionId)
+	packageCode := getStringFromExtra(extra, "tv_package_code")
+	packageInfo, ok := getTvPackageInfo(packageCode)
+	if !ok {
+		return "fail:invalid_input"
+	}
+	packageName := getStringFromExtra(extra, "tv_package")
+	if packageName == "" {
+		packageName = utils.Localize(localizer, packageInfo.LabelKey, nil)
+	}
+	options := ""
+	for _, period := range packageInfo.Periods {
+		label := utils.Localize(localizer, period.LabelKey, nil)
+		options += fmt.Sprintf("%s) %s - %s RWF\n", period.Input, label, formatAmount(period.Amount))
+	}
+	note := ""
+	if packageInfo.IsAddon {
+		note = utils.Localize(localizer, "tv_addon_requires_base", nil)
+	}
+	return utils.Localize(localizer, "tv_period_select", map[string]interface{}{
+		"Package": packageName,
+		"Options": options,
+		"Note":    note,
+	})
+}
+
+func saveTvPeriod(args ...interface{}) string {
+	sessionId := args[0].(string)
+	input := strings.TrimSpace(*args[2].(*string))
+	extra := getExtraDataMap(sessionId)
+	packageCode := getStringFromExtra(extra, "tv_package_code")
+	packageInfo, ok := getTvPackageInfo(packageCode)
+	if !ok {
+		return "fail:invalid_input"
+	}
+	var selected *tvPeriodOption
+	for _, period := range packageInfo.Periods {
+		if period.Input == input {
+			selected = &period
+			break
+		}
+	}
+	if selected == nil {
+		return "fail:invalid_input"
+	}
+	appendExtraData(sessionId, extra, "tv_period", selected.Code)
+	appendExtraData(sessionId, extra, "tv_amount", selected.Amount)
 	return ""
 }
 
