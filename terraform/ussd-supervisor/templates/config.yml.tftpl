@@ -13,29 +13,9 @@ redis:
   password: "${redis_password}"
   database: ${redis_database}
   host: ${redis_host}
-redis_test:
-  port: ${redis_test_port}
-  password: "${redis_test_password}"
-  database: ${redis_test_database}
-  host: ${redis_test_host}
 postgres_db:
   cluster: ${postgres_host}
   keyspace: ${postgres_db}
   password: "${postgres_password}"
   user: ${postgres_user}
   port: ${postgres_port}
-postgres_db_test:
-  cluster: ${postgres_test_host}
-  keyspace: ${postgres_test_db}
-  password: "${postgres_test_password}"
-  user: ${postgres_test_user}
-  port: ${postgres_test_port}
-MOMO_URL: ${momo_url}
-MOMO_KEY: ${momo_key}
-SMS_URL: ${sms_url}
-SMS_KEY: ${sms_key}
-SENDER_ID: "${sender_id}"
-AIRTEL_URL: ${airtel_url}
-AIRTEL_ID: ${airtel_id}
-AIRTEL_KEY: ${airtel_key}
-sms_service_url: ${sms_service_url}
