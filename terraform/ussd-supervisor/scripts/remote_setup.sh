@@ -95,7 +95,7 @@ $SUDO unzip -o /tmp/ussd/ussd-assets.zip -d /tmp/ussd >/dev/null
 $SUDO cp -R /tmp/ussd/templates /app/templates
 $SUDO cp -R /tmp/ussd/locales /app/locales
 $SUDO cp -f /tmp/ussd/ussd_config.json /app/ussd_config.json
-$SUDO install -m 0644 /tmp/ussd/config.yml /app/config.yml
+$SUDO install -m 0644 /tmp/ussd/config.generated.yml /app/config.yml
 
 $SUDO chown -R "$RUN_AS_USER":"$RUN_AS_USER" /app
 

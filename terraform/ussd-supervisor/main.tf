@@ -26,6 +26,10 @@ locals {
 resource "null_resource" "build" {
   count = var.build_enabled ? 1 : 0
 
+  triggers = {
+    src_hash = data.archive_file.assets.output_base64sha256
+  }
+
   provisioner "local-exec" {
     working_dir = local.ussd_root
     command     = "go build -o ${local.binary_path}"
@@ -59,29 +63,11 @@ resource "local_file" "config" {
     redis_port              = var.redis_port
     redis_password          = var.redis_password
     redis_database          = var.redis_database
-    redis_test_host         = var.redis_test_host
-    redis_test_port         = var.redis_test_port
-    redis_test_password     = var.redis_test_password
-    redis_test_database     = var.redis_test_database
     postgres_host           = var.postgres_host
     postgres_port           = var.postgres_port
     postgres_db             = var.postgres_db
     postgres_user           = var.postgres_user
     postgres_password       = var.postgres_password
-    postgres_test_host      = var.postgres_test_host
-    postgres_test_port      = var.postgres_test_port
-    postgres_test_db        = var.postgres_test_db
-    postgres_test_user      = var.postgres_test_user
-    postgres_test_password  = var.postgres_test_password
-    momo_url                = var.momo_url
-    momo_key                = var.momo_key
-    sms_url                 = var.sms_url
-    sms_key                 = var.sms_key
-    sender_id               = var.sender_id
-    airtel_url              = var.airtel_url
-    airtel_id               = var.airtel_id
-    airtel_key              = var.airtel_key
-    sms_service_url         = var.sms_service_url
   })
 }
 
@@ -93,7 +79,9 @@ resource "local_file" "supervisor" {
 }
 
 resource "null_resource" "deploy" {
-  triggers = {}
+  triggers = {
+    src_hash = data.archive_file.assets.output_base64sha256
+  }
 
   lifecycle {
     replace_triggered_by = [
@@ -126,7 +114,7 @@ resource "null_resource" "deploy" {
 
   provisioner "file" {
     source      = local_file.config.filename
-    destination = "/tmp/ussd/config.yml"
+    destination = "/tmp/ussd/config.generated.yml"
   }
 
   provisioner "file" {
