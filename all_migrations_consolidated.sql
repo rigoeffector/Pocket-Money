@@ -486,6 +486,12 @@ COMMENT ON COLUMN efashe_transactions.validated IS 'Validation status: INITIAL (
 COMMENT ON COLUMN efashe_transactions.payment_mode IS 'Payment mode for MoPay processing (e.g., MOBILE)';
 COMMENT ON COLUMN efashe_transactions.callback_url IS 'Callback URL for MoPay processing';
 
+-- Add token column for electricity purchases (if available)
+ALTER TABLE efashe_transactions
+ADD COLUMN IF NOT EXISTS token VARCHAR(255);
+
+COMMENT ON COLUMN efashe_transactions.token IS 'Electricity token returned by provider';
+
 -- Make amount nullable for RRA service type (amount is optional for RRA)
 ALTER TABLE efashe_transactions 
 ALTER COLUMN amount DROP NOT NULL;
@@ -493,6 +499,20 @@ ALTER COLUMN amount DROP NOT NULL;
 COMMENT ON COLUMN efashe_transactions.amount IS 'Transaction amount (nullable for RRA service type, required for all other services)';
 
 COMMIT;
+
+-- ===================================================================
+-- 12. Create USSD user settings table
+-- ===================================================================
+CREATE TABLE IF NOT EXISTS ussd_user_settings (
+    phone_number VARCHAR(20) PRIMARY KEY,
+    locale VARCHAR(5) NOT NULL DEFAULT 'en',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+COMMENT ON TABLE ussd_user_settings IS 'Stores USSD user preferences such as language';
+COMMENT ON COLUMN ussd_user_settings.phone_number IS 'MSISDN used for USSD sessions';
+COMMENT ON COLUMN ussd_user_settings.locale IS 'Preferred language (en or rw)';
 
 -- ===================================================================
 -- Migration Complete!

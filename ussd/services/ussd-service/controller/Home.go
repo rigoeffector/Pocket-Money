@@ -1,10 +1,13 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"reflect"
 	"shared-package/utils"
 	"strconv"
@@ -44,10 +47,41 @@ type UssdUser struct {
 	Locale   string
 }
 
+type apiResponse struct {
+	Success bool            `json:"success"`
+	Message string          `json:"message"`
+	Data    json.RawMessage `json:"data"`
+}
+
+type efasheInitiateResponse struct {
+	TransactionId          string                 `json:"transactionId"`
+	Amount                 float64                `json:"amount"`
+	BesoftShareAmount      float64                `json:"besoftShareAmount"`
+	CustomerAccountName    string                 `json:"customerAccountName"`
+	EfasheValidateResponse map[string]interface{} `json:"efasheValidateResponse"`
+}
+
+type authLoginData struct {
+	Token     string `json:"token"`
+	TokenType string `json:"tokenType"`
+}
+
+type backendError struct {
+	status  int
+	message string
+}
+
+func (e *backendError) Error() string {
+	return e.message
+}
+
 var bundle *i18n.Bundle
 
 var lang = "en" // Default language
 var localizer *i18n.Localizer
+var backendAuthToken string
+var backendAuthTokenType string
+var backendAuthTokenExpiresAt time.Time
 
 func init() {
 	bundle = i18n.NewBundle(language.English)
@@ -275,6 +309,9 @@ func processUSSD(input *string, phone string, sessionId string, networkOperator 
 
 	msg, err := prepareMessage(nextStepData["content"].(string), lang, input, phone, sessionId, user, networkOperator)
 	if err != nil {
+		if msg != "" {
+			return msg, err, false
+		}
 		return "", err, false
 	}
 
@@ -344,7 +381,6 @@ func callUserFunc(functionName string, args ...interface{}) (string, error) {
 		"confirm_merchant":           confirm_merchant,
 		"submitMerchantPayment":      submitMerchantPayment,
 		"saveRraDocument":            saveRraDocument,
-		"saveRraAmount":              saveRraAmount,
 		"confirm_rra":                confirm_rra,
 		"submitRraPayment":           submitRraPayment,
 	}[functionName])
@@ -366,13 +402,32 @@ func callUserFunc(functionName string, args ...interface{}) (string, error) {
 	if strings.Contains(msg, "err:") {
 		return "", errors.New(strings.Split(msg, "err:")[1])
 	} else if strings.Contains(msg, "fail:") {
-		failMsg := utils.Localize(localizer, strings.Split(msg, "fail:")[1], nil)
+		failKey := strings.Split(msg, "fail:")[1]
+		failMsg := failKey
+		if isLocalizationKey(failKey) {
+			failMsg = utils.Localize(localizer, failKey, nil)
+		}
 		return failMsg, errors.New(failMsg)
 	}
 	if len(msg) != 0 {
-		msg = utils.Localize(localizer, msg, nil)
+		if isLocalizationKey(msg) {
+			msg = utils.Localize(localizer, msg, nil)
+		}
 	}
 	return ellipsisMsg(msg, args[0].(string), args[1].(string))
+}
+
+func isLocalizationKey(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r == '_' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 func validateInputs(data []model.USSDInput, input *string) (*model.USSDInput, error) {
 	optional := false
@@ -565,6 +620,264 @@ func formatAmount(amount float64) string {
 	return fmt.Sprintf("%.2f", amount)
 }
 
+func backendUrl() string {
+	return strings.TrimRight(viper.GetString("backend_url"), "/")
+}
+
+func shouldUseBackendAuth() bool {
+	return viper.GetString("backend_auth.username") != "" && viper.GetString("backend_auth.password") != ""
+}
+
+func clearBackendAuthToken() {
+	backendAuthToken = ""
+	backendAuthTokenType = ""
+	backendAuthTokenExpiresAt = time.Time{}
+}
+
+func loginBackend() error {
+	if !shouldUseBackendAuth() {
+		return nil
+	}
+	payload := map[string]string{
+		"username": viper.GetString("backend_auth.username"),
+		"password": viper.GetString("backend_auth.password"),
+	}
+	apiResp, status, err := doBackendPost("/api/auth/login", payload, "")
+	if err != nil {
+		return err
+	}
+	if status < http.StatusOK || status >= http.StatusMultipleChoices {
+		if apiResp.Message != "" {
+			return fmt.Errorf(apiResp.Message)
+		}
+		return fmt.Errorf("backend auth failed with status %d", status)
+	}
+	if !apiResp.Success {
+		return fmt.Errorf(apiResp.Message)
+	}
+	loginData := &authLoginData{}
+	if err := json.Unmarshal(apiResp.Data, loginData); err != nil {
+		return err
+	}
+	if loginData.Token == "" || loginData.TokenType == "" {
+		return fmt.Errorf("backend auth token missing")
+	}
+	backendAuthToken = loginData.Token
+	backendAuthTokenType = loginData.TokenType
+	backendAuthTokenExpiresAt = time.Now().Add(30 * time.Minute)
+	return nil
+}
+
+func getBackendAuthHeader() (string, error) {
+	if !shouldUseBackendAuth() {
+		return "", nil
+	}
+	if backendAuthToken == "" || time.Now().After(backendAuthTokenExpiresAt) {
+		if err := loginBackend(); err != nil {
+			return "", err
+		}
+	}
+	return strings.TrimSpace(backendAuthToken), nil
+}
+
+func doBackendPost(path string, payload interface{}, authHeader string) (apiResponse, int, error) {
+	url := backendUrl() + path
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return apiResponse{}, 0, err
+	}
+	request, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return apiResponse{}, 0, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if authHeader != "" {
+		request.Header.Set("Authorization", authHeader)
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(request)
+	if err != nil {
+		return apiResponse{}, 0, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return apiResponse{}, resp.StatusCode, err
+	}
+	apiResp := apiResponse{}
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &apiResp); err != nil {
+			apiResp.Message = strings.TrimSpace(string(data))
+		}
+	}
+	return apiResp, resp.StatusCode, nil
+}
+
+func callBackendPost(path string, payload interface{}) (apiResponse, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		authHeader, err := getBackendAuthHeader()
+		if err != nil {
+			return apiResponse{}, err
+		}
+		apiResp, status, err := doBackendPost(path, payload, authHeader)
+		if err != nil {
+			return apiResponse{}, err
+		}
+		if status == http.StatusUnauthorized || status == http.StatusForbidden {
+			if attempt == 0 && shouldUseBackendAuth() {
+				clearBackendAuthToken()
+				continue
+			}
+		}
+		if status < http.StatusOK || status >= http.StatusMultipleChoices {
+			message := strings.TrimSpace(apiResp.Message)
+			if message == "" {
+				message = fmt.Sprintf("backend request failed with status %d", status)
+			}
+			return apiResp, &backendError{status: status, message: message}
+		}
+		if !apiResp.Success {
+			message := strings.TrimSpace(apiResp.Message)
+			if message == "" {
+				message = "backend request failed"
+			}
+			return apiResp, &backendError{status: status, message: message}
+		}
+		return apiResp, nil
+	}
+	return apiResponse{}, fmt.Errorf("backend request failed")
+}
+
+func backendErrorToUserMessage(err error) (string, bool) {
+	var be *backendError
+	if errors.As(err, &be) {
+		if be.status == http.StatusUnauthorized || be.status == http.StatusForbidden {
+			return "", true
+		}
+		message := strings.TrimSpace(be.message)
+		if message == "" {
+			message = fmt.Sprintf("backend request failed with status %d", be.status)
+		}
+		return message, false
+	}
+	message := strings.TrimSpace(err.Error())
+	if message == "" {
+		return "", false
+	}
+	return message, false
+}
+
+func callEfasheInitiate(payload interface{}) (*efasheInitiateResponse, error) {
+	apiResp, err := callBackendPost("/api/efashe/initiate", payload)
+	if err != nil {
+		return nil, err
+	}
+	response := &efasheInitiateResponse{}
+	if err := json.Unmarshal(apiResp.Data, response); err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
+func callEfasheInitiateForOther(payload interface{}) (*efasheInitiateResponse, error) {
+	apiResp, err := callBackendPost("/api/efashe/initiate-for-other", payload)
+	if err != nil {
+		return nil, err
+	}
+	response := &efasheInitiateResponse{}
+	if err := json.Unmarshal(apiResp.Data, response); err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
+func callEfasheProcess(transactionId string) error {
+	_, err := callBackendPost("/api/efashe/process/"+transactionId, map[string]interface{}{})
+	return err
+}
+
+func extractCharges(extra interface{}) string {
+	if extra == nil {
+		return "0"
+	}
+	if data, ok := extra.(map[string]interface{}); ok {
+		for _, key := range []string{"charges", "charge", "totalCharge", "fee"} {
+			if value, exists := data[key]; exists {
+				return fmt.Sprintf("%v", value)
+			}
+		}
+	}
+	return "0"
+}
+
+func parseFloatValue(value interface{}) (float64, bool) {
+	if value == nil {
+		return 0, false
+	}
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case json.Number:
+		f, err := v.Float64()
+		if err == nil {
+			return f, true
+		}
+	case string:
+		f, err := strconv.ParseFloat(v, 64)
+		if err == nil {
+			return f, true
+		}
+	default:
+		f, err := strconv.ParseFloat(fmt.Sprintf("%v", value), 64)
+		if err == nil {
+			return f, true
+		}
+	}
+	return 0, false
+}
+
+func getValidateString(validate map[string]interface{}, key string) string {
+	if validate == nil {
+		return ""
+	}
+	if value, ok := validate[key]; ok {
+		return fmt.Sprintf("%v", value)
+	}
+	return ""
+}
+
+func getValidateFloat(validate map[string]interface{}, key string) float64 {
+	if validate == nil {
+		return 0
+	}
+	if value, ok := validate[key]; ok {
+		if f, ok := parseFloatValue(value); ok {
+			return f
+		}
+	}
+	return 0
+}
+
+func getValidateExtraInfoString(validate map[string]interface{}, key string) string {
+	if validate == nil {
+		return ""
+	}
+	extraInfo, ok := validate["extraInfo"].(map[string]interface{})
+	if !ok || extraInfo == nil {
+		return ""
+	}
+	if value, ok := extraInfo[key]; ok {
+		return fmt.Sprintf("%v", value)
+	}
+	return ""
+}
+
 func generateTransactionId(prefix string) string {
 	return fmt.Sprintf("%s%d%d", prefix, time.Now().Unix(), rand.Intn(900)+100)
 }
@@ -635,7 +948,12 @@ func electricity_meter_prompt(args ...interface{}) string {
 	}
 	list := ""
 	for i, num := range recent {
-		list += fmt.Sprintf("%d) %s\n", i+1, num)
+		ownerName := lookupAccountName("ELECTRICITY", num)
+		if ownerName != "" {
+			list += fmt.Sprintf("%d) %s - %s\n", i+1, num, ownerName)
+		} else {
+			list += fmt.Sprintf("%d) %s\n", i+1, num)
+		}
 	}
 	return utils.Localize(localizer, "electricity_meter_prompt", map[string]interface{}{"Numbers": list})
 }
@@ -662,7 +980,8 @@ func electricity_owner_menu(args ...interface{}) string {
 	meterNumber := getStringFromExtra(extra, "electricity_meter_number")
 	ownerName := lookupAccountName("ELECTRICITY", meterNumber)
 	if ownerName == "" {
-		ownerName = utils.Localize(localizer, "account_name_unknown", nil)
+		appendExtraData(sessionId, extra, "electricity_owner_name", "")
+		return utils.Localize(localizer, "electricity_owner_menu_no_name", map[string]interface{}{"MeterNumber": meterNumber})
 	}
 	appendExtraData(sessionId, extra, "electricity_owner_name", ownerName)
 	return utils.Localize(localizer, "electricity_owner_menu", map[string]interface{}{"MeterNumber": meterNumber, "OwnerName": ownerName})
@@ -712,19 +1031,6 @@ func saveElectricityAmount(args ...interface{}) string {
 
 func confirm_electricity(args ...interface{}) string {
 	sessionId := args[0].(string)
-	extra := getExtraDataMap(sessionId)
-	meterNumber := getStringFromExtra(extra, "electricity_meter_number")
-	ownerName := getStringFromExtra(extra, "electricity_owner_name")
-	amountValue, _ := extra["electricity_amount"].(float64)
-	return utils.Localize(localizer, "confirm_electricity", map[string]interface{}{
-		"MeterNumber": meterNumber,
-		"OwnerName":   ownerName,
-		"Amount":      formatAmount(amountValue),
-	})
-}
-
-func submitElectricityPayment(args ...interface{}) string {
-	sessionId := args[0].(string)
 	phone := args[3].(string)
 	extra := getExtraDataMap(sessionId)
 	meterNumber := getStringFromExtra(extra, "electricity_meter_number")
@@ -733,12 +1039,72 @@ func submitElectricityPayment(args ...interface{}) string {
 	if meterNumber == "" || !ok {
 		return "fail:invalid_input"
 	}
-	transactionId := generateTransactionId("USSD-ELEC-")
-	_, err := config.DB.Exec(ctx, `insert into efashe_transactions (transaction_id, service_type, customer_phone, customer_account_number, amount, currency, efashe_status, mopay_status, message, customer_account_name, validated, payment_mode) values ($1, 'ELECTRICITY', $2, $3, $4, 'RWF', 'PENDING', 'PENDING', 'USSD electricity payment', $5, 'INITIAL', 'MOBILE')`,
-		transactionId, phone, meterNumber, amountValue, ownerName)
+	initiatePayload := map[string]interface{}{
+		"amount":                amountValue,
+		"currency":              "RWF",
+		"phone":                 phone,
+		"customerAccountNumber": meterNumber,
+		"serviceType":           "ELECTRICITY",
+		"payment_mode":          "MOBILE",
+		"message":               "USSD electricity payment",
+	}
+	response, err := callEfasheInitiate(initiatePayload)
 	if err != nil {
-		utils.LogMessage("error", "submitElectricityPayment: insert failed: err:"+err.Error(), "ussd-service")
-		return "err:system_error"
+		utils.LogMessage("error", "confirm_electricity: initiate failed: err:"+err.Error(), "ussd-service")
+		msg, isAuth := backendErrorToUserMessage(err)
+		if isAuth {
+			return "err:system_error"
+		}
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "fail:" + msg
+	}
+	appendExtraData(sessionId, extra, "electricity_transaction_id", response.TransactionId)
+	if response.CustomerAccountName != "" {
+		ownerName = response.CustomerAccountName
+		appendExtraData(sessionId, extra, "electricity_owner_name", response.CustomerAccountName)
+	}
+	providerName := getValidateString(response.EfasheValidateResponse, "svcProviderName")
+	vendMin := getValidateFloat(response.EfasheValidateResponse, "vendMin")
+	vendMax := getValidateFloat(response.EfasheValidateResponse, "vendMax")
+	if providerName != "" {
+		appendExtraData(sessionId, extra, "electricity_provider_name", providerName)
+	}
+	if vendMin > 0 {
+		appendExtraData(sessionId, extra, "electricity_vend_min", vendMin)
+	}
+	if vendMax > 0 {
+		appendExtraData(sessionId, extra, "electricity_vend_max", vendMax)
+	}
+	if (vendMin > 0 && amountValue < vendMin) || (vendMax > 0 && amountValue > vendMax) {
+		return "fail:invalid_amount"
+	}
+	return utils.Localize(localizer, "confirm_electricity", map[string]interface{}{
+		"MeterNumber":  meterNumber,
+		"OwnerName":    ownerName,
+		"ProviderName": providerName,
+		"Amount":       formatAmount(amountValue),
+	})
+}
+
+func submitElectricityPayment(args ...interface{}) string {
+	sessionId := args[0].(string)
+	extra := getExtraDataMap(sessionId)
+	transactionId := getStringFromExtra(extra, "electricity_transaction_id")
+	if transactionId == "" {
+		return "fail:invalid_input"
+	}
+	if err := callEfasheProcess(transactionId); err != nil {
+		utils.LogMessage("error", "submitElectricityPayment: process failed: err:"+err.Error(), "ussd-service")
+		msg, isAuth := backendErrorToUserMessage(err)
+		if isAuth {
+			return "err:system_error"
+		}
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "fail:" + msg
 	}
 	return ""
 }
@@ -776,30 +1142,88 @@ func saveAirtimeAmount(args ...interface{}) string {
 
 func confirm_airtime(args ...interface{}) string {
 	sessionId := args[0].(string)
+	payerPhone := args[3].(string)
 	extra := getExtraDataMap(sessionId)
 	phone := getStringFromExtra(extra, "airtime_phone")
-	amountValue, _ := extra["airtime_amount"].(float64)
+	amountValue, ok := extra["airtime_amount"].(float64)
+	if phone == "" || !ok {
+		return "fail:invalid_input"
+	}
+	var response *efasheInitiateResponse
+	var err error
+	if phone != payerPhone {
+		initiatePayload := map[string]interface{}{
+			"amount":             amountValue,
+			"currency":           "RWF",
+			"phone":              payerPhone,
+			"anotherPhoneNumber": phone,
+			"serviceType":        "AIRTIME",
+			"payment_mode":       "MOBILE",
+			"message":            "USSD airtime payment",
+		}
+		response, err = callEfasheInitiateForOther(initiatePayload)
+	} else {
+		initiatePayload := map[string]interface{}{
+			"amount":       amountValue,
+			"currency":     "RWF",
+			"phone":        payerPhone,
+			"serviceType":  "AIRTIME",
+			"payment_mode": "MOBILE",
+			"message":      "USSD airtime payment",
+		}
+		response, err = callEfasheInitiate(initiatePayload)
+	}
+	if err != nil {
+		utils.LogMessage("error", "confirm_airtime: initiate failed: err:"+err.Error(), "ussd-service")
+		msg, isAuth := backendErrorToUserMessage(err)
+		if isAuth {
+			return "err:system_error"
+		}
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "fail:" + msg
+	}
+	appendExtraData(sessionId, extra, "airtime_transaction_id", response.TransactionId)
+	providerName := getValidateString(response.EfasheValidateResponse, "svcProviderName")
+	vendMin := getValidateFloat(response.EfasheValidateResponse, "vendMin")
+	vendMax := getValidateFloat(response.EfasheValidateResponse, "vendMax")
+	if providerName != "" {
+		appendExtraData(sessionId, extra, "airtime_provider_name", providerName)
+	}
+	if vendMin > 0 {
+		appendExtraData(sessionId, extra, "airtime_vend_min", vendMin)
+	}
+	if vendMax > 0 {
+		appendExtraData(sessionId, extra, "airtime_vend_max", vendMax)
+	}
+	if (vendMin > 0 && amountValue < vendMin) || (vendMax > 0 && amountValue > vendMax) {
+		return "fail:invalid_amount"
+	}
 	return utils.Localize(localizer, "confirm_airtime", map[string]interface{}{
-		"Phone":  phone,
-		"Amount": formatAmount(amountValue),
+		"Phone":        phone,
+		"ProviderName": providerName,
+		"Amount":       formatAmount(amountValue),
 	})
 }
 
 func submitAirtimePayment(args ...interface{}) string {
 	sessionId := args[0].(string)
-	payerPhone := args[3].(string)
 	extra := getExtraDataMap(sessionId)
-	targetPhone := getStringFromExtra(extra, "airtime_phone")
-	amountValue, ok := extra["airtime_amount"].(float64)
-	if targetPhone == "" || !ok {
+	transactionId := getStringFromExtra(extra, "airtime_transaction_id")
+	if transactionId == "" {
 		return "fail:invalid_input"
 	}
-	transactionId := generateTransactionId("USSD-AIR-")
-	_, err := config.DB.Exec(ctx, `insert into efashe_transactions (transaction_id, service_type, customer_phone, customer_account_number, amount, currency, efashe_status, mopay_status, message, validated, payment_mode) values ($1, 'AIRTIME', $2, $3, $4, 'RWF', 'PENDING', 'PENDING', 'USSD airtime payment', 'INITIAL', 'MOBILE')`,
-		transactionId, payerPhone, targetPhone, amountValue)
-	if err != nil {
-		utils.LogMessage("error", "submitAirtimePayment: insert failed: err:"+err.Error(), "ussd-service")
-		return "err:system_error"
+	if err := callEfasheProcess(transactionId); err != nil {
+		utils.LogMessage("error", "submitAirtimePayment: process failed: err:"+err.Error(), "ussd-service")
+		msg, isAuth := backendErrorToUserMessage(err)
+		if isAuth {
+			return "err:system_error"
+		}
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "fail:" + msg
 	}
 	return ""
 }
@@ -885,37 +1309,81 @@ func saveTvAmount(args ...interface{}) string {
 
 func confirm_tv(args ...interface{}) string {
 	sessionId := args[0].(string)
+	phone := args[3].(string)
 	extra := getExtraDataMap(sessionId)
 	cardNumber := getStringFromExtra(extra, "tv_card_number")
 	accountName := getStringFromExtra(extra, "tv_account_name")
-	packageName := getStringFromExtra(extra, "tv_package")
-	amountValue, _ := extra["tv_amount"].(float64)
+	amountValue, ok := extra["tv_amount"].(float64)
+	if cardNumber == "" || !ok {
+		return "fail:invalid_input"
+	}
+	message := "USSD TV payment"
+	initiatePayload := map[string]interface{}{
+		"amount":                amountValue,
+		"currency":              "RWF",
+		"phone":                 phone,
+		"customerAccountNumber": cardNumber,
+		"serviceType":           "TV",
+		"payment_mode":          "MOBILE",
+		"message":               message,
+	}
+	response, err := callEfasheInitiate(initiatePayload)
+	if err != nil {
+		utils.LogMessage("error", "confirm_tv: initiate failed: err:"+err.Error(), "ussd-service")
+		msg, isAuth := backendErrorToUserMessage(err)
+		if isAuth {
+			return "err:system_error"
+		}
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "fail:" + msg
+	}
+	appendExtraData(sessionId, extra, "tv_transaction_id", response.TransactionId)
+	if response.CustomerAccountName != "" {
+		accountName = response.CustomerAccountName
+		appendExtraData(sessionId, extra, "tv_account_name", response.CustomerAccountName)
+	}
+	providerName := getValidateString(response.EfasheValidateResponse, "svcProviderName")
+	vendMin := getValidateFloat(response.EfasheValidateResponse, "vendMin")
+	vendMax := getValidateFloat(response.EfasheValidateResponse, "vendMax")
+	if providerName != "" {
+		appendExtraData(sessionId, extra, "tv_provider_name", providerName)
+	}
+	if vendMin > 0 {
+		appendExtraData(sessionId, extra, "tv_vend_min", vendMin)
+	}
+	if vendMax > 0 {
+		appendExtraData(sessionId, extra, "tv_vend_max", vendMax)
+	}
+	if (vendMin > 0 && amountValue < vendMin) || (vendMax > 0 && amountValue > vendMax) {
+		return "fail:invalid_amount"
+	}
 	return utils.Localize(localizer, "confirm_tv", map[string]interface{}{
-		"CardNumber":  cardNumber,
-		"AccountName": accountName,
-		"Package":     packageName,
-		"Amount":      formatAmount(amountValue),
+		"CardNumber":   cardNumber,
+		"AccountName":  accountName,
+		"ProviderName": providerName,
+		"Amount":       formatAmount(amountValue),
 	})
 }
 
 func submitTvPayment(args ...interface{}) string {
 	sessionId := args[0].(string)
-	phone := args[3].(string)
 	extra := getExtraDataMap(sessionId)
-	cardNumber := getStringFromExtra(extra, "tv_card_number")
-	accountName := getStringFromExtra(extra, "tv_account_name")
-	packageName := getStringFromExtra(extra, "tv_package")
-	amountValue, ok := extra["tv_amount"].(float64)
-	if cardNumber == "" || !ok {
+	transactionId := getStringFromExtra(extra, "tv_transaction_id")
+	if transactionId == "" {
 		return "fail:invalid_input"
 	}
-	transactionId := generateTransactionId("USSD-TV-")
-	message := fmt.Sprintf("USSD TV payment (%s)", packageName)
-	_, err := config.DB.Exec(ctx, `insert into efashe_transactions (transaction_id, service_type, customer_phone, customer_account_number, amount, currency, efashe_status, mopay_status, message, customer_account_name, validated, payment_mode) values ($1, 'TV', $2, $3, $4, 'RWF', 'PENDING', 'PENDING', $5, $6, 'INITIAL', 'MOBILE')`,
-		transactionId, phone, cardNumber, amountValue, message, accountName)
-	if err != nil {
-		utils.LogMessage("error", "submitTvPayment: insert failed: err:"+err.Error(), "ussd-service")
-		return "err:system_error"
+	if err := callEfasheProcess(transactionId); err != nil {
+		utils.LogMessage("error", "submitTvPayment: process failed: err:"+err.Error(), "ussd-service")
+		msg, isAuth := backendErrorToUserMessage(err)
+		if isAuth {
+			return "err:system_error"
+		}
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "fail:" + msg
 	}
 	return ""
 }
@@ -992,24 +1460,42 @@ func submitMerchantPayment(args ...interface{}) string {
 
 func saveRraDocument(args ...interface{}) string {
 	sessionId := args[0].(string)
+	phone := args[3].(string)
 	documentId := strings.TrimSpace(*args[2].(*string))
 	if documentId == "" {
 		return "fail:invalid_input"
 	}
 	extra := getExtraDataMap(sessionId)
 	appendExtraData(sessionId, extra, "rra_document_id", documentId)
-	return ""
-}
-
-func saveRraAmount(args ...interface{}) string {
-	sessionId := args[0].(string)
-	input := strings.TrimSpace(*args[2].(*string))
-	amount, err := parseAmount(input)
-	if err != nil {
-		return "fail:invalid_amount"
+	initiatePayload := map[string]interface{}{
+		"phone":                 phone,
+		"customerAccountNumber": documentId,
+		"serviceType":           "RRA",
+		"message":               "USSD RRA payment",
 	}
-	extra := getExtraDataMap(sessionId)
-	appendExtraData(sessionId, extra, "rra_amount", amount)
+	response, err := callEfasheInitiate(initiatePayload)
+	if err != nil {
+		utils.LogMessage("error", "saveRraDocument: initiate failed: err:"+err.Error(), "ussd-service")
+		msg, isAuth := backendErrorToUserMessage(err)
+		if isAuth {
+			return "err:system_error"
+		}
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "fail:" + msg
+	}
+	appendExtraData(sessionId, extra, "rra_transaction_id", response.TransactionId)
+	appendExtraData(sessionId, extra, "rra_amount", response.Amount)
+	if response.CustomerAccountName != "" {
+		appendExtraData(sessionId, extra, "rra_account_name", response.CustomerAccountName)
+	}
+	charges := response.BesoftShareAmount
+	appendExtraData(sessionId, extra, "rra_charges", formatAmount(charges))
+	taxType := getValidateExtraInfoString(response.EfasheValidateResponse, "tax_type")
+	if taxType != "" {
+		appendExtraData(sessionId, extra, "rra_tax_type", taxType)
+	}
 	return ""
 }
 
@@ -1018,27 +1504,38 @@ func confirm_rra(args ...interface{}) string {
 	extra := getExtraDataMap(sessionId)
 	documentId := getStringFromExtra(extra, "rra_document_id")
 	amountValue, _ := extra["rra_amount"].(float64)
+	charges := getStringFromExtra(extra, "rra_charges")
+	accountName := getStringFromExtra(extra, "rra_account_name")
+	taxType := getStringFromExtra(extra, "rra_tax_type")
+	if charges == "" {
+		charges = "0"
+	}
 	return utils.Localize(localizer, "confirm_rra", map[string]interface{}{
-		"DocumentId": documentId,
-		"Amount":     formatAmount(amountValue),
+		"DocumentId":  documentId,
+		"AccountName": accountName,
+		"TaxType":     taxType,
+		"Amount":      formatAmount(amountValue),
+		"Charges":     charges,
 	})
 }
 
 func submitRraPayment(args ...interface{}) string {
 	sessionId := args[0].(string)
-	phone := args[3].(string)
 	extra := getExtraDataMap(sessionId)
-	documentId := getStringFromExtra(extra, "rra_document_id")
-	amountValue, ok := extra["rra_amount"].(float64)
-	if documentId == "" || !ok {
+	transactionId := getStringFromExtra(extra, "rra_transaction_id")
+	if transactionId == "" {
 		return "fail:invalid_input"
 	}
-	transactionId := generateTransactionId("USSD-RRA-")
-	_, err := config.DB.Exec(ctx, `insert into efashe_transactions (transaction_id, service_type, customer_phone, customer_account_number, amount, currency, efashe_status, mopay_status, message, validated, payment_mode) values ($1, 'RRA', $2, $3, $4, 'RWF', 'PENDING', 'PENDING', 'USSD RRA payment', 'INITIAL', 'MOBILE')`,
-		transactionId, phone, documentId, amountValue)
-	if err != nil {
-		utils.LogMessage("error", "submitRraPayment: insert failed: err:"+err.Error(), "ussd-service")
-		return "err:system_error"
+	if err := callEfasheProcess(transactionId); err != nil {
+		utils.LogMessage("error", "submitRraPayment: process failed: err:"+err.Error(), "ussd-service")
+		msg, isAuth := backendErrorToUserMessage(err)
+		if isAuth {
+			return "err:system_error"
+		}
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "fail:" + msg
 	}
 	return ""
 }

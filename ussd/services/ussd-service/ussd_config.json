@@ -98,6 +98,27 @@
             "is_end_session": false
         },
         {
+            "id": "payment_ack",
+            "content": "payment_request_sent",
+            "inputs": [
+                {
+                    "input": 1,
+                    "value": null,
+                    "action": "",
+                    "next_step": "home"
+                },
+                {
+                    "input": 2,
+                    "value": null,
+                    "action": "end_session",
+                    "next_step": ""
+                }
+            ],
+            "allow_back": true,
+            "validation": "action_completed",
+            "is_end_session": false
+        },
+        {
             "id": "electricity_meter_select",
             "content": "electricity_meter_prompt:fn",
             "content_type": "dynamic",
@@ -193,7 +214,7 @@
                     "input": 1,
                     "value": null,
                     "action": "submitElectricityPayment",
-                    "next_step": "action_ack"
+                    "next_step": "payment_ack"
                 },
                 {
                     "input": 2,
@@ -284,7 +305,7 @@
                     "input": 1,
                     "value": null,
                     "action": "submitAirtimePayment",
-                    "next_step": "action_ack"
+                    "next_step": "payment_ack"
                 },
                 {
                     "input": 2,
@@ -332,20 +353,8 @@
                 },
                 {
                     "input": 1,
-                    "value": "DAILY",
-                    "action": "saveTvPackage",
-                    "next_step": "tv_amount"
-                },
-                {
-                    "input": 2,
-                    "value": "WEEKLY",
-                    "action": "saveTvPackage",
-                    "next_step": "tv_amount"
-                },
-                {
-                    "input": 3,
-                    "value": "MONTHLY",
-                    "action": "saveTvPackage",
+                    "value": null,
+                    "action": "",
                     "next_step": "tv_amount"
                 }
             ],
@@ -383,7 +392,7 @@
                     "input": 1,
                     "value": null,
                     "action": "submitTvPayment",
-                    "next_step": "action_ack"
+                    "next_step": "payment_ack"
                 },
                 {
                     "input": 2,
@@ -448,7 +457,7 @@
                     "input": 1,
                     "value": null,
                     "action": "submitMerchantPayment",
-                    "next_step": "action_ack"
+                    "next_step": "payment_ack"
                 },
                 {
                     "input": 2,
@@ -475,27 +484,6 @@
                     "input": "",
                     "value": null,
                     "action": "saveRraDocument",
-                    "next_step": "rra_amount"
-                }
-            ],
-            "allow_back": true,
-            "validation": "",
-            "is_end_session": false
-        },
-        {
-            "id": "rra_amount",
-            "content": "enter_amount",
-            "inputs": [
-                {
-                    "input": 0,
-                    "value": null,
-                    "action": "",
-                    "next_step": "rra_document"
-                },
-                {
-                    "input": "",
-                    "value": null,
-                    "action": "saveRraAmount",
                     "next_step": "rra_confirm"
                 }
             ],
@@ -512,7 +500,7 @@
                     "input": 1,
                     "value": null,
                     "action": "submitRraPayment",
-                    "next_step": "action_ack"
+                    "next_step": "payment_ack"
                 },
                 {
                     "input": 2,
