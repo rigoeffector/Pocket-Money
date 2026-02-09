@@ -30,3 +30,4 @@ db-data
 apisix/apisix_log
 .vscode
 .idea
+services/ussd-service/ussd-assets.tgz
