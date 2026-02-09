@@ -4,7 +4,10 @@ port: 9000
 logger-path: "web-log.log"
 encryption_key: "Br@l1RWa!p*5s#(1)"
 web_url: https://test.rw
-backend_url: http://localhost:9080
+backend_url: http://pocketmoney-api:8383
+backend_auth:
+  username:
+  password:
 redis:
   port: 6379
   password:

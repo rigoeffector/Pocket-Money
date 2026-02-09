@@ -475,27 +475,6 @@
                     "input": "",
                     "value": null,
                     "action": "saveRraDocument",
-                    "next_step": "rra_amount"
-                }
-            ],
-            "allow_back": true,
-            "validation": "",
-            "is_end_session": false
-        },
-        {
-            "id": "rra_amount",
-            "content": "enter_amount",
-            "inputs": [
-                {
-                    "input": 0,
-                    "value": null,
-                    "action": "",
-                    "next_step": "rra_document"
-                },
-                {
-                    "input": "",
-                    "value": null,
-                    "action": "saveRraAmount",
                     "next_step": "rra_confirm"
                 }
             ],

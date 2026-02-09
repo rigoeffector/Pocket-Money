@@ -22,8 +22,6 @@ import (
 	"os"
 	"reflect"
 	"regexp"
-	"shared-package/model"
-	"shared-package/proto"
 	"strconv"
 	"strings"
 	"text/template"
@@ -38,12 +36,14 @@ import (
 	"github.com/nicksnyder/go-i18n/v2/i18n"
 	"github.com/spf13/viper"
 	"github.com/xuri/excelize/v2"
+	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+
+	"shared-package/model"
 )
 
 var IsTestMode bool = false
+var zapLogger *zap.Logger
 var ctx = context.Background()
 
 // var ctx = context.Background()
@@ -144,26 +144,41 @@ func GenerateCSRFToken() string {
 	return hex.EncodeToString(token)
 }
 func LogMessage(logLevel string, message string, service string, forcedTraceId ...string) string {
-	fmt.Println(message)
-	conn, err := grpc.Dial("logger-service:50051", grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		log.Println("Logger service not connected: " + err.Error())
+	if zapLogger == nil {
+		mode := strings.ToLower(viper.GetString("mode"))
+		var err error
+		if IsTestMode || mode == "development" {
+			zapLogger, err = zap.NewDevelopment()
+		} else {
+			zapLogger, err = zap.NewProduction()
+		}
+		if err != nil {
+			log.Printf("zap init failed: %v", err)
+			zapLogger = zap.NewNop()
+		}
 	}
-	defer conn.Close()
-	client := proto.NewLoggerServiceClient(conn)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
 	traceId := RandString(12)
-	//manually set log trace id
 	if forcedTraceId != nil && forcedTraceId[0] != "" {
 		traceId = forcedTraceId[0]
 	}
-	r, err := client.Log(ctx, &proto.LogRequest{LogLevel: logLevel, LogTime: time.Now().Format(time.DateTime),
-		ServiceName: service, Message: message, Identifier: traceId})
-	if err != nil {
-		log.Println("Logger service not responsed: " + err.Error())
+	fields := []zap.Field{
+		zap.String("service", service),
+		zap.String("traceId", traceId),
 	}
-	log.Printf("Response: %s \n", r.GetResponse())
+	switch strings.ToLower(logLevel) {
+	case "critical", "fatal", "panic":
+		zapLogger.Error(message, fields...)
+	case "error":
+		zapLogger.Error(message, fields...)
+	case "warn", "warning":
+		zapLogger.Warn(message, fields...)
+	case "info":
+		zapLogger.Info(message, fields...)
+	case "debug":
+		zapLogger.Debug(message, fields...)
+	default:
+		zapLogger.Info(message, fields...)
+	}
 	return traceId
 }
 
