@@ -355,6 +355,27 @@
                     "input": 1,
                     "value": null,
                     "action": "",
+                    "next_step": "tv_bouquet"
+                }
+            ],
+            "allow_back": true,
+            "validation": "",
+            "is_end_session": false
+        },
+        {
+            "id": "tv_bouquet",
+            "content": "tv_bouquet_select",
+            "inputs": [
+                {
+                    "input": 0,
+                    "value": null,
+                    "action": "",
+                    "next_step": "tv_account_menu"
+                },
+                {
+                    "input": "",
+                    "value": null,
+                    "action": "saveTvPackage",
                     "next_step": "tv_amount"
                 }
             ],
@@ -364,13 +385,14 @@
         },
         {
             "id": "tv_amount",
-            "content": "enter_amount",
+            "content": "tv_amount_prompt:fn",
+            "content_type": "dynamic",
             "inputs": [
                 {
                     "input": 0,
                     "value": null,
                     "action": "",
-                    "next_step": "tv_account_menu"
+                    "next_step": "tv_bouquet"
                 },
                 {
                     "input": "",
