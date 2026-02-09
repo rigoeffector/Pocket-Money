@@ -4771,14 +4771,25 @@ public class EfashePaymentService {
         logger.info("Found transaction - EFASHE Transaction ID: {}, Current MoPay Status: {}, Current EFASHE Status: {}",
                 transaction.getTransactionId(), transaction.getMopayStatus(), transaction.getEfasheStatus());
 
+        // If callback returns 200/success but we already processed this transaction (efashe_status = SUCCESS),
+        // do NOT run execute again – only update MoPay status and return. Prevents duplicate service delivery.
+        boolean alreadySuccess = "SUCCESS".equalsIgnoreCase(transaction.getEfasheStatus());
+        boolean isSuccessful = (status != null && (status == 200 || status == 201))
+                || "SUCCESSFUL".equalsIgnoreCase(statusDesc);
+        if (alreadySuccess && isSuccessful) {
+            if (status != null) {
+                transaction.setMopayStatus(status.toString());
+            }
+            efasheTransactionRepository.save(transaction);
+            logger.info("Callback 200/success for already-SUCCESS transaction {} – updated MoPay status only, skipping execute to avoid duplicate payment.", transaction.getTransactionId());
+            return;
+        }
+
         if (status != null) {
             transaction.setMopayStatus(status.toString());
         }
 
-        boolean isSuccessful = (status != null && (status == 200 || status == 201))
-                || "SUCCESSFUL".equalsIgnoreCase(statusDesc);
-
-        if (isSuccessful && !"SUCCESS".equalsIgnoreCase(transaction.getEfasheStatus())) {
+        if (isSuccessful && !alreadySuccess) {
             logger.info("✅ BizaoPayment transaction SUCCESS detected - Triggering EFASHE execute...");
             try {
                 EfasheExecuteRequest executeRequest = new EfasheExecuteRequest();
