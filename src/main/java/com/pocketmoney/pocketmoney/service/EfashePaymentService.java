@@ -4746,6 +4746,15 @@ public class EfashePaymentService {
     }
 
     /**
+     * Apply callback status to the matching EFASHE transaction (used by bulk status poller).
+     * Same behaviour as webhook: update mopay_status, and if status is success trigger EFASHE execute and set efashe_status.
+     */
+    @Transactional
+    public void applyCallbackStatusFromBulk(String transactionId, int status, String statusDesc) {
+        processWebhookPayload(transactionId, status, statusDesc);
+    }
+
+    /**
      * Apply webhook payload to the matching EFASHE transaction: update status and optionally trigger execute.
      */
     private void processWebhookPayload(String transactionId, Integer status, String statusDesc) {

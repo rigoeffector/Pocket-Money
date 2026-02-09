@@ -10,6 +10,7 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -47,5 +48,17 @@ public interface EfasheTransactionRepository extends JpaRepository<EfasheTransac
         @Param("toDate") LocalDateTime toDate,
         Pageable pageable
     );
+
+    /**
+     * Pending transactions (no SUCCESS/FAILED yet) that have been through process and have
+     * the external transaction id (same as data.transactionId from POST /api/efashe/process/{id}),
+     * created before given time (e.g. 5 mins ago). That id is sent to the bulk status API.
+     */
+    @Query("SELECT t FROM EfasheTransaction t WHERE " +
+           "(t.mopayTransactionId IS NOT NULL AND t.mopayTransactionId != '') " +
+           "AND (t.efasheStatus IS NULL OR (t.efasheStatus != 'SUCCESS' AND t.efasheStatus != 'FAILED')) " +
+           "AND t.createdAt < :beforeTime " +
+           "ORDER BY t.createdAt ASC")
+    List<EfasheTransaction> findPendingWithExternalIdCreatedBefore(@Param("beforeTime") LocalDateTime beforeTime);
 }
 
