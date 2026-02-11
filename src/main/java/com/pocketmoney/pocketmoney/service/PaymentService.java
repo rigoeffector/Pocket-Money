@@ -76,7 +76,7 @@ public class PaymentService {
     private final PaymentCommissionSettingRepository paymentCommissionSettingRepository;
     private final MerchantUserBalanceRepository merchantUserBalanceRepository;
     private final LoanRepository loanRepository;
-    private final MoPayService moPayService;
+    private final MopayOpenApiService moPayService;
     private final PasswordEncoder passwordEncoder;
     private final EntityManager entityManager;
     private final MessagingService messagingService;
@@ -88,7 +88,7 @@ public class PaymentService {
                          PaymentCommissionSettingRepository paymentCommissionSettingRepository,
                          MerchantUserBalanceRepository merchantUserBalanceRepository,
                          LoanRepository loanRepository,
-                         MoPayService moPayService, PasswordEncoder passwordEncoder, EntityManager entityManager,
+                         MopayOpenApiService moPayService, PasswordEncoder passwordEncoder, EntityManager entityManager,
                          MessagingService messagingService, WhatsAppService whatsAppService) {
         this.userRepository = userRepository;
         this.transactionRepository = transactionRepository;

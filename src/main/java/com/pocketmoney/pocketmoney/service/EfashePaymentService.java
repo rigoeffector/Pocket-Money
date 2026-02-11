@@ -41,8 +41,8 @@ public class EfashePaymentService {
     private static final Logger logger = LoggerFactory.getLogger(EfashePaymentService.class);
 
     private final EfasheSettingsService efasheSettingsService;
-    private final MoPayService moPayService;
-    private final BizaoPaymentService bizaoPaymentService;
+    private final MopayOpenApiService moPayService;
+    private final MopayPaymentService bizaoPaymentService;
     private final EfasheApiService efasheApiService;
     private final EfasheTransactionRepository efasheTransactionRepository;
     private final EfasheRefundHistoryRepository efasheRefundHistoryRepository;
@@ -51,12 +51,12 @@ public class EfashePaymentService {
     private final UserRepository userRepository;
     private final EntityManager entityManager;
 
-    @Value("${bizaopayment.webhook.signing.key:testKey}")
-    private String bizaoPaymentWebhookSigningKey;
+    @Value("${mopay.webhook.signing.key:testKey}")
+    private String mopayPaymentWebhookSigningKey;
 
     public EfashePaymentService(EfasheSettingsService efasheSettingsService, 
-                                 MoPayService moPayService,
-                                 BizaoPaymentService bizaoPaymentService,
+                                 MopayOpenApiService moPayService,
+                                 MopayPaymentService bizaoPaymentService,
                                  EfasheApiService efasheApiService,
                                  EfasheTransactionRepository efasheTransactionRepository,
                                  EfasheRefundHistoryRepository efasheRefundHistoryRepository,
@@ -4662,8 +4662,8 @@ public class EfashePaymentService {
      * When callback returns with status, updates the corresponding transaction status.
      */
     @Transactional
-    public void handleBizaoPaymentWebhook(String body) {
-        logger.info("=== BIZAO PAYMENT WEBHOOK RECEIVED ===");
+    public void handleMopayPaymentWebhook(String body) {
+        logger.info("=== MOPAY PAYMENT WEBHOOK RECEIVED ===");
         if (body == null) {
             body = "";
         }
@@ -4707,7 +4707,7 @@ public class EfashePaymentService {
                 }
             } else {
                 // JWT-encoded payload
-                SecretKey signingKey = Keys.hmacShaKeyFor(bizaoPaymentWebhookSigningKey.getBytes(StandardCharsets.UTF_8));
+                SecretKey signingKey = Keys.hmacShaKeyFor(mopayPaymentWebhookSigningKey.getBytes(StandardCharsets.UTF_8));
                 Claims claims = Jwts.parser()
                         .verifyWith(signingKey)
                         .build()

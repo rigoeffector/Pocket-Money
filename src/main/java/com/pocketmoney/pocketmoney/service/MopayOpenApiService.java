@@ -12,19 +12,19 @@ import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 
 @Service
-public class MoPayService {
+public class MopayOpenApiService {
 
-    private static final Logger logger = LoggerFactory.getLogger(MoPayService.class);
+    private static final Logger logger = LoggerFactory.getLogger(MopayOpenApiService.class);
 
-    @Value("${mopay.api.url:https://api.mopay.rw}")
+    @Value("${mopay_open_api.api.url:https://api.mopay.rw}")
     private String mopayApiUrl;
 
-    @Value("${mopay.api.token:2fuytPgoD4At0FE1MgoF08xuAr03xSvkJ1ZlGrT5jYFyolQsBU7XKU28OW4Oqq3a}")
+    @Value("${mopay_open_api.api.token:2fuytPgoD4At0FE1MgoF08xuAr03xSvkJ1ZlGrT5jYFyolQsBU7XKU28OW4Oqq3a}")
     private String mopayApiToken;
 
     private final RestTemplate restTemplate;
 
-    public MoPayService(RestTemplate restTemplate) {
+    public MopayOpenApiService(RestTemplate restTemplate) {
         this.restTemplate = restTemplate;
     }
 

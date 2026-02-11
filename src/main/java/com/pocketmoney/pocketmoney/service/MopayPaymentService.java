@@ -13,19 +13,19 @@ import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 
 @Service
-public class BizaoPaymentService {
+public class MopayPaymentService {
 
-    private static final Logger logger = LoggerFactory.getLogger(BizaoPaymentService.class);
+    private static final Logger logger = LoggerFactory.getLogger(MopayPaymentService.class);
 
-    @Value("${bizaopayment.api.url:http://41.186.14.66:443}")
+    @Value("${mopay.api.url:http://41.186.14.66:443}")
     private String bizaoPaymentApiUrl;
 
-    @Value("${bizaopayment.api.token:dW5vdGlmeTpRMG5XMUMhLkBEM1YjJTgqTTIxMkBf}")
+    @Value("${mopay.api.token:dW5vdGlmeTpRMG5XMUMhLkBEM1YjJTgqTTIxMkBf}")
     private String bizaoPaymentApiToken;
 
     private final RestTemplate restTemplate;
 
-    public BizaoPaymentService(RestTemplate restTemplate) {
+    public MopayPaymentService(RestTemplate restTemplate) {
         this.restTemplate = restTemplate;
     }
 

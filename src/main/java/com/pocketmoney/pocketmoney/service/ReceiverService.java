@@ -56,7 +56,7 @@ public class ReceiverService {
     private final MerchantUserBalanceRepository merchantUserBalanceRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtUtil jwtUtil;
-    private final MoPayService moPayService;
+    private final MopayOpenApiService moPayService;
     private final EntityManager entityManager;
     private final MessagingService messagingService;
     private final WhatsAppService whatsAppService;
@@ -65,7 +65,7 @@ public class ReceiverService {
                           BalanceAssignmentHistoryRepository balanceAssignmentHistoryRepository,
                           PaymentCommissionSettingRepository paymentCommissionSettingRepository,
                           MerchantUserBalanceRepository merchantUserBalanceRepository,
-                          PasswordEncoder passwordEncoder, JwtUtil jwtUtil, MoPayService moPayService,
+                          PasswordEncoder passwordEncoder, JwtUtil jwtUtil, MopayOpenApiService moPayService,
                           EntityManager entityManager, MessagingService messagingService, WhatsAppService whatsAppService) {
         this.receiverRepository = receiverRepository;
         this.transactionRepository = transactionRepository;
