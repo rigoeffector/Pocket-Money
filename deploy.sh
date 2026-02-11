@@ -544,8 +544,8 @@ main() {
     apply_migrations
     setup_java
     setup_server_directory
-    stop_existing_app
     deploy_application
+    stop_existing_app
     start_application
     test_application
     show_summary

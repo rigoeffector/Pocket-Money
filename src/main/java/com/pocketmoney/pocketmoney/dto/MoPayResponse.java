@@ -7,6 +7,7 @@ import lombok.Data;
 public class MoPayResponse {
     private Integer status; // HTTP status code (e.g., 201)
     private String transactionId; // MoPay transaction ID
+    private String statusDesc; // MoPay status description (e.g., PENDING, SUCCESSFUL)
     
     // For error responses
     private String message;

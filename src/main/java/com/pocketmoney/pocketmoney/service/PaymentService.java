@@ -3,12 +3,14 @@ package com.pocketmoney.pocketmoney.service;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -22,7 +24,9 @@ import com.pocketmoney.pocketmoney.dto.LoanInfo;
 import com.pocketmoney.pocketmoney.dto.LoanResponse;
 import com.pocketmoney.pocketmoney.dto.MerchantBalanceInfo;
 import com.pocketmoney.pocketmoney.dto.MerchantTopUpRequest;
-import com.pocketmoney.pocketmoney.dto.MoPayInitiateRequest;
+import com.pocketmoney.pocketmoney.dto.MopayECWPaymentInitiateRequest;
+import com.pocketmoney.pocketmoney.dto.MopayECWPaymentResponse;
+import com.pocketmoney.pocketmoney.dto.MopayOpenApiInitiateRequest;
 import com.pocketmoney.pocketmoney.dto.MoPayResponse;
 import com.pocketmoney.pocketmoney.dto.MomoPaymentRequest;
 import com.pocketmoney.pocketmoney.dto.PaginatedResponse;
@@ -76,11 +80,20 @@ public class PaymentService {
     private final PaymentCommissionSettingRepository paymentCommissionSettingRepository;
     private final MerchantUserBalanceRepository merchantUserBalanceRepository;
     private final LoanRepository loanRepository;
-    private final MoPayService moPayService;
+    private final MopayOpenApiService moPayService;
+    private final MopayPaymentService mopayPaymentService;
     private final PasswordEncoder passwordEncoder;
     private final EntityManager entityManager;
     private final MessagingService messagingService;
     private final WhatsAppService whatsAppService;
+
+    @Value("${payment.provider:mopay_open_api}")
+    private String paymentProvider;
+
+    private enum PaymentProvider {
+        MOPAY_OPEN_API,
+        MOPAY
+    }
 
     public PaymentService(UserRepository userRepository, TransactionRepository transactionRepository,
                          PaymentCategoryRepository paymentCategoryRepository, ReceiverRepository receiverRepository,
@@ -88,7 +101,8 @@ public class PaymentService {
                          PaymentCommissionSettingRepository paymentCommissionSettingRepository,
                          MerchantUserBalanceRepository merchantUserBalanceRepository,
                          LoanRepository loanRepository,
-                         MoPayService moPayService, PasswordEncoder passwordEncoder, EntityManager entityManager,
+                         MopayOpenApiService moPayService, MopayPaymentService mopayPaymentService,
+                         PasswordEncoder passwordEncoder, EntityManager entityManager,
                          MessagingService messagingService, WhatsAppService whatsAppService) {
         this.userRepository = userRepository;
         this.transactionRepository = transactionRepository;
@@ -99,10 +113,67 @@ public class PaymentService {
         this.merchantUserBalanceRepository = merchantUserBalanceRepository;
         this.loanRepository = loanRepository;
         this.moPayService = moPayService;
+        this.mopayPaymentService = mopayPaymentService;
         this.passwordEncoder = passwordEncoder;
         this.entityManager = entityManager;
         this.messagingService = messagingService;
         this.whatsAppService = whatsAppService;
+    }
+
+    private PaymentProvider resolvePaymentProvider() {
+        if (paymentProvider == null) {
+            return PaymentProvider.MOPAY_OPEN_API;
+        }
+        String normalized = paymentProvider.trim().toLowerCase(Locale.ROOT);
+        if (normalized.isEmpty()) {
+            return PaymentProvider.MOPAY_OPEN_API;
+        }
+        if ("mopay".equals(normalized) || "mopay_payment".equals(normalized)) {
+            return PaymentProvider.MOPAY;
+        }
+        if ("mopayopenapi".equals(normalized) || "mopay_open_api".equals(normalized) || "openapi".equals(normalized)) {
+            return PaymentProvider.MOPAY_OPEN_API;
+        }
+        return PaymentProvider.MOPAY_OPEN_API;
+    }
+
+    private MoPayResponse toMoPayResponse(MopayECWPaymentResponse mopayResponse) {
+        MoPayResponse response = new MoPayResponse();
+        if (mopayResponse == null) {
+            return response;
+        }
+
+        response.setTransactionId(mopayResponse.getTransactionId());
+        response.setStatus(mopayResponse.getStatus());
+        response.setStatusDesc(mopayResponse.getStatusDesc());
+
+        boolean isSuccessful = "SUCCESSFUL".equalsIgnoreCase(mopayResponse.getStatusDesc());
+        response.setSuccess(isSuccessful);
+
+        if (mopayResponse.getMessage() != null && !mopayResponse.getMessage().isEmpty()) {
+            response.setMessage(mopayResponse.getMessage());
+        } else if (mopayResponse.getStatusDesc() != null) {
+            response.setMessage("Mopay status: " + mopayResponse.getStatusDesc());
+        } else {
+            response.setMessage("Mopay response received");
+        }
+
+        return response;
+    }
+
+    private boolean isPaymentSuccessful(MoPayResponse moPayResponse, PaymentProvider provider) {
+        if (moPayResponse == null) {
+            return false;
+        }
+
+        Integer statusCode = moPayResponse.getStatus();
+        if (provider == PaymentProvider.MOPAY) {
+            return (statusCode != null && (statusCode == 200 || statusCode == 201))
+                || Boolean.TRUE.equals(moPayResponse.getSuccess());
+        }
+
+        return (statusCode != null && (statusCode == 200 || statusCode == 201))
+            || Boolean.TRUE.equals(moPayResponse.getSuccess());
     }
 
     // Helper method to normalize phone number to 12 digits (250XXXXXXXXX format)
@@ -196,29 +267,66 @@ public class PaymentService {
             transferPhone = "250794230137";
         }
 
+        // Generate transaction ID starting with POCHI for top-up
+        String transactionId = generateTransactionId();
+
+        PaymentProvider provider = resolvePaymentProvider();
+        logger.info("MOMO payment provider resolved to: {}", provider);
+
         // Create MoPay initiate request
-        MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
-        moPayRequest.setAmount(request.getAmount());
-        moPayRequest.setCurrency("RWF");
+        MopayOpenApiInitiateRequest moPayRequest = null;
+        MopayECWPaymentInitiateRequest mopayECWRequest = null;
+        String message = request.getMessage() != null ? request.getMessage() :
+            (isMerchantTopUp ? "Top up to " + receiver.getCompanyName() : "Top up to pocket money card");
+
         // Normalize phone to 12 digits
         String normalizedPayerPhone = normalizePhoneTo12Digits(request.getPhone());
-        moPayRequest.setPhone(normalizedPayerPhone);
-        moPayRequest.setPayment_mode("MOBILE");
-        moPayRequest.setMessage(request.getMessage() != null ? request.getMessage() : 
-            (isMerchantTopUp ? "Top up to " + receiver.getCompanyName() : "Top up to pocket money card"));
 
-        // Create transfer to receiver (merchant's MoMo account or default admin)
-        MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
-        transfer.setAmount(request.getAmount());
-        // transferPhone is String, convert to Long
-        Long transferPhoneLong = Long.parseLong(transferPhone);
-        transfer.setPhone(transferPhoneLong);
-        transfer.setMessage(request.getMessage() != null ? request.getMessage() : 
-            (isMerchantTopUp ? "Top up to " + receiver.getCompanyName() : "Top up to pocket money card"));
-        moPayRequest.setTransfers(java.util.List.of(transfer));
+        if (provider == PaymentProvider.MOPAY_OPEN_API) {
+            moPayRequest = new MopayOpenApiInitiateRequest();
+            moPayRequest.setAmount(request.getAmount());
+            moPayRequest.setCurrency("RWF");
+            moPayRequest.setPhone(normalizedPayerPhone);
+            moPayRequest.setPayment_mode("MOBILE");
+            moPayRequest.setMessage(message);
+
+            // Create transfer to receiver (merchant's MoMo account or default admin)
+            MopayOpenApiInitiateRequest.Transfer transfer = new MopayOpenApiInitiateRequest.Transfer();
+            transfer.setAmount(request.getAmount());
+            // transferPhone is String, convert to Long
+            Long transferPhoneLong = Long.parseLong(transferPhone);
+            transfer.setPhone(transferPhoneLong);
+            transfer.setMessage(message);
+            moPayRequest.setTransfers(java.util.List.of(transfer));
+        } else {
+            mopayECWRequest = new MopayECWPaymentInitiateRequest();
+            mopayECWRequest.setTransactionId(transactionId);
+            mopayECWRequest.setAccount_no(normalizedPayerPhone);
+            mopayECWRequest.setTitle(message);
+            mopayECWRequest.setDetails(message);
+            mopayECWRequest.setPayment_type("momo");
+            mopayECWRequest.setAmount(request.getAmount());
+            mopayECWRequest.setCurrency("RWF");
+            mopayECWRequest.setMessage(message);
+
+            MopayECWPaymentInitiateRequest.Transfer transfer = new MopayECWPaymentInitiateRequest.Transfer();
+            transfer.setTransactionId(transactionId + "-1");
+            transfer.setAccount_no(transferPhone);
+            transfer.setPayment_type("momo");
+            transfer.setAmount(request.getAmount());
+            transfer.setCurrency("RWF");
+            transfer.setMessage(message);
+            mopayECWRequest.setTransfers(java.util.List.of(transfer));
+        }
 
         // Initiate payment with MoPay
-        MoPayResponse moPayResponse = moPayService.initiatePayment(moPayRequest);
+        MoPayResponse moPayResponse;
+        if (provider == PaymentProvider.MOPAY_OPEN_API) {
+            moPayResponse = moPayService.initiatePayment(moPayRequest);
+        } else {
+            MopayECWPaymentResponse mopayResponse = mopayPaymentService.initiatePayment(mopayECWRequest);
+            moPayResponse = toMoPayResponse(mopayResponse);
+        }
 
         // Create transaction record
         Transaction transaction = new Transaction();
@@ -226,7 +334,7 @@ public class PaymentService {
         transaction.setTransactionType(TransactionType.TOP_UP);
         transaction.setAmount(request.getAmount());
         transaction.setPhoneNumber(request.getPhone());
-        transaction.setMessage(moPayRequest.getMessage());
+        transaction.setMessage(message);
         transaction.setBalanceBefore(user.getAmountRemaining());
 
         // Set receiver if this is a merchant-specific top-up
@@ -235,14 +343,14 @@ public class PaymentService {
             transaction.setTopUpType(TopUpType.MOMO);
         }
 
-        // Generate transaction ID starting with POCHI for top-up
-        String transactionId = generateTransactionId();
-            transaction.setMopayTransactionId(transactionId);
+        transaction.setMopayTransactionId(transactionId);
         
         // Check MoPay response - API returns status 201 on success
         String mopayTransactionId = moPayResponse != null ? moPayResponse.getTransactionId() : null;
-        if (moPayResponse != null && moPayResponse.getStatus() != null && moPayResponse.getStatus() == 201 
-            && mopayTransactionId != null) {
+        if (mopayTransactionId == null && provider == PaymentProvider.MOPAY && isPaymentSuccessful(moPayResponse, provider)) {
+            mopayTransactionId = transactionId;
+        }
+        if (isPaymentSuccessful(moPayResponse, provider) && mopayTransactionId != null) {
             // Successfully initiated - keep our POCHI transaction ID and set as PENDING
             // Store MoPay transaction ID in message for status checking
             String existingMessage = transaction.getMessage() != null ? transaction.getMessage() : "";
@@ -430,16 +538,35 @@ public class PaymentService {
             if (request.getPhone() == null || request.getPhone().trim().isEmpty()) {
                 throw new RuntimeException("Phone number is required for MOMO top-up");
             }
+
+            PaymentProvider provider = resolvePaymentProvider();
+            logger.info("MOMO payment provider resolved to: {}", provider);
             
             // Create MoPay initiate request
-            MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
-            moPayRequest.setAmount(request.getAmount());
-            moPayRequest.setCurrency("RWF");
+            MopayOpenApiInitiateRequest moPayRequest = null;
+            MopayECWPaymentInitiateRequest mopayECWRequest = null;
             String normalizedPayerPhone = normalizePhoneTo12Digits(request.getPhone());
-            moPayRequest.setPhone(normalizedPayerPhone);
-            moPayRequest.setPayment_mode("MOBILE");
-            moPayRequest.setMessage(request.getMessage() != null ? request.getMessage() : 
-                "Top up to " + merchant.getCompanyName());
+            String message = request.getMessage() != null ? request.getMessage() :
+                "Top up to " + merchant.getCompanyName();
+
+            if (provider == PaymentProvider.MOPAY_OPEN_API) {
+                moPayRequest = new MopayOpenApiInitiateRequest();
+                moPayRequest.setAmount(request.getAmount());
+                moPayRequest.setCurrency("RWF");
+                moPayRequest.setPhone(normalizedPayerPhone);
+                moPayRequest.setPayment_mode("MOBILE");
+                moPayRequest.setMessage(message);
+            } else {
+                mopayECWRequest = new MopayECWPaymentInitiateRequest();
+                mopayECWRequest.setTransactionId(transactionId);
+                mopayECWRequest.setAccount_no(normalizedPayerPhone);
+                mopayECWRequest.setTitle(message);
+                mopayECWRequest.setDetails(message);
+                mopayECWRequest.setPayment_type("momo");
+                mopayECWRequest.setAmount(request.getAmount());
+                mopayECWRequest.setCurrency("RWF");
+                mopayECWRequest.setMessage(message);
+            }
             
             // Determine which phone number to use for receiving top-up money
             // If merchant is flexible, use their MoMo account phone; otherwise use default admin phone
@@ -458,24 +585,42 @@ public class PaymentService {
             }
             
             // Create transfer to receiving phone (merchant's MoMo account if flexible, or default admin phone)
-            MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
-            transfer.setAmount(request.getAmount());
             String normalizedReceivingPhone = normalizePhoneTo12Digits(receivingPhone);
-            transfer.setPhone(Long.parseLong(normalizedReceivingPhone));
-            transfer.setMessage(request.getMessage() != null ? request.getMessage() : 
-                "Top up to " + merchant.getCompanyName());
-            moPayRequest.setTransfers(java.util.List.of(transfer));
+            if (provider == PaymentProvider.MOPAY_OPEN_API) {
+                MopayOpenApiInitiateRequest.Transfer transfer = new MopayOpenApiInitiateRequest.Transfer();
+                transfer.setAmount(request.getAmount());
+                transfer.setPhone(Long.parseLong(normalizedReceivingPhone));
+                transfer.setMessage(message);
+                moPayRequest.setTransfers(java.util.List.of(transfer));
+            } else {
+                MopayECWPaymentInitiateRequest.Transfer transfer = new MopayECWPaymentInitiateRequest.Transfer();
+                transfer.setTransactionId(transactionId + "-1");
+                transfer.setAccount_no(normalizedReceivingPhone);
+                transfer.setPayment_type("momo");
+                transfer.setAmount(request.getAmount());
+                transfer.setCurrency("RWF");
+                transfer.setMessage(message);
+                mopayECWRequest.setTransfers(java.util.List.of(transfer));
+            }
             
             // Initiate payment with MoPay
-            MoPayResponse moPayResponse = moPayService.initiatePayment(moPayRequest);
+            MoPayResponse moPayResponse;
+            if (provider == PaymentProvider.MOPAY_OPEN_API) {
+                moPayResponse = moPayService.initiatePayment(moPayRequest);
+            } else {
+                MopayECWPaymentResponse mopayResponse = mopayPaymentService.initiatePayment(mopayECWRequest);
+                moPayResponse = toMoPayResponse(mopayResponse);
+            }
             
             transaction.setPhoneNumber(request.getPhone());
-            transaction.setMessage(moPayRequest.getMessage());
+            transaction.setMessage(message);
             
             // Check MoPay response
             String mopayTransactionId = moPayResponse != null ? moPayResponse.getTransactionId() : null;
-            if (moPayResponse != null && moPayResponse.getStatus() != null && moPayResponse.getStatus() == 201 
-                && mopayTransactionId != null) {
+            if (mopayTransactionId == null && provider == PaymentProvider.MOPAY && isPaymentSuccessful(moPayResponse, provider)) {
+                mopayTransactionId = transactionId;
+            }
+            if (isPaymentSuccessful(moPayResponse, provider) && mopayTransactionId != null) {
                 // Successfully initiated - keep our POCHI transaction ID and set as PENDING
                 String existingMessage = transaction.getMessage() != null ? transaction.getMessage() : "";
                 transaction.setMessage(existingMessage + " | MOPAY_ID:" + mopayTransactionId);
@@ -1198,10 +1343,11 @@ public class PaymentService {
         // Store the calculated balance after for later use when payment is confirmed
         // (will be applied in checkTransactionStatus when status becomes SUCCESS)
 
-        // Create MoPay initiate request
-        MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
-        moPayRequest.setAmount(paymentAmount);
-        moPayRequest.setCurrency("RWF");
+        PaymentProvider provider = resolvePaymentProvider();
+        logger.info("MOMO payment provider resolved to: {}", provider);
+
+        // Generate transaction ID starting with POCHI for MOMO payments
+        String transactionId = generateTransactionId();
         
         // Normalize payer phone to 12 digits and convert to Long (MoPay API requires 12 digits)
         String normalizedPayerPhone = normalizePhoneTo12Digits(payerPhone);
@@ -1218,10 +1364,20 @@ public class PaymentService {
             throw new RuntimeException("Normalized payer phone must contain only digits. Got: '" + normalizedPayerPhone + "'");
         }
         
-        logger.info("Setting payer phone in MoPay request to: {} (String value)", normalizedPayerPhone);
-        moPayRequest.setPhone(normalizedPayerPhone);
-        moPayRequest.setPayment_mode("MOBILE");
-        moPayRequest.setMessage(request.getMessage() != null ? request.getMessage() : "Payment to " + receiver.getCompanyName());
+        MopayOpenApiInitiateRequest moPayRequest = null;
+        MopayECWPaymentInitiateRequest mopayECWRequest = null;
+
+        if (provider == PaymentProvider.MOPAY_OPEN_API) {
+            // Create MoPay initiate request
+            moPayRequest = new MopayOpenApiInitiateRequest();
+            moPayRequest.setAmount(paymentAmount);
+            moPayRequest.setCurrency("RWF");
+
+            logger.info("Setting payer phone in MoPay request to: {} (String value)", normalizedPayerPhone);
+            moPayRequest.setPhone(normalizedPayerPhone);
+            moPayRequest.setPayment_mode("MOBILE");
+            moPayRequest.setMessage(request.getMessage() != null ? request.getMessage() : "Payment to " + receiver.getCompanyName());
+        }
         
         // Create transfer to receiver - amount minus user bonus and commission
         // The remaining amount (paymentAmount - userBonusAmount - commissionAmount) goes to receiver
@@ -1248,8 +1404,8 @@ public class PaymentService {
             logger.info("Receiver is not flexible - using default admin phone: {}", receivingPhone);
         }
         
-        MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
-        transfer.setAmount(receiverAmount);
+        MopayOpenApiInitiateRequest.Transfer transfer = null;
+        MopayECWPaymentInitiateRequest.Transfer mopayTransfer = null;
         logger.info("Using receiving phone for payment: {}", receivingPhone);
         
         // Normalize receiving phone to 12 digits - ensure it's exactly 12 digits
@@ -1267,15 +1423,33 @@ public class PaymentService {
             throw new RuntimeException("Normalized receiving phone must contain only digits. Got: '" + normalizedReceivingPhone + "'");
         }
         
-        logger.info("Setting receiving phone in transfer to: {} (Long value), Amount: {} (payment {} minus bonus {} minus commission {})", 
-                normalizedReceivingPhone, receiverAmount, paymentAmount, userBonusAmount, commissionAmount);
-        transfer.setPhone(Long.parseLong(normalizedReceivingPhone));
         String payerName = user != null ? user.getFullNames() : "Guest User";
-        transfer.setMessage("Payment from " + payerName + " to " + receiver.getCompanyName());
+
+        logger.info("Setting receiving phone in transfer to: {} (Long value), Amount: {} (payment {} minus bonus {} minus commission {})", 
+            normalizedReceivingPhone, receiverAmount, paymentAmount, userBonusAmount, commissionAmount);
+        if (provider == PaymentProvider.MOPAY_OPEN_API) {
+            transfer = new MopayOpenApiInitiateRequest.Transfer();
+            transfer.setAmount(receiverAmount);
+            transfer.setPhone(Long.parseLong(normalizedReceivingPhone));
+            transfer.setMessage("Payment from " + payerName + " to " + receiver.getCompanyName());
+        } else {
+            mopayTransfer = new MopayECWPaymentInitiateRequest.Transfer();
+            mopayTransfer.setTransactionId(transactionId + "-1");
+            mopayTransfer.setAccount_no(normalizedReceivingPhone);
+            mopayTransfer.setPayment_type("momo");
+            mopayTransfer.setAmount(receiverAmount);
+            mopayTransfer.setCurrency("RWF");
+            mopayTransfer.setMessage("Payment from " + payerName + " to " + receiver.getCompanyName());
+        }
         
         // Build transfers list - admin payment (minus bonus and commission), user bonus back to payer, and commission (if applicable)
-        java.util.List<MoPayInitiateRequest.Transfer> transfers = new java.util.ArrayList<>();
-        transfers.add(transfer);
+        java.util.List<MopayOpenApiInitiateRequest.Transfer> transfers = new java.util.ArrayList<>();
+        List<MopayECWPaymentInitiateRequest.Transfer> mopayTransfers = new java.util.ArrayList<>();
+        if (provider == PaymentProvider.MOPAY_OPEN_API) {
+            transfers.add(transfer);
+        } else {
+            mopayTransfers.add(mopayTransfer);
+        }
         
         logger.info("Added receiver transfer (to {} phone) - Amount: {}, Phone: {}", 
                 isReceiverFlexible ? "receiver's MoMo account" : "default admin", receiverAmount, normalizedReceivingPhone);
@@ -1285,11 +1459,22 @@ public class PaymentService {
                 userBonusAmount, userBonusAmount.compareTo(BigDecimal.ZERO) > 0);
         
         if (userBonusAmount.compareTo(BigDecimal.ZERO) > 0) {
-            MoPayInitiateRequest.Transfer bonusTransfer = new MoPayInitiateRequest.Transfer();
-            bonusTransfer.setAmount(userBonusAmount);
-            bonusTransfer.setPhone(Long.parseLong(normalizedPayerPhone));
-            bonusTransfer.setMessage("User bonus for payment to " + receiver.getCompanyName());
-            transfers.add(bonusTransfer);
+            if (provider == PaymentProvider.MOPAY_OPEN_API) {
+                MopayOpenApiInitiateRequest.Transfer bonusTransfer = new MopayOpenApiInitiateRequest.Transfer();
+                bonusTransfer.setAmount(userBonusAmount);
+                bonusTransfer.setPhone(Long.parseLong(normalizedPayerPhone));
+                bonusTransfer.setMessage("User bonus for payment to " + receiver.getCompanyName());
+                transfers.add(bonusTransfer);
+            } else {
+                MopayECWPaymentInitiateRequest.Transfer bonusTransfer = new MopayECWPaymentInitiateRequest.Transfer();
+                bonusTransfer.setTransactionId(transactionId + "-2");
+                bonusTransfer.setAccount_no(normalizedPayerPhone);
+                bonusTransfer.setPayment_type("momo");
+                bonusTransfer.setAmount(userBonusAmount);
+                bonusTransfer.setCurrency("RWF");
+                bonusTransfer.setMessage("User bonus for payment to " + receiver.getCompanyName());
+                mopayTransfers.add(bonusTransfer);
+            }
             logger.info("✅ Added user bonus transfer back to payer - Amount: {}, Phone: {}", userBonusAmount, normalizedPayerPhone);
         } else {
             logger.warn("⚠️ User bonus amount is zero or negative, NOT adding bonus transfer. Amount: {}", userBonusAmount);
@@ -1313,31 +1498,68 @@ public class PaymentService {
                 throw new RuntimeException("Normalized commission phone must contain only digits. Got: '" + normalizedCommissionPhone + "'");
             }
             
-            MoPayInitiateRequest.Transfer commissionTransfer = new MoPayInitiateRequest.Transfer();
-            commissionTransfer.setAmount(commissionAmount);
-            commissionTransfer.setPhone(Long.parseLong(normalizedCommissionPhone));
-            commissionTransfer.setMessage("Commission for payment to " + receiver.getCompanyName());
-            transfers.add(commissionTransfer);
+            if (provider == PaymentProvider.MOPAY_OPEN_API) {
+                MopayOpenApiInitiateRequest.Transfer commissionTransfer = new MopayOpenApiInitiateRequest.Transfer();
+                commissionTransfer.setAmount(commissionAmount);
+                commissionTransfer.setPhone(Long.parseLong(normalizedCommissionPhone));
+                commissionTransfer.setMessage("Commission for payment to " + receiver.getCompanyName());
+                transfers.add(commissionTransfer);
+            } else {
+                MopayECWPaymentInitiateRequest.Transfer commissionTransfer = new MopayECWPaymentInitiateRequest.Transfer();
+                commissionTransfer.setTransactionId(transactionId + "-3");
+                commissionTransfer.setAccount_no(normalizedCommissionPhone);
+                commissionTransfer.setPayment_type("momo");
+                commissionTransfer.setAmount(commissionAmount);
+                commissionTransfer.setCurrency("RWF");
+                commissionTransfer.setMessage("Commission for payment to " + receiver.getCompanyName());
+                mopayTransfers.add(commissionTransfer);
+            }
             logger.info("✅ Added commission transfer to commissioner - Amount: {}, Phone: {}", commissionAmount, normalizedCommissionPhone);
         } else {
             logger.info("⚠️ Commission amount is zero or commission phone not configured, NOT adding commission transfer.");
         }
         
         logger.info("=== TRANSFERS SUMMARY ===");
-        logger.info("Total transfers: {}", transfers.size());
         BigDecimal totalTransferAmount = BigDecimal.ZERO;
-        for (int i = 0; i < transfers.size(); i++) {
-            MoPayInitiateRequest.Transfer t = transfers.get(i);
-            logger.info("Transfer {}: Amount={}, Phone={}, Message={}", i + 1, t.getAmount(), t.getPhone(), t.getMessage());
-            totalTransferAmount = totalTransferAmount.add(t.getAmount());
+        if (provider == PaymentProvider.MOPAY_OPEN_API) {
+            logger.info("Total transfers: {}", transfers.size());
+            for (int i = 0; i < transfers.size(); i++) {
+                MopayOpenApiInitiateRequest.Transfer t = transfers.get(i);
+                logger.info("Transfer {}: Amount={}, Phone={}, Message={}", i + 1, t.getAmount(), t.getPhone(), t.getMessage());
+                totalTransferAmount = totalTransferAmount.add(t.getAmount());
+            }
+            logger.info("Total transfer amount: {}, Payment amount: {}", totalTransferAmount, paymentAmount);
+            logger.info("Main MoPay request amount: {}", moPayRequest.getAmount());
+            moPayRequest.setTransfers(transfers);
+        } else {
+            logger.info("Total transfers: {}", mopayTransfers.size());
+            for (int i = 0; i < mopayTransfers.size(); i++) {
+                MopayECWPaymentInitiateRequest.Transfer t = mopayTransfers.get(i);
+                logger.info("Transfer {}: Amount={}, Account No={}, Message={}", i + 1, t.getAmount(), t.getAccount_no(), t.getMessage());
+                totalTransferAmount = totalTransferAmount.add(t.getAmount());
+            }
+            logger.info("Total transfer amount: {}, Payment amount: {}", totalTransferAmount, paymentAmount);
         }
-        logger.info("Total transfer amount: {}, Payment amount: {}", totalTransferAmount, paymentAmount);
-        logger.info("Main MoPay request amount: {}", moPayRequest.getAmount());
-        
-        moPayRequest.setTransfers(transfers);
 
-        // Initiate payment with MoPay
-        MoPayResponse moPayResponse = moPayService.initiatePayment(moPayRequest);
+        MoPayResponse moPayResponse;
+        if (provider == PaymentProvider.MOPAY_OPEN_API) {
+            // Initiate payment with MoPay
+            moPayResponse = moPayService.initiatePayment(moPayRequest);
+        } else {
+            mopayECWRequest = new MopayECWPaymentInitiateRequest();
+            mopayECWRequest.setTransactionId(transactionId);
+            mopayECWRequest.setAccount_no(normalizedPayerPhone);
+            mopayECWRequest.setTitle("MOMO payment to " + receiver.getCompanyName());
+            mopayECWRequest.setDetails("Payment to " + receiver.getCompanyName());
+            mopayECWRequest.setPayment_type("momo");
+            mopayECWRequest.setAmount(paymentAmount);
+            mopayECWRequest.setCurrency("RWF");
+            mopayECWRequest.setMessage(request.getMessage() != null ? request.getMessage() : "Payment to " + receiver.getCompanyName());
+            mopayECWRequest.setTransfers(mopayTransfers);
+
+            MopayECWPaymentResponse mopayResponse = mopayPaymentService.initiatePayment(mopayECWRequest);
+            moPayResponse = toMoPayResponse(mopayResponse);
+        }
 
         // Create transaction record - MOMO PAYMENT starts as PENDING
         // Note: If userId is null, user will be null - this requires user_id to be nullable in Transaction entity
@@ -1360,14 +1582,14 @@ public class PaymentService {
         transaction.setReceiverBalanceBefore(receiverBalanceBefore); // Receiver's balance before
         transaction.setReceiverBalanceAfter(receiverBalanceAfter); // Receiver's balance after (to be applied on SUCCESS)
 
-        // Generate transaction ID starting with POCHI for MOMO payments
-        String transactionId = generateTransactionId();
-            transaction.setMopayTransactionId(transactionId);
+        transaction.setMopayTransactionId(transactionId);
         
         // Check MoPay response - API returns status 201 on success
         String mopayTransactionId = moPayResponse != null ? moPayResponse.getTransactionId() : null;
-        if (moPayResponse != null && moPayResponse.getStatus() != null && moPayResponse.getStatus() == 201 
-            && mopayTransactionId != null) {
+        if (mopayTransactionId == null && provider == PaymentProvider.MOPAY && isPaymentSuccessful(moPayResponse, provider)) {
+            mopayTransactionId = transactionId;
+        }
+        if (isPaymentSuccessful(moPayResponse, provider) && mopayTransactionId != null) {
             // Successfully initiated - keep our POCHI transaction ID and set as PENDING
             // Store MoPay transaction ID in message for status checking
             String existingMessage = transaction.getMessage() != null ? transaction.getMessage() : "";
@@ -1476,6 +1698,34 @@ public class PaymentService {
     }
 
     @Transactional
+    public PaymentResponse applyWebhookStatus(String mopayTransactionId, Integer status, String statusDesc) {
+        Transaction transaction = transactionRepository.findByMopayTransactionIdWithUser(mopayTransactionId)
+                .orElseThrow(() -> new RuntimeException("Transaction not found"));
+
+        String originalTransactionId = transaction.getMopayTransactionId();
+        logger.info("Applying webhook status - Transaction ID: {}, Current Status: {}, Status: {}, StatusDesc: {}", 
+            originalTransactionId, transaction.getStatus(), status, statusDesc);
+
+        String normalizedStatusDesc = statusDesc != null ? statusDesc.trim() : null;
+        boolean isSuccess = false;
+        boolean isFailure = false;
+        if (normalizedStatusDesc != null && !normalizedStatusDesc.isEmpty()) {
+            if ("SUCCESSFUL".equalsIgnoreCase(normalizedStatusDesc)
+                || "SUCCESS".equalsIgnoreCase(normalizedStatusDesc)) {
+                isSuccess = true;
+            } else if ("FAILED".equalsIgnoreCase(normalizedStatusDesc)) {
+                isFailure = true;
+            }
+        } else if (status != null) {
+            isSuccess = status == 200 || status == 201;
+            isFailure = status >= 400;
+        }
+        String failureMessage = "Mopay failed - Status: " + status + ", StatusDesc: " + statusDesc;
+
+        return applyStatusUpdate(transaction, originalTransactionId, isSuccess, isFailure, failureMessage, false);
+    }
+
+    @Transactional
     public PaymentResponse checkTransactionStatus(String mopayTransactionId) {
         Transaction transaction = transactionRepository.findByMopayTransactionIdWithUser(mopayTransactionId)
                 .orElseThrow(() -> new RuntimeException("Transaction not found"));
@@ -1504,271 +1754,56 @@ public class PaymentService {
             }
         }
         
+        PaymentProvider provider = resolvePaymentProvider();
+        logger.info("MOMO payment provider resolved to: {}", provider);
+
         // Check status with MoPay using the actual MoPay transaction ID
-        MoPayResponse moPayResponse = moPayService.checkTransactionStatus(actualMoPayTransactionId);
+        MoPayResponse moPayResponse;
+        if (provider == PaymentProvider.MOPAY_OPEN_API) {
+            moPayResponse = moPayService.checkTransactionStatus(actualMoPayTransactionId);
+        } else {
+            MopayECWPaymentResponse mopayResponse = mopayPaymentService.checkTransactionStatus(actualMoPayTransactionId);
+            moPayResponse = toMoPayResponse(mopayResponse);
+        }
 
         if (moPayResponse != null) {
             // Check-status endpoint might return status in different formats
             // Try to determine if transaction is successful
             String mopayStatus = null;
             if (moPayResponse.getStatus() != null) {
-                // If status is a string field, use it directly
                 mopayStatus = moPayResponse.getStatus().toString();
             } else if (moPayResponse.getTransaction_id() != null) {
-                // Sometimes status might be in transaction_id field
                 mopayStatus = moPayResponse.getTransaction_id();
             }
-            
-            // Update transaction status based on MoPay response
-            if ("SUCCESS".equalsIgnoreCase(mopayStatus) || "200".equals(mopayStatus) 
-                || (moPayResponse.getSuccess() != null && moPayResponse.getSuccess())) {
-                // Track if this is a status transition (from PENDING to SUCCESS)
-                boolean isStatusTransition = transaction.getStatus() == TransactionStatus.PENDING;
-                
-                // Only update balance if transitioning from PENDING to SUCCESS
-                if (isStatusTransition) {
-                    User user = transaction.getUser();
-                    
-                    if (transaction.getTransactionType() == TransactionType.TOP_UP) {
-                        Receiver topUpReceiver = transaction.getReceiver();
-                        
-                        if (topUpReceiver != null) {
-                            // Merchant-specific top-up: add to merchant-specific balance
-                            MerchantUserBalance merchantBalance = merchantUserBalanceRepository
-                                    .findByUserIdAndReceiverId(user.getId(), topUpReceiver.getId())
-                                    .orElse(null);
-                            
-                            if (merchantBalance == null) {
-                                // Create new merchant-specific balance
-                                merchantBalance = new MerchantUserBalance();
-                                merchantBalance.setUser(user);
-                                merchantBalance.setReceiver(topUpReceiver);
-                                merchantBalance.setBalance(BigDecimal.ZERO);
-                                merchantBalance.setTotalToppedUp(BigDecimal.ZERO);
-                            }
-                            
-                            // Update merchant-specific balance
-                            BigDecimal newMerchantBalance = merchantBalance.getBalance().add(transaction.getAmount());
-                            merchantBalance.setBalance(newMerchantBalance);
-                            merchantBalance.setTotalToppedUp(merchantBalance.getTotalToppedUp().add(transaction.getAmount()));
-                            merchantUserBalanceRepository.save(merchantBalance);
-                            
-                            // Also update user's amountRemaining for merchant-specific top-ups
-                            BigDecimal newAmountRemaining = user.getAmountRemaining().add(transaction.getAmount());
-                            user.setAmountRemaining(newAmountRemaining);
-                            
-                            // Set balance after to user's amountRemaining (not merchant balance)
-                            transaction.setBalanceAfter(newAmountRemaining);
-                        } else {
-                            // Global top-up: add to user's global balance
-                        BigDecimal newBalance = user.getAmountRemaining().add(transaction.getAmount());
-                        user.setAmountRemaining(newBalance);
-                        user.setAmountOnCard(user.getAmountOnCard().add(transaction.getAmount()));
-                        transaction.setBalanceAfter(newBalance);
-                        }
-                        
-                        // Always update amountOnCard for tracking total topped up
-                        user.setAmountOnCard(user.getAmountOnCard().add(transaction.getAmount()));
-                        user.setLastTransactionDate(LocalDateTime.now());
-                        userRepository.save(user);
-                    } else if (transaction.getTransactionType() == TransactionType.PAYMENT && transaction.getMopayTransactionId() != null) {
-                        // This is a MOMO PAYMENT - update receiver balance and user bonus
-                        Receiver receiver = transaction.getReceiver();
-                        if (receiver != null) {
-                            // Each receiver (main merchant or submerchant) has its own separate balance
-                            Receiver balanceOwner = receiver; // Always use receiver's own balance
-                            
-                            // Get the calculated values from transaction
-                            BigDecimal paymentAmount = transaction.getAmount();
-                            BigDecimal userBonusAmount = transaction.getUserBonusAmount() != null ? transaction.getUserBonusAmount() : BigDecimal.ZERO;
-                            BigDecimal receiverBalanceAfter = transaction.getReceiverBalanceAfter();
-                            
-                            // Handle null receiverBalanceAfter (e.g., for PAY_CUSTOMER transactions)
-                            if (receiverBalanceAfter == null) {
-                                // Calculate receiver balance after based on current balance and payment amount
-                                BigDecimal receiverBalanceBefore = receiver.getRemainingBalance() != null ? receiver.getRemainingBalance() : BigDecimal.ZERO;
-                                receiverBalanceAfter = receiverBalanceBefore.subtract(paymentAmount);
-                                logger.info("receiverBalanceAfter was null, calculated from current balance: {} - {} = {}", 
-                                    receiverBalanceBefore, paymentAmount, receiverBalanceAfter);
-                            }
-                            
-                            // Update receiver's own remaining balance (each receiver has separate balance)
-                            // Ensure remaining balance never goes below 0
-                            if (receiverBalanceAfter.compareTo(BigDecimal.ZERO) < 0) {
-                                receiverBalanceAfter = BigDecimal.ZERO;
-                                logger.info("Receiver balance would have been negative, setting to 0");
-                            }
-                            receiver.setRemainingBalance(receiverBalanceAfter);
-                            receiver.setLastTransactionDate(LocalDateTime.now());
-                            
-                            // Update receiver's wallet balance and total received (each receiver has separate balance)
-                            BigDecimal receiverNewWallet = receiver.getWalletBalance().add(paymentAmount);
-                            BigDecimal receiverNewTotal = receiver.getTotalReceived().add(paymentAmount);
-                            receiver.setWalletBalance(receiverNewWallet);
-                            receiver.setTotalReceived(receiverNewTotal);
-                            receiverRepository.save(receiver);
-                            
-                            logger.info("Updated receiver '{}' balance from MoPay callback: wallet={}, totalReceived={}, remainingBalance={}", 
-                                receiver.getCompanyName(), receiverNewWallet, receiverNewTotal, receiverBalanceAfter);
-                            
-                            // Add user bonus to user's card balance if applicable (only if user exists)
-                            User transactionUser = transaction.getUser();
-                            if (transactionUser != null) {
-                                if (userBonusAmount.compareTo(BigDecimal.ZERO) > 0) {
-                                    BigDecimal userBalanceBefore = transactionUser.getAmountRemaining();
-                                    BigDecimal userNewBalance = userBalanceBefore.add(userBonusAmount);
-                                    // Ensure amountRemaining never goes below 0 (though bonus should make it positive)
-                                    if (userNewBalance.compareTo(BigDecimal.ZERO) < 0) {
-                                        userNewBalance = BigDecimal.ZERO;
-                                    }
-                                    transactionUser.setAmountRemaining(userNewBalance);
-                                    transaction.setBalanceAfter(userNewBalance);
-                                } else {
-                                    // No bonus, so balance remains the same
-                                    transaction.setBalanceAfter(transactionUser.getAmountRemaining());
-                                }
-                                
-                                transactionUser.setLastTransactionDate(LocalDateTime.now());
-                                userRepository.save(transactionUser);
-                            }
-                            // If user is null (guest payment), user bonus is not credited
-                        }
-                    }
+
+            String normalizedStatusDesc = moPayResponse.getStatusDesc() != null
+                ? moPayResponse.getStatusDesc().trim()
+                : null;
+
+            boolean isSuccess = false;
+            boolean isFailure = false;
+
+            if (normalizedStatusDesc != null && !normalizedStatusDesc.isEmpty()) {
+                if ("SUCCESSFUL".equalsIgnoreCase(normalizedStatusDesc)
+                    || "SUCCESS".equalsIgnoreCase(normalizedStatusDesc)) {
+                    isSuccess = true;
+                } else if ("FAILED".equalsIgnoreCase(normalizedStatusDesc)) {
+                    isFailure = true;
                 }
-                
-                // CRITICAL: Transaction ID must NEVER change - preserve the original POCHI transaction ID
-                // Verify transaction ID hasn't changed (should never happen, but safety check)
-                if (!originalTransactionId.equals(transaction.getMopayTransactionId())) {
-                    logger.error("CRITICAL ERROR: Transaction ID changed from {} to {} - RESTORING ORIGINAL", 
-                        originalTransactionId, transaction.getMopayTransactionId());
-                    transaction.setMopayTransactionId(originalTransactionId);
-                }
-                
-                transaction.setStatus(TransactionStatus.SUCCESS);
-                logger.info("Transaction status updated to SUCCESS - Transaction ID remains: {}", transaction.getMopayTransactionId());
-                
-                // Send WhatsApp notifications for all PAYMENT transactions when status transitions to SUCCESS
-                // Only send on status transition (PENDING -> SUCCESS) to avoid duplicate notifications
-                if (isStatusTransition && transaction.getTransactionType() == TransactionType.PAYMENT) {
-                    Receiver receiver = transaction.getReceiver();
-                    if (receiver != null) {
-                        try {
-                            // Determine payment method and payer information
-                            boolean isMomoPayment = transaction.getMopayTransactionId() != null;
-                            String paymentMethod = isMomoPayment ? "MM" : "Card";
-                            
-                            // Get payer phone and name
-                            String payerPhone = null;
-                            User transactionUser = transaction.getUser();
-                            String payerName = "Guest User"; // Default
-                            
-                            if (isMomoPayment) {
-                                // For MOMO payments, phoneNumber is the payer's phone
-                                payerPhone = transaction.getPhoneNumber();
-                                if (transactionUser != null && transactionUser.getFullNames() != null 
-                                    && !transactionUser.getFullNames().trim().isEmpty()) {
-                                    payerName = transactionUser.getFullNames();
-                                } else if (payerPhone != null) {
-                                    payerName = payerPhone;
-                                }
-                            } else {
-                                // For NFC Card payments, user is always present
-                                if (transactionUser != null) {
-                                    payerPhone = transactionUser.getPhoneNumber();
-                                    if (transactionUser.getFullNames() != null 
-                                        && !transactionUser.getFullNames().trim().isEmpty()) {
-                                        payerName = transactionUser.getFullNames();
-                                    } else if (payerPhone != null) {
-                                        payerName = payerPhone;
-                                    }
-                                }
-                            }
-                            
-                            BigDecimal paymentAmount = transaction.getAmount();
-                            BigDecimal userBonusAmount = transaction.getUserBonusAmount() != null ? transaction.getUserBonusAmount() : BigDecimal.ZERO;
-                            
-                            // Send SMS and WhatsApp to receiver
-                            if (receiver.getReceiverPhone() != null) {
-                                String receiverPhoneNormalized = normalizePhoneTo12Digits(receiver.getReceiverPhone());
-                                String receiverSmsMessage = String.format("Received %s RWF from %s via %s.", 
-                                    paymentAmount.toPlainString(), payerName, paymentMethod);
-                                String receiverWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via %s.",
-                                    payerName, paymentAmount.toPlainString(), receiver.getCompanyName(), paymentMethod);
-                                messagingService.sendSms(receiverSmsMessage, receiverPhoneNormalized);
-                                whatsAppService.sendWhatsApp(receiverWhatsAppMessage, receiverPhoneNormalized);
-                                logger.info("SMS and WhatsApp sent to receiver {} about payment (status: SUCCESS, method: {}): {}", 
-                                    receiverPhoneNormalized, paymentMethod, receiverWhatsAppMessage);
-                            }
-                            
-                            // Send SMS and WhatsApp to payer (user) if phone is available
-                            if (payerPhone != null && !payerPhone.trim().isEmpty()) {
-                                String payerPhoneNormalized = normalizePhoneTo12Digits(payerPhone);
-                                String userSmsMessage;
-                                String userWhatsAppMessage;
-                                
-                                // Include bonus amount in message if applicable
-                                if (userBonusAmount.compareTo(BigDecimal.ZERO) > 0) {
-                                    userSmsMessage = String.format("Payment of %s RWF to %s successful via %s. Bonus: %s RWF returned.",
-                                        paymentAmount.toPlainString(), receiver.getCompanyName(), paymentMethod, userBonusAmount.toPlainString());
-                                    userWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via %s. Bonus: %s RWF returned.",
-                                        payerName, paymentAmount.toPlainString(), receiver.getCompanyName(), paymentMethod, userBonusAmount.toPlainString());
-                                } else {
-                                    userSmsMessage = String.format("Payment of %s RWF to %s successful via %s.",
-                                        paymentAmount.toPlainString(), receiver.getCompanyName(), paymentMethod);
-                                    userWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via %s.",
-                                        payerName, paymentAmount.toPlainString(), receiver.getCompanyName(), paymentMethod);
-                                }
-                                
-                                messagingService.sendSms(userSmsMessage, payerPhoneNormalized);
-                                whatsAppService.sendWhatsApp(userWhatsAppMessage, payerPhoneNormalized);
-                                logger.info("SMS and WhatsApp sent to payer {} about payment (status: SUCCESS, method: {}): {}", 
-                                    payerPhoneNormalized, paymentMethod, userWhatsAppMessage);
-                            } else {
-                                logger.warn("Payer phone number is null or empty in transaction, skipping SMS/WhatsApp to payer");
-                            }
-                        } catch (Exception e) {
-                            logger.error("Failed to send WhatsApp notifications for payment status check: ", e);
-                            // Don't fail the transaction if WhatsApp fails
-                        }
-                    }
-                }
-            } else if ("FAILED".equalsIgnoreCase(mopayStatus) || "400".equals(mopayStatus) 
-                || "500".equals(mopayStatus) || (moPayResponse.getSuccess() != null && !moPayResponse.getSuccess())) {
-                // CRITICAL: Transaction ID must NEVER change - preserve the original POCHI transaction ID
-                if (!originalTransactionId.equals(transaction.getMopayTransactionId())) {
-                    logger.error("CRITICAL ERROR: Transaction ID changed from {} to {} - RESTORING ORIGINAL", 
-                        originalTransactionId, transaction.getMopayTransactionId());
-                    transaction.setMopayTransactionId(originalTransactionId);
-                }
-                
-                transaction.setStatus(TransactionStatus.FAILED);
-                if (moPayResponse.getMessage() != null) {
-                    // Preserve MOPAY_ID in message if it exists, append new message
-                    String existingMessage = transaction.getMessage();
-                    if (existingMessage != null && existingMessage.contains("MOPAY_ID:")) {
-                        // Extract and preserve MOPAY_ID
-                        String[] parts = existingMessage.split("MOPAY_ID:");
-                        String mopayIdPart = parts.length > 1 ? " | MOPAY_ID:" + parts[1].trim() : "";
-                        transaction.setMessage(moPayResponse.getMessage() + mopayIdPart);
-                    } else {
-                    transaction.setMessage(moPayResponse.getMessage());
-                }
+            } else {
+                isSuccess = "SUCCESS".equalsIgnoreCase(mopayStatus) || "200".equals(mopayStatus)
+                    || "201".equals(mopayStatus)
+                    || (moPayResponse.getSuccess() != null && moPayResponse.getSuccess());
+                isFailure = "FAILED".equalsIgnoreCase(mopayStatus) || "400".equals(mopayStatus)
+                    || "500".equals(mopayStatus)
+                    || (moPayResponse.getSuccess() != null && !moPayResponse.getSuccess());
             }
-                logger.info("Transaction status updated to FAILED - Transaction ID remains: {}", transaction.getMopayTransactionId());
-            }
-            
-            // Final safety check before saving - ensure transaction ID never changed
-            if (!originalTransactionId.equals(transaction.getMopayTransactionId())) {
-                logger.error("CRITICAL ERROR: Transaction ID changed before save from {} to {} - RESTORING ORIGINAL", 
-                    originalTransactionId, transaction.getMopayTransactionId());
-                transaction.setMopayTransactionId(originalTransactionId);
-            }
-            
-            // Save the transaction to persist status changes
-            transactionRepository.save(transaction);
-            // Explicitly flush to ensure changes are persisted immediately
-            entityManager.flush();
-            logger.info("Transaction status saved to database - ID: {}, Status: {}", transaction.getMopayTransactionId(), transaction.getStatus());
+
+            String failureMessage = moPayResponse.getMessage() != null
+                ? moPayResponse.getMessage()
+                : "Mopay failed - Status: " + mopayStatus + ", StatusDesc: " + normalizedStatusDesc;
+
+            return applyStatusUpdate(transaction, originalTransactionId, isSuccess, isFailure, failureMessage, true);
         } else {
             // MoPay response is null - log but don't update status
             logger.warn("MoPay response is null for transaction ID: {}. Status check may be unavailable.", mopayTransactionId);
@@ -1783,6 +1818,233 @@ public class PaymentService {
         }
         
         return response;
+    }
+
+    private PaymentResponse applyStatusUpdate(Transaction transaction, String originalTransactionId,
+            boolean isSuccess, boolean isFailure, String failureMessage, boolean sendPaymentNotifications) {
+        if (transaction.getStatus() == TransactionStatus.SUCCESS && isSuccess) {
+            return mapToPaymentResponse(transaction);
+        }
+
+        if (isSuccess) {
+            boolean isStatusTransition = transaction.getStatus() == TransactionStatus.PENDING;
+
+            if (isStatusTransition) {
+                applySuccessTransitionUpdates(transaction);
+            }
+
+            preserveTransactionId(transaction, originalTransactionId);
+            transaction.setStatus(TransactionStatus.SUCCESS);
+            logger.info("Transaction status updated to SUCCESS - Transaction ID remains: {}", transaction.getMopayTransactionId());
+
+            if (sendPaymentNotifications && isStatusTransition && transaction.getTransactionType() == TransactionType.PAYMENT) {
+                sendPaymentSuccessNotifications(transaction);
+            }
+        } else if (isFailure) {
+            preserveTransactionId(transaction, originalTransactionId);
+            transaction.setStatus(TransactionStatus.FAILED);
+            setFailureMessage(transaction, failureMessage);
+            logger.info("Transaction status updated to FAILED - Transaction ID remains: {}", transaction.getMopayTransactionId());
+        }
+
+        preserveTransactionId(transaction, originalTransactionId);
+        transactionRepository.save(transaction);
+        entityManager.flush();
+        logger.info("Transaction status saved to database - ID: {}, Status: {}", transaction.getMopayTransactionId(), transaction.getStatus());
+
+        PaymentResponse response = mapToPaymentResponse(transaction);
+        if (!originalTransactionId.equals(response.getMopayTransactionId())) {
+            logger.error("CRITICAL ERROR: Response transaction ID mismatch! Original: {}, Response: {}", 
+                originalTransactionId, response.getMopayTransactionId());
+            response.setMopayTransactionId(originalTransactionId);
+        }
+
+        return response;
+    }
+
+    private void applySuccessTransitionUpdates(Transaction transaction) {
+        User user = transaction.getUser();
+
+        if (transaction.getTransactionType() == TransactionType.TOP_UP) {
+            Receiver topUpReceiver = transaction.getReceiver();
+
+            if (topUpReceiver != null) {
+                MerchantUserBalance merchantBalance = merchantUserBalanceRepository
+                        .findByUserIdAndReceiverId(user.getId(), topUpReceiver.getId())
+                        .orElse(null);
+
+                if (merchantBalance == null) {
+                    merchantBalance = new MerchantUserBalance();
+                    merchantBalance.setUser(user);
+                    merchantBalance.setReceiver(topUpReceiver);
+                    merchantBalance.setBalance(BigDecimal.ZERO);
+                    merchantBalance.setTotalToppedUp(BigDecimal.ZERO);
+                }
+
+                BigDecimal newMerchantBalance = merchantBalance.getBalance().add(transaction.getAmount());
+                merchantBalance.setBalance(newMerchantBalance);
+                merchantBalance.setTotalToppedUp(merchantBalance.getTotalToppedUp().add(transaction.getAmount()));
+                merchantUserBalanceRepository.save(merchantBalance);
+
+                BigDecimal newAmountRemaining = user.getAmountRemaining().add(transaction.getAmount());
+                user.setAmountRemaining(newAmountRemaining);
+                transaction.setBalanceAfter(newAmountRemaining);
+            } else {
+                BigDecimal newBalance = user.getAmountRemaining().add(transaction.getAmount());
+                user.setAmountRemaining(newBalance);
+                user.setAmountOnCard(user.getAmountOnCard().add(transaction.getAmount()));
+                transaction.setBalanceAfter(newBalance);
+            }
+
+            user.setAmountOnCard(user.getAmountOnCard().add(transaction.getAmount()));
+            user.setLastTransactionDate(LocalDateTime.now());
+            userRepository.save(user);
+        } else if (transaction.getTransactionType() == TransactionType.PAYMENT && transaction.getMopayTransactionId() != null) {
+            Receiver receiver = transaction.getReceiver();
+            if (receiver != null) {
+                BigDecimal paymentAmount = transaction.getAmount();
+                BigDecimal userBonusAmount = transaction.getUserBonusAmount() != null ? transaction.getUserBonusAmount() : BigDecimal.ZERO;
+                BigDecimal receiverBalanceAfter = transaction.getReceiverBalanceAfter();
+
+                if (receiverBalanceAfter == null) {
+                    BigDecimal receiverBalanceBefore = receiver.getRemainingBalance() != null ? receiver.getRemainingBalance() : BigDecimal.ZERO;
+                    receiverBalanceAfter = receiverBalanceBefore.subtract(paymentAmount);
+                    logger.info("receiverBalanceAfter was null, calculated from current balance: {} - {} = {}", 
+                        receiverBalanceBefore, paymentAmount, receiverBalanceAfter);
+                }
+
+                if (receiverBalanceAfter.compareTo(BigDecimal.ZERO) < 0) {
+                    receiverBalanceAfter = BigDecimal.ZERO;
+                    logger.info("Receiver balance would have been negative, setting to 0");
+                }
+                receiver.setRemainingBalance(receiverBalanceAfter);
+                receiver.setLastTransactionDate(LocalDateTime.now());
+
+                BigDecimal receiverNewWallet = receiver.getWalletBalance().add(paymentAmount);
+                BigDecimal receiverNewTotal = receiver.getTotalReceived().add(paymentAmount);
+                receiver.setWalletBalance(receiverNewWallet);
+                receiver.setTotalReceived(receiverNewTotal);
+                receiverRepository.save(receiver);
+
+                logger.info("Updated receiver '{}' balance from MoPay callback: wallet={}, totalReceived={}, remainingBalance={}", 
+                    receiver.getCompanyName(), receiverNewWallet, receiverNewTotal, receiverBalanceAfter);
+
+                User transactionUser = transaction.getUser();
+                if (transactionUser != null) {
+                    if (userBonusAmount.compareTo(BigDecimal.ZERO) > 0) {
+                        BigDecimal userBalanceBefore = transactionUser.getAmountRemaining();
+                        BigDecimal userNewBalance = userBalanceBefore.add(userBonusAmount);
+                        if (userNewBalance.compareTo(BigDecimal.ZERO) < 0) {
+                            userNewBalance = BigDecimal.ZERO;
+                        }
+                        transactionUser.setAmountRemaining(userNewBalance);
+                        transaction.setBalanceAfter(userNewBalance);
+                    } else {
+                        transaction.setBalanceAfter(transactionUser.getAmountRemaining());
+                    }
+
+                    transactionUser.setLastTransactionDate(LocalDateTime.now());
+                    userRepository.save(transactionUser);
+                }
+            }
+        }
+    }
+
+    private void sendPaymentSuccessNotifications(Transaction transaction) {
+        Receiver receiver = transaction.getReceiver();
+        if (receiver == null) {
+            return;
+        }
+
+        try {
+            boolean isMomoPayment = transaction.getMopayTransactionId() != null;
+            String paymentMethod = isMomoPayment ? "MM" : "Card";
+
+            String payerPhone = null;
+            User transactionUser = transaction.getUser();
+            String payerName = "Guest User";
+
+            if (isMomoPayment) {
+                payerPhone = transaction.getPhoneNumber();
+                if (transactionUser != null && transactionUser.getFullNames() != null 
+                    && !transactionUser.getFullNames().trim().isEmpty()) {
+                    payerName = transactionUser.getFullNames();
+                } else if (payerPhone != null) {
+                    payerName = payerPhone;
+                }
+            } else {
+                if (transactionUser != null) {
+                    payerPhone = transactionUser.getPhoneNumber();
+                    if (transactionUser.getFullNames() != null 
+                        && !transactionUser.getFullNames().trim().isEmpty()) {
+                        payerName = transactionUser.getFullNames();
+                    } else if (payerPhone != null) {
+                        payerName = payerPhone;
+                    }
+                }
+            }
+
+            BigDecimal paymentAmount = transaction.getAmount();
+            BigDecimal userBonusAmount = transaction.getUserBonusAmount() != null ? transaction.getUserBonusAmount() : BigDecimal.ZERO;
+
+            if (receiver.getReceiverPhone() != null) {
+                String receiverPhoneNormalized = normalizePhoneTo12Digits(receiver.getReceiverPhone());
+                String receiverSmsMessage = String.format("Received %s RWF from %s via %s.", 
+                    paymentAmount.toPlainString(), payerName, paymentMethod);
+                String receiverWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via %s.",
+                    payerName, paymentAmount.toPlainString(), receiver.getCompanyName(), paymentMethod);
+                messagingService.sendSms(receiverSmsMessage, receiverPhoneNormalized);
+                whatsAppService.sendWhatsApp(receiverWhatsAppMessage, receiverPhoneNormalized);
+                logger.info("SMS and WhatsApp sent to receiver {} about payment (status: SUCCESS, method: {}): {}", 
+                    receiverPhoneNormalized, paymentMethod, receiverWhatsAppMessage);
+            }
+
+            if (payerPhone != null && !payerPhone.trim().isEmpty()) {
+                String payerPhoneNormalized = normalizePhoneTo12Digits(payerPhone);
+                String userSmsMessage;
+                String userWhatsAppMessage;
+
+                if (userBonusAmount.compareTo(BigDecimal.ZERO) > 0) {
+                    userSmsMessage = String.format("Payment of %s RWF to %s successful via %s. Bonus: %s RWF returned.",
+                        paymentAmount.toPlainString(), receiver.getCompanyName(), paymentMethod, userBonusAmount.toPlainString());
+                    userWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via %s. Bonus: %s RWF returned.",
+                        payerName, paymentAmount.toPlainString(), receiver.getCompanyName(), paymentMethod, userBonusAmount.toPlainString());
+                } else {
+                    userSmsMessage = String.format("Payment of %s RWF to %s successful via %s.",
+                        paymentAmount.toPlainString(), receiver.getCompanyName(), paymentMethod);
+                    userWhatsAppMessage = String.format("[%s]: Paid %s RWF to [%s] via %s.",
+                        payerName, paymentAmount.toPlainString(), receiver.getCompanyName(), paymentMethod);
+                }
+
+                messagingService.sendSms(userSmsMessage, payerPhoneNormalized);
+                whatsAppService.sendWhatsApp(userWhatsAppMessage, payerPhoneNormalized);
+                logger.info("SMS and WhatsApp sent to payer {} about payment (status: SUCCESS, method: {}): {}", 
+                    payerPhoneNormalized, paymentMethod, userWhatsAppMessage);
+            } else {
+                logger.warn("Payer phone number is null or empty in transaction, skipping SMS/WhatsApp to payer");
+            }
+        } catch (Exception e) {
+            logger.error("Failed to send WhatsApp notifications for payment status check: ", e);
+        }
+    }
+
+    private void setFailureMessage(Transaction transaction, String failureMessage) {
+        String existingMessage = transaction.getMessage();
+        if (existingMessage != null && existingMessage.contains("MOPAY_ID:")) {
+            String[] parts = existingMessage.split("MOPAY_ID:");
+            String mopayIdPart = parts.length > 1 ? " | MOPAY_ID:" + parts[1].trim() : "";
+            transaction.setMessage(failureMessage + mopayIdPart);
+        } else {
+            transaction.setMessage(failureMessage);
+        }
+    }
+
+    private void preserveTransactionId(Transaction transaction, String originalTransactionId) {
+        if (!originalTransactionId.equals(transaction.getMopayTransactionId())) {
+            logger.error("CRITICAL ERROR: Transaction ID changed from {} to {} - RESTORING ORIGINAL", 
+                originalTransactionId, transaction.getMopayTransactionId());
+            transaction.setMopayTransactionId(originalTransactionId);
+        }
     }
 
     /**
@@ -3596,42 +3858,100 @@ public class PaymentService {
             throw new RuntimeException("At least one transfer is required");
         }
 
-        // Create MoPay initiate request
-        MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
-        moPayRequest.setTransaction_id(request.getTransaction_id());
-        moPayRequest.setAmount(request.getAmount());
-        moPayRequest.setCurrency(request.getCurrency() != null ? request.getCurrency() : "RWF");
-        moPayRequest.setPhone(normalizedPayerPhone);
-        moPayRequest.setPayment_mode(request.getPayment_mode() != null ? request.getPayment_mode() : "MOBILE");
-        moPayRequest.setMessage(request.getMessage() != null ? request.getMessage() : "Customer payment from " + receiver.getCompanyName());
-        moPayRequest.setCallback_url(request.getCallback_url());
+        PaymentProvider provider = resolvePaymentProvider();
+        logger.info("MOMO payment provider resolved to: {}", provider);
 
-        // Convert transfers - normalize receiver phones
-        List<MoPayInitiateRequest.Transfer> transfers = request.getTransfers().stream()
-            .map(transfer -> {
-                MoPayInitiateRequest.Transfer moPayTransfer = new MoPayInitiateRequest.Transfer();
-                moPayTransfer.setTransaction_id(transfer.getTransaction_id());
-                moPayTransfer.setAmount(transfer.getAmount());
-                // Transfer phone is already Long, but we should validate it's 12 digits
+        // Create MoPay initiate request
+        MopayOpenApiInitiateRequest moPayRequest = null;
+        MopayECWPaymentInitiateRequest mopayECWRequest = null;
+        String message = request.getMessage() != null ? request.getMessage() : "Customer payment from " + receiver.getCompanyName();
+        String paymentMode = request.getPayment_mode() != null ? request.getPayment_mode() : "MOBILE";
+        String requestTransactionId = request.getTransaction_id();
+
+        if (provider == PaymentProvider.MOPAY_OPEN_API) {
+            moPayRequest = new MopayOpenApiInitiateRequest();
+            moPayRequest.setTransaction_id(requestTransactionId);
+            moPayRequest.setAmount(request.getAmount());
+            moPayRequest.setCurrency(request.getCurrency() != null ? request.getCurrency() : "RWF");
+            moPayRequest.setPhone(normalizedPayerPhone);
+            moPayRequest.setPayment_mode(paymentMode);
+            moPayRequest.setMessage(message);
+            moPayRequest.setCallback_url(request.getCallback_url());
+
+            // Convert transfers - normalize receiver phones
+            List<MopayOpenApiInitiateRequest.Transfer> transfers = request.getTransfers().stream()
+                .map(transfer -> {
+                    MopayOpenApiInitiateRequest.Transfer moPayTransfer = new MopayOpenApiInitiateRequest.Transfer();
+                    moPayTransfer.setTransaction_id(transfer.getTransaction_id());
+                    moPayTransfer.setAmount(transfer.getAmount());
+                    // Transfer phone is already Long, but we should validate it's 12 digits
+                    String normalizedReceiverPhone = String.valueOf(transfer.getPhone());
+                    if (normalizedReceiverPhone.length() != 12) {
+                        // Try to normalize if it's not 12 digits
+                        try {
+                            normalizedReceiverPhone = normalizePhoneTo12Digits(normalizedReceiverPhone);
+                        } catch (Exception e) {
+                            throw new RuntimeException("Invalid receiver phone number: " + transfer.getPhone() + ". Error: " + e.getMessage());
+                        }
+                    }
+                    moPayTransfer.setPhone(Long.parseLong(normalizedReceiverPhone));
+                    moPayTransfer.setMessage(transfer.getMessage() != null ? transfer.getMessage() : "Payment from " + receiver.getCompanyName());
+                    return moPayTransfer;
+                })
+                .collect(Collectors.toList());
+
+            moPayRequest.setTransfers(transfers);
+        } else {
+            if (requestTransactionId == null || requestTransactionId.trim().isEmpty()) {
+                requestTransactionId = generateTransactionId();
+            }
+
+            mopayECWRequest = new MopayECWPaymentInitiateRequest();
+            mopayECWRequest.setTransactionId(requestTransactionId);
+            mopayECWRequest.setAccount_no(normalizedPayerPhone);
+            mopayECWRequest.setTitle(message);
+            mopayECWRequest.setDetails(message);
+            mopayECWRequest.setPayment_type("momo");
+            mopayECWRequest.setAmount(request.getAmount());
+            mopayECWRequest.setCurrency(request.getCurrency() != null ? request.getCurrency() : "RWF");
+            mopayECWRequest.setMessage(message);
+
+            List<MopayECWPaymentInitiateRequest.Transfer> transfers = new java.util.ArrayList<>();
+            for (int i = 0; i < request.getTransfers().size(); i++) {
+                PayCustomerRequest.Transfer transfer = request.getTransfers().get(i);
+                MopayECWPaymentInitiateRequest.Transfer mopayTransfer = new MopayECWPaymentInitiateRequest.Transfer();
+                String transferTransactionId = transfer.getTransaction_id();
+                if (transferTransactionId == null || transferTransactionId.trim().isEmpty()) {
+                    transferTransactionId = requestTransactionId + "-" + (i + 1);
+                }
+                mopayTransfer.setTransactionId(transferTransactionId);
+                mopayTransfer.setAmount(transfer.getAmount());
                 String normalizedReceiverPhone = String.valueOf(transfer.getPhone());
                 if (normalizedReceiverPhone.length() != 12) {
-                    // Try to normalize if it's not 12 digits
                     try {
                         normalizedReceiverPhone = normalizePhoneTo12Digits(normalizedReceiverPhone);
                     } catch (Exception e) {
                         throw new RuntimeException("Invalid receiver phone number: " + transfer.getPhone() + ". Error: " + e.getMessage());
                     }
                 }
-                moPayTransfer.setPhone(Long.parseLong(normalizedReceiverPhone));
-                moPayTransfer.setMessage(transfer.getMessage() != null ? transfer.getMessage() : "Payment from " + receiver.getCompanyName());
-                return moPayTransfer;
-            })
-            .collect(Collectors.toList());
+                mopayTransfer.setAccount_no(normalizedReceiverPhone);
+                mopayTransfer.setPayment_type("momo");
+                mopayTransfer.setCurrency(request.getCurrency() != null ? request.getCurrency() : "RWF");
+                mopayTransfer.setMessage(transfer.getMessage() != null ? transfer.getMessage() : "Payment from " + receiver.getCompanyName());
+                transfers.add(mopayTransfer);
+            }
 
-        moPayRequest.setTransfers(transfers);
+            mopayECWRequest.setTransfers(transfers);
+        }
 
         // Initiate payment with MoPay
-        MoPayResponse moPayResponse = moPayService.initiatePayment(moPayRequest);
+        MoPayResponse moPayResponse;
+        if (provider == PaymentProvider.MOPAY_OPEN_API) {
+            moPayResponse = moPayService.initiatePayment(moPayRequest);
+        } else {
+            MopayECWPaymentResponse mopayResponse = mopayPaymentService.initiatePayment(mopayECWRequest);
+            moPayResponse = toMoPayResponse(mopayResponse);
+        }
 
         // Create transaction record
         Transaction transaction = new Transaction();
@@ -3641,7 +3961,7 @@ public class PaymentService {
         transaction.setTransactionType(TransactionType.PAYMENT);
         transaction.setAmount(request.getAmount());
         transaction.setPhoneNumber(normalizedPayerPhone);
-        transaction.setMessage(moPayRequest.getMessage());
+        transaction.setMessage(message);
 
         // Generate transaction ID
         String transactionId = generateTransactionId();
@@ -3649,8 +3969,10 @@ public class PaymentService {
 
         // Check MoPay response
         String mopayTransactionId = moPayResponse != null ? moPayResponse.getTransactionId() : null;
-        if (moPayResponse != null && moPayResponse.getStatus() != null && moPayResponse.getStatus() == 201 
-            && mopayTransactionId != null) {
+        if (mopayTransactionId == null && provider == PaymentProvider.MOPAY && isPaymentSuccessful(moPayResponse, provider)) {
+            mopayTransactionId = transactionId;
+        }
+        if (isPaymentSuccessful(moPayResponse, provider) && mopayTransactionId != null) {
             // Successfully initiated
             String existingMessage = transaction.getMessage() != null ? transaction.getMessage() : "";
             transaction.setMessage(existingMessage + " | MOPAY_ID:" + mopayTransactionId);

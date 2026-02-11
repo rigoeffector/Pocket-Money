@@ -315,6 +315,11 @@ func processUSSD(input *string, phone string, sessionId string, networkOperator 
 		return "", err, false
 	}
 
+	nextIsEndSession := false
+	if rawEnd, ok := nextStepData["is_end_session"].(bool); ok {
+		nextIsEndSession = rawEnd
+	}
+
 	if len(prefix) != 0 {
 		msg = prefix + msg
 	}
@@ -325,7 +330,7 @@ func processUSSD(input *string, phone string, sessionId string, networkOperator 
 	// USSDdata.NextMenu = nextStepData["next_menu"].(string)
 	// USSDdata.NextStepId = nextStepData["next_step_id"].(string)
 	setUssdData(*USSDdata)
-	if lastStep.IsEndSession {
+	if nextIsEndSession || lastStep.IsEndSession {
 		return msg, nil, true
 	}
 	return msg, nil, false

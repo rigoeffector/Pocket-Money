@@ -7,6 +7,8 @@
       "Port": 5432,
       "MaintenanceDB": "pocketmoney_db",
       "Username": "postgres",
+      "Password": "postgres",
+      "SavePassword": true,
       "SSLMode": "prefer",
       "PassFile": "/pgadmin4/.pgpass"
     }

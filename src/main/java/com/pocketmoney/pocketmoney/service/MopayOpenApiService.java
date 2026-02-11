@@ -1,8 +1,9 @@
 package com.pocketmoney.pocketmoney.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.pocketmoney.pocketmoney.dto.MoPayInitiateRequest;
+import com.pocketmoney.pocketmoney.dto.MopayOpenApiInitiateRequest;
 import com.pocketmoney.pocketmoney.dto.MoPayResponse;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -12,40 +13,40 @@ import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 
 @Service
-public class MoPayService {
+public class MopayOpenApiService {
 
-    private static final Logger logger = LoggerFactory.getLogger(MoPayService.class);
+    private static final Logger logger = LoggerFactory.getLogger(MopayOpenApiService.class);
 
-    @Value("${mopay.api.url:https://api.mopay.rw}")
+    @Value("${mopay_open_api.api.url:https://api.mopay.rw}")
     private String mopayApiUrl;
 
-    @Value("${mopay.api.token:2fuytPgoD4At0FE1MgoF08xuAr03xSvkJ1ZlGrT5jYFyolQsBU7XKU28OW4Oqq3a}")
+    @Value("${mopay_open_api.api.token:2fuytPgoD4At0FE1MgoF08xuAr03xSvkJ1ZlGrT5jYFyolQsBU7XKU28OW4Oqq3a}")
     private String mopayApiToken;
 
     private final RestTemplate restTemplate;
 
-    public MoPayService(RestTemplate restTemplate) {
+    public MopayOpenApiService(RestTemplate restTemplate) {
         this.restTemplate = restTemplate;
     }
 
-    public MoPayResponse initiatePayment(MoPayInitiateRequest request) {
+    public MoPayResponse initiatePayment(MopayOpenApiInitiateRequest request) {
         String url = mopayApiUrl + "/initiate-payment";
         
-        logger.info("Initiating MoPay payment to: {}", url);
-        logger.info("MoPay request - Phone: {}, Amount: {}, Currency: {}", request.getPhone(), request.getAmount(), request.getCurrency());
+        logger.info("Initiating MopayOpenApi payment to: {}", url);
+        logger.info("MopayOpenApi request - Phone: {}, Amount: {}, Currency: {}", request.getPhone(), request.getAmount(), request.getCurrency());
         if (request.getTransfers() != null && !request.getTransfers().isEmpty()) {
             for (int i = 0; i < request.getTransfers().size(); i++) {
-                MoPayInitiateRequest.Transfer transfer = request.getTransfers().get(i);
+                MopayOpenApiInitiateRequest.Transfer transfer = request.getTransfers().get(i);
                 logger.info("Transfer #{} - Phone: {}, Amount: {}, Message: {}", i + 1, transfer.getPhone(), transfer.getAmount(), transfer.getMessage());
             }
         }
-        logger.debug("Full MoPay request: {}", request);
+        logger.debug("Full MopayOpenApi request: {}", request);
         
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.setBearerAuth(mopayApiToken);
 
-        HttpEntity<MoPayInitiateRequest> entity = new HttpEntity<>(request, headers);
+        HttpEntity<MopayOpenApiInitiateRequest> entity = new HttpEntity<>(request, headers);
 
         try {
             ResponseEntity<MoPayResponse> response = restTemplate.exchange(
@@ -57,15 +58,15 @@ public class MoPayService {
             
             MoPayResponse responseBody = response.getBody();
             int httpStatusCode = response.getStatusCode().value();
-            logger.info("MoPay HTTP response status: {}", httpStatusCode);
-            logger.debug("MoPay response body: {}", responseBody);
+            logger.info("MopayOpenApi HTTP response status: {}", httpStatusCode);
+            logger.debug("MopayOpenApi response body: {}", responseBody);
             
             if (responseBody == null) {
-                logger.warn("MoPay returned null response body");
+                logger.warn("MopayOpenApi returned null response body");
                 MoPayResponse errorResponse = new MoPayResponse();
                 errorResponse.setStatus(httpStatusCode);
                 errorResponse.setSuccess(false);
-                errorResponse.setMessage("MoPay returned null response");
+                errorResponse.setMessage("MopayOpenApi returned null response");
                 return errorResponse;
             }
             
@@ -80,7 +81,7 @@ public class MoPayService {
             int statusCode = e.getStatusCode().value();
             String responseBody = e.getResponseBodyAsString();
             
-            logger.error("MoPay HTTP error - Status: {}, Response: {}", statusCode, responseBody);
+            logger.error("MopayOpenApi HTTP error - Status: {}, Response: {}", statusCode, responseBody);
             
             MoPayResponse errorResponse = new MoPayResponse();
             errorResponse.setStatus(statusCode);
@@ -94,17 +95,17 @@ public class MoPayService {
                 String errorMsg = parsedError.getErrorMessage() != null ? parsedError.getErrorMessage() : parsedError.getMessage();
                 errorResponse.setMessage(errorMsg);
                 errorResponse.setTransactionId(parsedError.getTransactionId());
-                logger.info("Parsed MoPay error response - Status: {}, Message: {}, TransactionId: {}", 
+                logger.info("Parsed MopayOpenApi error response - Status: {}, Message: {}, TransactionId: {}", 
                     statusCode, errorMsg, parsedError.getTransactionId());
             } catch (Exception parseException) {
-                logger.warn("Failed to parse MoPay error response, using raw body: {}", responseBody);
+                logger.warn("Failed to parse MopayOpenApi error response, using raw body: {}", responseBody);
                 // If parsing fails, use the raw response body as message
                 errorResponse.setMessage(responseBody != null && !responseBody.isEmpty() ? responseBody : e.getMessage());
             }
             
             return errorResponse;
         } catch (Exception e) {
-            logger.error("Error initiating MoPay payment: ", e);
+            logger.error("Error initiating MopayOpenApi payment: ", e);
             MoPayResponse errorResponse = new MoPayResponse();
             errorResponse.setSuccess(false);
             errorResponse.setMessage("Failed to initiate payment: " + e.getMessage());

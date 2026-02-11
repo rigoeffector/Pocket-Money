@@ -4,7 +4,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 
 @Data
-public class BizaoAccountHolderResponse {
+public class MopayECWAccountHolderResponse {
     private Integer status;
     
     @JsonProperty("firstname")

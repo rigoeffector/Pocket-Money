@@ -8,7 +8,7 @@ import java.util.List;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 @Data
-public class MoPayInitiateRequest {
+public class MopayOpenApiInitiateRequest {
     @JsonProperty("transaction_id")
     private String transaction_id;
     

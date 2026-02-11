@@ -24,6 +24,7 @@ import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -41,8 +42,8 @@ public class EfashePaymentService {
     private static final Logger logger = LoggerFactory.getLogger(EfashePaymentService.class);
 
     private final EfasheSettingsService efasheSettingsService;
-    private final MoPayService moPayService;
-    private final BizaoPaymentService bizaoPaymentService;
+    private final MopayOpenApiService mopayOpenApiService;
+    private final MopayPaymentService mopayPaymentService;
     private final EfasheApiService efasheApiService;
     private final EfasheTransactionRepository efasheTransactionRepository;
     private final EfasheRefundHistoryRepository efasheRefundHistoryRepository;
@@ -50,23 +51,33 @@ public class EfashePaymentService {
     private final MessagingService messagingService;
     private final UserRepository userRepository;
     private final EntityManager entityManager;
+    private final PaymentService paymentService;
 
-    @Value("${bizaopayment.webhook.signing.key:testKey}")
-    private String bizaoPaymentWebhookSigningKey;
+    @Value("${mopay.webhook.signing.key:testKey}")
+    private String mopayPaymentWebhookSigningKey;
+
+    @Value("${payment.provider:mopay_open_api}")
+    private String paymentProvider;
+
+    private enum PaymentProvider {
+        MOPAY_OPEN_API,
+        MOPAY
+    }
 
     public EfashePaymentService(EfasheSettingsService efasheSettingsService, 
-                                 MoPayService moPayService,
-                                 BizaoPaymentService bizaoPaymentService,
+                                 MopayOpenApiService mopayOpenApiService,
+                                 MopayPaymentService mopayPaymentService,
                                  EfasheApiService efasheApiService,
                                  EfasheTransactionRepository efasheTransactionRepository,
                                  EfasheRefundHistoryRepository efasheRefundHistoryRepository,
                                  WhatsAppService whatsAppService,
                                  MessagingService messagingService,
                                  UserRepository userRepository,
-                                 EntityManager entityManager) {
+                                 EntityManager entityManager,
+                                 PaymentService paymentService) {
         this.efasheSettingsService = efasheSettingsService;
-        this.moPayService = moPayService;
-        this.bizaoPaymentService = bizaoPaymentService;
+        this.mopayOpenApiService = mopayOpenApiService;
+        this.mopayPaymentService = mopayPaymentService;
         this.efasheApiService = efasheApiService;
         this.efasheTransactionRepository = efasheTransactionRepository;
         this.efasheRefundHistoryRepository = efasheRefundHistoryRepository;
@@ -74,6 +85,61 @@ public class EfashePaymentService {
         this.messagingService = messagingService;
         this.userRepository = userRepository;
         this.entityManager = entityManager;
+        this.paymentService = paymentService;
+    }
+
+    private PaymentProvider resolvePaymentProvider() {
+        if (paymentProvider == null) {
+            return PaymentProvider.MOPAY_OPEN_API;
+        }
+        String normalized = paymentProvider.trim().toLowerCase(Locale.ROOT);
+        if (normalized.isEmpty()) {
+            return PaymentProvider.MOPAY_OPEN_API;
+        }
+        if ("mopay".equals(normalized) || "mopay_payment".equals(normalized)) {
+            return PaymentProvider.MOPAY;
+        }
+        if ("mopayopenapi".equals(normalized) || "mopay_open_api".equals(normalized) || "openapi".equals(normalized)) {
+            return PaymentProvider.MOPAY_OPEN_API;
+        }
+        return PaymentProvider.MOPAY_OPEN_API;
+    }
+
+    private MoPayResponse toMoPayResponse(MopayECWPaymentResponse mopayResponse) {
+        MoPayResponse response = new MoPayResponse();
+        if (mopayResponse == null) {
+            return response;
+        }
+
+        response.setTransactionId(mopayResponse.getTransactionId());
+        response.setStatus(mopayResponse.getStatus());
+
+        boolean isSuccessful = "SUCCESSFUL".equalsIgnoreCase(mopayResponse.getStatusDesc());
+        response.setSuccess(isSuccessful);
+
+        if (mopayResponse.getMessage() != null && !mopayResponse.getMessage().isEmpty()) {
+            response.setMessage(mopayResponse.getMessage());
+        } else if (mopayResponse.getStatusDesc() != null) {
+            response.setMessage("Mopay status: " + mopayResponse.getStatusDesc());
+        } else {
+            response.setMessage("Mopay response received");
+        }
+
+        return response;
+    }
+
+    private boolean isPaymentSuccessful(MoPayResponse moPayResponse, PaymentProvider provider) {
+        if (moPayResponse == null) {
+            return false;
+        }
+
+        if (provider == PaymentProvider.MOPAY) {
+            return Boolean.TRUE.equals(moPayResponse.getSuccess());
+        }
+
+        Integer statusCode = moPayResponse.getStatus();
+        return (statusCode != null && (statusCode == 200 || statusCode == 201))
+            || Boolean.TRUE.equals(moPayResponse.getSuccess());
     }
 
     public EfasheInitiateResponse initiatePayment(EfasheInitiateRequest request) {
@@ -172,27 +238,27 @@ public class EfashePaymentService {
             logger.info("Customer Account Name from validate: {}", customerAccountName);
         }
         
-        // For AIRTIME service, try to get customer name from BizaoPayment account holder info if not available from validate
+        // For AIRTIME service, try to get customer name from Mopay account holder info if not available from validate
         if ((customerAccountName == null || customerAccountName.trim().isEmpty()) 
             && (request.getServiceType() == EfasheServiceType.AIRTIME || request.getServiceType() == EfasheServiceType.MTN)) {
             try {
-                logger.info("AIRTIME service - Customer name not available from validate, fetching from BizaoPayment account holder info for phone: {}", normalizedCustomerPhone);
-                com.pocketmoney.pocketmoney.dto.BizaoAccountHolderResponse accountHolderInfo = bizaoPaymentService.getAccountHolderInformation(normalizedCustomerPhone);
+                logger.info("AIRTIME service - Customer name not available from validate, fetching from Mopay account holder info for phone: {}", normalizedCustomerPhone);
+                com.pocketmoney.pocketmoney.dto.MopayECWAccountHolderResponse accountHolderInfo = mopayPaymentService.getAccountHolderInformation(normalizedCustomerPhone);
                 
                 if (accountHolderInfo != null && accountHolderInfo.getStatus() != null && accountHolderInfo.getStatus() == 200) {
                     String fullName = accountHolderInfo.getFullName();
                     if (fullName != null && !fullName.trim().isEmpty()) {
                         customerAccountName = fullName.trim();
-                        logger.info("✅ Customer name retrieved from BizaoPayment account holder info: {}", customerAccountName);
+                        logger.info("✅ Customer name retrieved from Mopay account holder info: {}", customerAccountName);
                     } else {
-                        logger.warn("BizaoPayment account holder info returned status 200 but no name available");
+                        logger.warn("Mopay account holder info returned status 200 but no name available");
                     }
                 } else {
-                    logger.warn("BizaoPayment account holder info returned non-success status: {}", 
+                    logger.warn("Mopay account holder info returned non-success status: {}", 
                         accountHolderInfo != null ? accountHolderInfo.getStatus() : "null");
                 }
             } catch (Exception e) {
-                logger.warn("Failed to get customer name from BizaoPayment account holder info (non-critical): {}", e.getMessage());
+                logger.warn("Failed to get customer name from Mopay account holder info (non-critical): {}", e.getMessage());
                 // Don't fail the transaction if account holder info fails
             }
         }
@@ -598,14 +664,15 @@ public class EfashePaymentService {
     }
 
     /**
-     * Process a validated transaction by calling MoPay
-     * Updates validated flag to "PROCESS" and initiates MoPay payment
+     * Process a validated transaction using the configured payment provider
+     * Updates validated flag to "PROCESS" and initiates payment
      * @param transactionId The transaction ID from initiate response
-     * @return EfasheInitiateResponse with MoPay response
+     * @return EfasheInitiateResponse with payment response
      */
     @Transactional
     public EfasheInitiateResponse processPayment(String transactionId) {
-        logger.info("Processing EFASHE payment - Transaction ID: {}", transactionId);
+        PaymentProvider provider = resolvePaymentProvider();
+        logger.info("Processing EFASHE payment - Transaction ID: {}, Provider: {}", transactionId, provider);
         
         // Find transaction by ID
         EfasheTransaction transaction = efasheTransactionRepository.findByTransactionId(transactionId)
@@ -621,9 +688,6 @@ public class EfashePaymentService {
         // Update validated flag to PROCESS
         transaction.setValidated("PROCESS");
         
-        // Get EFASHE settings for the service type
-        EfasheSettingsResponse settingsResponse = efasheSettingsService.getSettingsByServiceType(transaction.getServiceType());
-        
         BigDecimal amount = transaction.getAmount();
         
         // For RRA, amount can be null during initiate, but is required for processing
@@ -633,6 +697,8 @@ public class EfashePaymentService {
         }
         
         String normalizedCustomerPhone = transaction.getCustomerPhone();
+        String normalizedFullAmountPhone = normalizePhoneTo12Digits(transaction.getFullAmountPhone());
+        String normalizedCashbackPhone = normalizePhoneTo12Digits(transaction.getCashbackPhone());
 
         // For RRA: total to debit = amount (RRA payment) + charge (besoftShareAmount)
         // For other services: total to debit = amount
@@ -645,21 +711,8 @@ public class EfashePaymentService {
                 totalMoPayAmount, amount, transaction.getBesoftShareAmount());
         }
 
-        // Build MoPay request
-        MoPayInitiateRequest moPayRequest = new MoPayInitiateRequest();
-        moPayRequest.setAmount(totalMoPayAmount);
-        moPayRequest.setCurrency(transaction.getCurrency());
-        moPayRequest.setPhone(normalizedCustomerPhone);
-        moPayRequest.setPayment_mode(transaction.getPaymentMode());
-        moPayRequest.setMessage(transaction.getMessage());
-        moPayRequest.setCallback_url(transaction.getCallbackUrl());
-        
-        // Build transfers array
-        List<MoPayInitiateRequest.Transfer> transfers = new ArrayList<>();
-
         // Transfer 1: Full Amount Phone Number
         // For RRA: fullAmountPhone receives amount (to pay RRA). For others: amount - cashback - besoftShare
-        MoPayInitiateRequest.Transfer transfer1 = new MoPayInitiateRequest.Transfer();
         BigDecimal fullAmountPhoneReceives;
         if (transaction.getServiceType() == EfasheServiceType.RRA) {
             fullAmountPhoneReceives = amount; // Full amount goes to pay RRA
@@ -669,66 +722,187 @@ public class EfashePaymentService {
                 .subtract(transaction.getBesoftShareAmount() != null ? transaction.getBesoftShareAmount() : BigDecimal.ZERO)
                 .setScale(0, RoundingMode.HALF_UP);
         }
-        transfer1.setAmount(fullAmountPhoneReceives);
-        String normalizedFullAmountPhone = normalizePhoneTo12Digits(transaction.getFullAmountPhone());
-        transfer1.setPhone(Long.parseLong(normalizedFullAmountPhone));
-        transfer1.setMessage("EFASHE " + transaction.getServiceType() + " - Full amount");
-        transfers.add(transfer1);
-        
-        // Transfer 2: Customer Cashback
+
+        if (provider == PaymentProvider.MOPAY_OPEN_API) {
+            // Build Mopay Open API request
+            MopayOpenApiInitiateRequest mopayOpenApiRequest = new MopayOpenApiInitiateRequest();
+            //It will set by the mopay response (generated by payment gateway) when we call initiatePayment, so we don't set it here
+            // mopayOpenApiRequest.setTransaction_id(transactionId);
+            mopayOpenApiRequest.setAmount(totalMoPayAmount);
+            mopayOpenApiRequest.setCurrency(transaction.getCurrency());
+            mopayOpenApiRequest.setPhone(normalizedCustomerPhone);
+            mopayOpenApiRequest.setPayment_mode(transaction.getPaymentMode());
+            mopayOpenApiRequest.setMessage(transaction.getMessage());
+            mopayOpenApiRequest.setCallback_url(transaction.getCallbackUrl());
+
+            List<MopayOpenApiInitiateRequest.Transfer> transfers = new ArrayList<>();
+            MopayOpenApiInitiateRequest.Transfer transfer1 = new MopayOpenApiInitiateRequest.Transfer();
+            // transfer1.setTransaction_id(transactionId);
+            transfer1.setAmount(fullAmountPhoneReceives);
+            transfer1.setPhone(Long.parseLong(normalizedFullAmountPhone));
+            transfer1.setMessage("EFASHE " + transaction.getServiceType() + " - Full amount");
+            transfers.add(transfer1);
+
+            if (transaction.getCustomerCashbackAmount() != null && transaction.getCustomerCashbackAmount().compareTo(BigDecimal.ZERO) > 0) {
+                MopayOpenApiInitiateRequest.Transfer transfer2 = new MopayOpenApiInitiateRequest.Transfer();
+                // transfer2.setTransaction_id(transactionId);
+                transfer2.setAmount(transaction.getCustomerCashbackAmount());
+                transfer2.setPhone(Long.parseLong(normalizedCustomerPhone));
+                transfer2.setMessage("EFASHE " + transaction.getServiceType() + " - Customer cashback");
+                transfers.add(transfer2);
+            }
+
+            if (transaction.getBesoftShareAmount() != null && transaction.getBesoftShareAmount().compareTo(BigDecimal.ZERO) > 0) {
+                MopayOpenApiInitiateRequest.Transfer transfer3 = new MopayOpenApiInitiateRequest.Transfer();
+                // transfer3.setTransaction_id(transactionId);
+                transfer3.setAmount(transaction.getBesoftShareAmount());
+                transfer3.setPhone(Long.parseLong(normalizedCashbackPhone));
+                transfer3.setMessage("EFASHE " + transaction.getServiceType() + " - Besoft share");
+                transfers.add(transfer3);
+            }
+
+            mopayOpenApiRequest.setTransfers(transfers);
+
+            MoPayResponse moPayResponse = mopayOpenApiService.initiatePayment(mopayOpenApiRequest);
+            String mopayTransactionId = moPayResponse != null && moPayResponse.getTransactionId() != null 
+                ? moPayResponse.getTransactionId() : null;
+
+            if (mopayTransactionId == null || mopayTransactionId.isEmpty()) {
+                throw new RuntimeException("MoPay did not return a transaction ID. Payment initiation may have failed.");
+            }
+
+            transaction.setTransactionId(mopayTransactionId);
+            transaction.setMopayTransactionId(mopayTransactionId);
+
+            String initialMopayStatus = moPayResponse != null && moPayResponse.getStatus() != null 
+                ? moPayResponse.getStatus().toString() : "PENDING";
+            transaction.setInitialMopayStatus(initialMopayStatus);
+            transaction.setMopayStatus(initialMopayStatus);
+            transaction.setCashbackSent(true);
+
+            efasheTransactionRepository.save(transaction);
+            logger.info("Updated transaction with Mopay Open API response - Transaction ID: {}, Mopay Transaction ID: {}", 
+                transactionId, mopayTransactionId);
+
+            EfasheInitiateResponse response = new EfasheInitiateResponse();
+            response.setTransactionId(mopayTransactionId);
+            response.setServiceType(transaction.getServiceType());
+            response.setAmount(amount);
+            response.setCustomerPhone(normalizedCustomerPhone);
+            response.setCustomerAccountName(transaction.getCustomerAccountName());
+            response.setMoPayResponse(moPayResponse);
+            response.setFullAmountPhone(normalizedFullAmountPhone);
+            response.setCashbackPhone(normalizePhoneTo12Digits(transaction.getCashbackPhone()));
+            response.setCustomerCashbackAmount(transaction.getCustomerCashbackAmount());
+            response.setBesoftShareAmount(transaction.getBesoftShareAmount());
+            response.setFullAmountPhoneReceives(fullAmountPhoneReceives);
+            response.setValidated("PROCESS");
+
+            logger.info("EFASHE payment processed successfully - Transaction ID: {}, Mopay Transaction ID: {}", 
+                transactionId, mopayTransactionId);
+
+            return response;
+        }
+
+        // Build Mopay payment request
+        MopayECWPaymentInitiateRequest mopayECWRequest = new MopayECWPaymentInitiateRequest();
+        mopayECWRequest.setTransactionId(transactionId);
+        mopayECWRequest.setAccount_no(normalizedCustomerPhone);
+        mopayECWRequest.setTitle("EFASHE " + transaction.getServiceType() + " Payment");
+        mopayECWRequest.setDetails("Payment for " + transaction.getServiceType() + " service");
+        mopayECWRequest.setPayment_type("momo");
+        mopayECWRequest.setAmount(totalMoPayAmount);
+        mopayECWRequest.setCurrency(transaction.getCurrency() != null ? transaction.getCurrency() : "RWF");
+        mopayECWRequest.setMessage(transaction.getMessage() != null ? transaction.getMessage() : 
+            "EFASHE " + transaction.getServiceType() + " payment");
+
+        List<MopayECWPaymentInitiateRequest.Transfer> mopayTransfers = new ArrayList<>();
+        MopayECWPaymentInitiateRequest.Transfer mopayTransfer1 = new MopayECWPaymentInitiateRequest.Transfer();
+        mopayTransfer1.setTransactionId(transactionId+"-1");
+        mopayTransfer1.setAccount_no(normalizedFullAmountPhone);
+        mopayTransfer1.setPayment_type("momo");
+        mopayTransfer1.setAmount(fullAmountPhoneReceives);
+        mopayTransfer1.setCurrency("RWF");
+        mopayTransfer1.setMessage("EFASHE " + transaction.getServiceType() + " - Full amount");
+        mopayTransfers.add(mopayTransfer1);
+
         if (transaction.getCustomerCashbackAmount() != null && transaction.getCustomerCashbackAmount().compareTo(BigDecimal.ZERO) > 0) {
-            MoPayInitiateRequest.Transfer transfer2 = new MoPayInitiateRequest.Transfer();
-            transfer2.setAmount(transaction.getCustomerCashbackAmount());
-            transfer2.setPhone(Long.parseLong(normalizedCustomerPhone));
-            transfer2.setMessage("EFASHE " + transaction.getServiceType() + " - Customer cashback");
-            transfers.add(transfer2);
+            MopayECWPaymentInitiateRequest.Transfer mopayTransfer2 = new MopayECWPaymentInitiateRequest.Transfer();
+            mopayTransfer2.setTransactionId(transactionId+"-2");
+            mopayTransfer2.setAccount_no(normalizedCustomerPhone);
+            mopayTransfer2.setPayment_type("momo");
+            mopayTransfer2.setAmount(transaction.getCustomerCashbackAmount());
+            mopayTransfer2.setCurrency("RWF");
+            mopayTransfer2.setMessage("EFASHE " + transaction.getServiceType() + " - Customer cashback");
+            mopayTransfers.add(mopayTransfer2);
         }
-        
-        // Transfer 3: Besoft Share
+
         if (transaction.getBesoftShareAmount() != null && transaction.getBesoftShareAmount().compareTo(BigDecimal.ZERO) > 0) {
-            String normalizedCashbackPhone = normalizePhoneTo12Digits(transaction.getCashbackPhone());
-            MoPayInitiateRequest.Transfer transfer3 = new MoPayInitiateRequest.Transfer();
-            transfer3.setAmount(transaction.getBesoftShareAmount());
-            transfer3.setPhone(Long.parseLong(normalizedCashbackPhone));
-            transfer3.setMessage("EFASHE " + transaction.getServiceType() + " - Besoft share");
-            transfers.add(transfer3);
+            MopayECWPaymentInitiateRequest.Transfer mopayTransfer3 = new MopayECWPaymentInitiateRequest.Transfer();
+            mopayTransfer3.setTransactionId(transactionId+"-3");
+            mopayTransfer3.setAccount_no(normalizedCashbackPhone);
+            mopayTransfer3.setPayment_type("momo");
+            mopayTransfer3.setAmount(transaction.getBesoftShareAmount());
+            mopayTransfer3.setCurrency("RWF");
+            mopayTransfer3.setMessage("EFASHE " + transaction.getServiceType() + " - Besoft share");
+            mopayTransfers.add(mopayTransfer3);
         }
 
-        moPayRequest.setTransfers(transfers);
+        mopayECWRequest.setTransfers(mopayTransfers);
 
-        // Initiate payment with MoPay
-        MoPayResponse moPayResponse = moPayService.initiatePayment(moPayRequest);
+        MopayECWPaymentResponse mopayResponse = mopayPaymentService.initiatePayment(mopayECWRequest);
 
-        String mopayTransactionId = moPayResponse != null && moPayResponse.getTransactionId() != null 
-            ? moPayResponse.getTransactionId() : null;
-        
+        if (mopayResponse == null) {
+            throw new RuntimeException("Mopay returned null response. Payment initiation failed.");
+        }
+
+        if (mopayResponse.getStatus() != null && mopayResponse.getStatus() >= 400) {
+            String errorMsg = mopayResponse.getMessage() != null ? mopayResponse.getMessage() : 
+                "Mopay returned error status: " + mopayResponse.getStatus();
+            logger.error("❌ Mopay payment initiation failed - Status: {}, Message: {}", 
+                mopayResponse.getStatus(), errorMsg);
+            throw new RuntimeException("Mopay payment initiation failed: " + errorMsg);
+        }
+
+        String mopayTransactionId = mopayResponse.getTransactionId();
+        if ((mopayTransactionId == null || mopayTransactionId.isEmpty()) 
+            && mopayResponse.getStatus() != null 
+            && (mopayResponse.getStatus() == 200 || mopayResponse.getStatus() == 201)) {
+            logger.warn("⚠️ Mopay returned success status {} but no transactionId. Response: {}", 
+                mopayResponse.getStatus(), mopayResponse);
+            mopayTransactionId = mopayECWRequest.getTransactionId();
+            logger.info("Using request transactionId as fallback: {}", mopayTransactionId);
+        }
+
         if (mopayTransactionId == null || mopayTransactionId.isEmpty()) {
-            throw new RuntimeException("MoPay did not return a transaction ID. Payment initiation may have failed.");
+            logger.error("❌ Mopay did not return a transaction ID. Response status: {}, Success: {}, Message: {}", 
+                mopayResponse.getStatus(), mopayResponse.getSuccess(), mopayResponse.getMessage());
+            throw new RuntimeException("Mopay did not return a transaction ID. Payment initiation may have failed. Status: " + 
+                mopayResponse.getStatus() + ", Message: " + mopayResponse.getMessage());
         }
-        
-        // Update transaction with MoPay response
-        transaction.setTransactionId(mopayTransactionId); // Update with MoPay transaction ID
+
+        transaction.setTransactionId(mopayTransactionId);
         transaction.setMopayTransactionId(mopayTransactionId);
-        
-        String initialMopayStatus = moPayResponse != null && moPayResponse.getStatus() != null 
-            ? moPayResponse.getStatus().toString() : "PENDING";
+
+        String initialMopayStatus = mopayResponse.getStatus() != null 
+            ? mopayResponse.getStatus().toString() : "PENDING";
         transaction.setInitialMopayStatus(initialMopayStatus);
         transaction.setMopayStatus(initialMopayStatus);
-        transaction.setCashbackSent(true); // Mark as sent
-        
-        // Save updated transaction
+        transaction.setCashbackSent(true);
+
         efasheTransactionRepository.save(transaction);
-        logger.info("Updated transaction with MoPay response - Transaction ID: {}, MoPay Transaction ID: {}", 
+        entityManager.flush();
+        logger.info("Updated transaction with Mopay response - Transaction ID: {}, Mopay Transaction ID: {}", 
             transactionId, mopayTransactionId);
 
-        // Build response
         EfasheInitiateResponse response = new EfasheInitiateResponse();
         response.setTransactionId(mopayTransactionId);
         response.setServiceType(transaction.getServiceType());
         response.setAmount(amount);
         response.setCustomerPhone(normalizedCustomerPhone);
         response.setCustomerAccountName(transaction.getCustomerAccountName());
-        response.setMoPayResponse(moPayResponse);
+        response.setMopayECWPaymentResponse(mopayResponse);
+        response.setMoPayResponse(toMoPayResponse(mopayResponse));
         response.setFullAmountPhone(normalizedFullAmountPhone);
         response.setCashbackPhone(normalizePhoneTo12Digits(transaction.getCashbackPhone()));
         response.setCustomerCashbackAmount(transaction.getCustomerCashbackAmount());
@@ -736,219 +910,9 @@ public class EfashePaymentService {
         response.setFullAmountPhoneReceives(fullAmountPhoneReceives);
         response.setValidated("PROCESS");
 
-        logger.info("EFASHE payment processed successfully - Transaction ID: {}, MoPay Transaction ID: {}", 
+        logger.info("EFASHE payment initiated with Mopay - Transaction ID: {}, Mopay Transaction ID: {}. Waiting for webhook callback...", 
             transactionId, mopayTransactionId);
 
-        return response;
-    }
-
-    /**
-     * Process a validated transaction by calling BizaoPayment
-     * Updates validated flag to "PROCESS" and initiates BizaoPayment payment
-     * @param transactionId The transaction ID from initiate response
-     * @return EfasheInitiateResponse with BizaoPayment response
-     */
-    @Transactional
-    public EfasheInitiateResponse processPaymentWithBizao(String transactionId) {
-        logger.info("Processing EFASHE payment with BizaoPayment - Transaction ID: {}", transactionId);
-        
-        // Find transaction by ID
-        EfasheTransaction transaction = efasheTransactionRepository.findByTransactionId(transactionId)
-            .orElseThrow(() -> new RuntimeException("EFASHE transaction not found: " + transactionId));
-        
-        // Check if transaction is in INITIAL state
-        if (!"INITIAL".equals(transaction.getValidated())) {
-            throw new RuntimeException("Transaction is not in INITIAL state. Current state: " + transaction.getValidated());
-        }
-        
-        logger.info("Found transaction in INITIAL state - Updating to PROCESS and initiating BizaoPayment");
-        
-        // Update validated flag to PROCESS
-        transaction.setValidated("PROCESS");
-        
-        // Get EFASHE settings for the service type
-        EfasheSettingsResponse settingsResponse = efasheSettingsService.getSettingsByServiceType(transaction.getServiceType());
-        
-        BigDecimal amount = transaction.getAmount();
-        
-        // For RRA, amount can be null during initiate, but is required for processing
-        // For other services, amount should already be set during initiate
-        if (amount == null) {
-            throw new RuntimeException("Amount is required for processing. Please provide amount for service type: " + transaction.getServiceType());
-        }
-        
-        String normalizedCustomerPhone = transaction.getCustomerPhone();
-
-        // For RRA: total to debit = amount (RRA payment) + charge (besoftShareAmount)
-        BigDecimal totalBizaoAmount = amount;
-        if (transaction.getServiceType() == EfasheServiceType.RRA 
-                && transaction.getBesoftShareAmount() != null 
-                && transaction.getBesoftShareAmount().compareTo(BigDecimal.ZERO) > 0) {
-            totalBizaoAmount = amount.add(transaction.getBesoftShareAmount());
-            logger.info("RRA BizaoPayment - Total to debit: {} (RRA amount: {} + charge: {})", 
-                totalBizaoAmount, amount, transaction.getBesoftShareAmount());
-        }
-
-        // Build BizaoPayment request
-        BizaoPaymentInitiateRequest bizaoRequest = new BizaoPaymentInitiateRequest();
-        bizaoRequest.setTransactionId(transactionId); // Use the transaction ID
-        bizaoRequest.setAccount_no(normalizedCustomerPhone); // DEBIT - customer phone
-        bizaoRequest.setTitle("EFASHE " + transaction.getServiceType() + " Payment");
-        bizaoRequest.setDetails("Payment for " + transaction.getServiceType() + " service");
-        bizaoRequest.setPayment_type("momo");
-        bizaoRequest.setAmount(totalBizaoAmount);
-        bizaoRequest.setCurrency(transaction.getCurrency() != null ? transaction.getCurrency() : "RWF");
-        bizaoRequest.setMessage(transaction.getMessage() != null ? transaction.getMessage() : 
-            "EFASHE " + transaction.getServiceType() + " payment");
-        
-        // Build transfers array
-        List<BizaoPaymentInitiateRequest.Transfer> transfers = new ArrayList<>();
-
-        // Transfer 1: Full Amount Phone Number
-        // For RRA: fullAmountPhone receives amount (to pay RRA). For others: amount - cashback - besoftShare
-        BizaoPaymentInitiateRequest.Transfer transfer1 = new BizaoPaymentInitiateRequest.Transfer();
-        BigDecimal fullAmountPhoneReceives;
-        if (transaction.getServiceType() == EfasheServiceType.RRA) {
-            fullAmountPhoneReceives = amount; // Full amount goes to pay RRA
-        } else {
-            fullAmountPhoneReceives = amount.subtract(
-                transaction.getCustomerCashbackAmount() != null ? transaction.getCustomerCashbackAmount() : BigDecimal.ZERO)
-                .subtract(transaction.getBesoftShareAmount() != null ? transaction.getBesoftShareAmount() : BigDecimal.ZERO)
-                .setScale(0, RoundingMode.HALF_UP);
-        }
-        transfer1.setTransactionId(transactionId);
-        String normalizedFullAmountPhone = normalizePhoneTo12Digits(transaction.getFullAmountPhone());
-        transfer1.setAccount_no(normalizedFullAmountPhone);
-        transfer1.setPayment_type("momo");
-        transfer1.setAmount(fullAmountPhoneReceives);
-        transfer1.setCurrency("RWF");
-        transfer1.setMessage("EFASHE " + transaction.getServiceType() + " - Full amount");
-        transfers.add(transfer1);
-        
-        // Transfer 2: Customer Cashback
-        if (transaction.getCustomerCashbackAmount() != null && transaction.getCustomerCashbackAmount().compareTo(BigDecimal.ZERO) > 0) {
-            BizaoPaymentInitiateRequest.Transfer transfer2 = new BizaoPaymentInitiateRequest.Transfer();
-            transfer2.setTransactionId(transactionId);
-            transfer2.setAccount_no(normalizedCustomerPhone);
-            transfer2.setPayment_type("momo");
-            transfer2.setAmount(transaction.getCustomerCashbackAmount());
-            transfer2.setCurrency("RWF");
-            transfer2.setMessage("EFASHE " + transaction.getServiceType() + " - Customer cashback");
-            transfers.add(transfer2);
-        }
-        
-        // Transfer 3: Besoft Share
-        if (transaction.getBesoftShareAmount() != null && transaction.getBesoftShareAmount().compareTo(BigDecimal.ZERO) > 0) {
-            String normalizedCashbackPhone = normalizePhoneTo12Digits(transaction.getCashbackPhone());
-            BizaoPaymentInitiateRequest.Transfer transfer3 = new BizaoPaymentInitiateRequest.Transfer();
-            transfer3.setTransactionId(transactionId);
-            transfer3.setAccount_no(normalizedCashbackPhone);
-            transfer3.setPayment_type("momo");
-            transfer3.setAmount(transaction.getBesoftShareAmount());
-            transfer3.setCurrency("RWF");
-            transfer3.setMessage("EFASHE " + transaction.getServiceType() + " - Besoft share");
-            transfers.add(transfer3);
-        }
-
-        bizaoRequest.setTransfers(transfers);
-
-        // Initiate payment with BizaoPayment
-        BizaoPaymentResponse bizaoResponse = bizaoPaymentService.initiatePayment(bizaoRequest);
-
-        // Check if the response indicates success
-        if (bizaoResponse == null) {
-            throw new RuntimeException("BizaoPayment returned null response. Payment initiation failed.");
-        }
-        
-        // Check if there was an error
-        if (bizaoResponse.getStatus() != null && bizaoResponse.getStatus() >= 400) {
-            String errorMsg = bizaoResponse.getMessage() != null ? bizaoResponse.getMessage() : 
-                "BizaoPayment returned error status: " + bizaoResponse.getStatus();
-            logger.error("❌ BizaoPayment payment initiation failed - Status: {}, Message: {}", 
-                bizaoResponse.getStatus(), errorMsg);
-            throw new RuntimeException("BizaoPayment payment initiation failed: " + errorMsg);
-        }
-        
-        String bizaoTransactionId = bizaoResponse.getTransactionId();
-        
-        // If transactionId is still null, check if status indicates success (200/201)
-        if ((bizaoTransactionId == null || bizaoTransactionId.isEmpty()) 
-            && bizaoResponse.getStatus() != null 
-            && (bizaoResponse.getStatus() == 200 || bizaoResponse.getStatus() == 201)) {
-            logger.warn("⚠️ BizaoPayment returned success status {} but no transactionId. Response: {}", 
-                bizaoResponse.getStatus(), bizaoResponse);
-            // Try to generate a transaction ID from the request
-            bizaoTransactionId = bizaoRequest.getTransactionId();
-            logger.info("Using request transactionId as fallback: {}", bizaoTransactionId);
-        }
-        
-        if (bizaoTransactionId == null || bizaoTransactionId.isEmpty()) {
-            logger.error("❌ BizaoPayment did not return a transaction ID. Response status: {}, Success: {}, Message: {}", 
-                bizaoResponse.getStatus(), bizaoResponse.getSuccess(), bizaoResponse.getMessage());
-            throw new RuntimeException("BizaoPayment did not return a transaction ID. Payment initiation may have failed. Status: " + 
-                bizaoResponse.getStatus() + ", Message: " + bizaoResponse.getMessage());
-        }
-        
-        // Update transaction with BizaoPayment response
-        transaction.setTransactionId(bizaoTransactionId); // Update with BizaoPayment transaction ID
-        transaction.setMopayTransactionId(bizaoTransactionId); // Store in mopayTransactionId field for compatibility
-        
-        String initialBizaoStatus = bizaoResponse != null && bizaoResponse.getStatus() != null 
-            ? bizaoResponse.getStatus().toString() : "PENDING";
-        transaction.setInitialMopayStatus(initialBizaoStatus);
-        transaction.setMopayStatus(initialBizaoStatus);
-        transaction.setCashbackSent(true); // Mark as sent
-        
-        // Save updated transaction
-        efasheTransactionRepository.save(transaction);
-        // Explicitly flush to ensure transaction is written to database before returning
-        entityManager.flush();
-        logger.info("Updated transaction with BizaoPayment response - Transaction ID: {}, BizaoPayment Transaction ID: {}", 
-            transactionId, bizaoTransactionId);
-
-        // Build response - include full BizaoPayment response
-        EfasheInitiateResponse response = new EfasheInitiateResponse();
-        response.setTransactionId(bizaoTransactionId);
-        response.setServiceType(transaction.getServiceType());
-        response.setAmount(amount);
-        response.setCustomerPhone(normalizedCustomerPhone);
-        response.setCustomerAccountName(transaction.getCustomerAccountName());
-        
-        // Include full BizaoPayment response
-        response.setBizaoPaymentResponse(bizaoResponse);
-        
-        // Convert BizaoPaymentResponse to MoPayResponse format for compatibility
-        MoPayResponse moPayResponse = new MoPayResponse();
-        moPayResponse.setTransactionId(bizaoTransactionId);
-        moPayResponse.setStatus(bizaoResponse.getStatus());
-        
-        // Don't set success to true if statusDesc is PENDING
-        // Only set success to true if statusDesc is SUCCESSFUL
-        boolean isSuccessful = "SUCCESSFUL".equalsIgnoreCase(bizaoResponse.getStatusDesc());
-        moPayResponse.setSuccess(isSuccessful);
-        
-        // Set message - if there's a parsing error message, keep it, otherwise use statusDesc
-        if (bizaoResponse.getMessage() != null && !bizaoResponse.getMessage().isEmpty()) {
-            moPayResponse.setMessage(bizaoResponse.getMessage());
-        } else if (bizaoResponse.getStatusDesc() != null) {
-            moPayResponse.setMessage("BizaoPayment status: " + bizaoResponse.getStatusDesc());
-        } else {
-            moPayResponse.setMessage("BizaoPayment initiated");
-        }
-        
-        response.setMoPayResponse(moPayResponse);
-        
-        response.setFullAmountPhone(normalizedFullAmountPhone);
-        response.setCashbackPhone(normalizePhoneTo12Digits(transaction.getCashbackPhone()));
-        response.setCustomerCashbackAmount(transaction.getCustomerCashbackAmount());
-        response.setBesoftShareAmount(transaction.getBesoftShareAmount());
-        response.setFullAmountPhoneReceives(fullAmountPhoneReceives);
-        response.setValidated("PROCESS");
-
-        logger.info("EFASHE payment initiated with BizaoPayment - Transaction ID: {}, BizaoPayment Transaction ID: {}. Waiting for webhook callback...", 
-            transactionId, bizaoTransactionId);
-
-        // No polling - webhook will be called by BizaoPayment when payment status changes
         return response;
     }
 
@@ -973,14 +937,14 @@ public class EfashePaymentService {
     }
     
     /**
-     * Check the status of an EFASHE transaction using either EFASHE transaction ID or MoPay transaction ID
+     * Check the status of an EFASHE transaction using either EFASHE transaction ID or payment transaction ID
      * If status is SUCCESS (200), automatically triggers EFASHE validate and execute
-     * @param transactionId Can be either the EFASHE transaction ID or MoPay transaction ID
+     * @param transactionId Can be either the EFASHE transaction ID or payment transaction ID
      * @return EfasheStatusResponse containing the transaction status and EFASHE responses
      */
     @Transactional
     public EfasheStatusResponse checkTransactionStatus(String transactionId) {
-        logger.info("Checking EFASHE transaction status for transaction ID: {} (trying both EFASHE and MoPay IDs)", transactionId);
+        logger.info("Checking EFASHE transaction status for transaction ID: {} (trying both EFASHE and payment IDs)", transactionId);
         
         // Use the helper method to find transaction
         Optional<EfasheTransaction> transactionOpt = findTransactionById(transactionId);
@@ -995,6 +959,8 @@ public class EfashePaymentService {
             transaction.getInitialMopayStatus(), transaction.getInitialEfasheStatus(),
             transaction.getPollEndpoint() != null ? transaction.getPollEndpoint() : "NULL",
             transaction.getRetryAfterSecs());
+
+        PaymentProvider provider = resolvePaymentProvider();
         
         // Use the actual MoPay transaction ID from the transaction record for checking MoPay status
         // The transactionId parameter might be either EFASHE or MoPay ID, but we need the actual MoPay ID for the API call
@@ -1002,8 +968,19 @@ public class EfashePaymentService {
             ? transaction.getMopayTransactionId() 
             : transaction.getTransactionId(); // Fallback to transactionId if mopayTransactionId is null
         
-        logger.info("Checking MoPay status using transaction ID: {} (from stored transaction record)", mopayTransactionIdToCheck);
-        MoPayResponse moPayResponse = moPayService.checkTransactionStatus(mopayTransactionIdToCheck);
+        logger.info("Checking payment status using transaction ID: {} (from stored transaction record), Provider: {}", 
+            mopayTransactionIdToCheck, provider);
+
+        MoPayResponse moPayResponse;
+        if (provider == PaymentProvider.MOPAY) {
+            MopayECWPaymentResponse mopayStatusResponse = mopayPaymentService.checkTransactionStatus(mopayTransactionIdToCheck);
+            moPayResponse = toMoPayResponse(mopayStatusResponse);
+            if (moPayResponse.getTransactionId() == null || moPayResponse.getTransactionId().trim().isEmpty()) {
+                moPayResponse.setTransactionId(mopayTransactionIdToCheck);
+            }
+        } else {
+            moPayResponse = mopayOpenApiService.checkTransactionStatus(mopayTransactionIdToCheck);
+        }
         
         EfasheExecuteResponse executeResponse = null;
         
@@ -1012,7 +989,9 @@ public class EfashePaymentService {
             Integer statusCode = moPayResponse.getStatus();
             // Only update current status, keep initial status unchanged
             transaction.setMopayStatus(statusCode.toString());
-            transaction.setMopayTransactionId(moPayResponse.getTransactionId());
+            if (moPayResponse.getTransactionId() != null && !moPayResponse.getTransactionId().trim().isEmpty()) {
+                transaction.setMopayTransactionId(moPayResponse.getTransactionId());
+            }
             
             // Ensure initial status is set if it wasn't set before (for backward compatibility)
             if (transaction.getInitialMopayStatus() == null) {
@@ -1026,8 +1005,7 @@ public class EfashePaymentService {
                 statusCode, moPayResponse.getSuccess(), moPayResponse.getTransactionId());
             
             // If MoPay status is SUCCESS (200 or 201) OR success flag is true, trigger EFASHE execute
-            boolean isSuccess = (statusCode != null && (statusCode == 200 || statusCode == 201)) 
-                || (moPayResponse.getSuccess() != null && moPayResponse.getSuccess());
+            boolean isSuccess = isPaymentSuccessful(moPayResponse, provider);
             
             // Log current state for debugging
             logger.info("Status check decision - MoPay SUCCESS: {}, EFASHE Status: {}, PollEndpoint: {}, CashbackSent: {}", 
@@ -1768,329 +1746,6 @@ public class EfashePaymentService {
     }
 
     /**
-     * Check the status of an EFASHE transaction using BizaoPayment transaction ID
-     * If status is SUCCESS (200), automatically triggers EFASHE validate and execute
-     * @param transactionId Can be either the EFASHE transaction ID or BizaoPayment transaction ID
-     * @return EfasheStatusResponse containing the transaction status and EFASHE responses
-     */
-    @Transactional
-    public EfasheStatusResponse checkTransactionStatusWithBizao(String transactionId) {
-        logger.info("Checking EFASHE transaction status with BizaoPayment for transaction ID: {} (trying both EFASHE and BizaoPayment IDs)", transactionId);
-        
-        // Use the helper method to find transaction
-        Optional<EfasheTransaction> transactionOpt = findTransactionById(transactionId);
-        
-        // Get stored transaction record - ALWAYS update existing row, never create new one
-        EfasheTransaction transaction = transactionOpt
-            .orElseThrow(() -> new RuntimeException("EFASHE transaction not found with ID: " + transactionId + " (tried both EFASHE and BizaoPayment IDs)"));
-        
-        logger.info("Found existing transaction - ID: {}, EFASHE Transaction ID: {}, BizaoPayment Transaction ID: {}, Current Status: {}, Current EFASHE Status: {}", 
-            transaction.getId(), transaction.getTransactionId(), transaction.getMopayTransactionId(), 
-            transaction.getMopayStatus(), transaction.getEfasheStatus());
-        
-        // Use the actual BizaoPayment transaction ID from the transaction record for checking status
-        String bizaoTransactionIdToCheck = transaction.getMopayTransactionId() != null 
-            ? transaction.getMopayTransactionId() 
-            : transaction.getTransactionId(); // Fallback to transactionId if mopayTransactionId is null
-        
-        logger.info("Checking BizaoPayment status using transaction ID: {} (from stored transaction record)", bizaoTransactionIdToCheck);
-        BizaoPaymentResponse bizaoResponse = bizaoPaymentService.checkTransactionStatus(bizaoTransactionIdToCheck);
-        
-        EfasheExecuteResponse executeResponse = null;
-        
-        // Update BizaoPayment status in transaction record (UPDATE existing row, don't create new)
-        if (bizaoResponse != null && bizaoResponse.getStatus() != null) {
-            Integer statusCode = bizaoResponse.getStatus();
-            // Only update current status, keep initial status unchanged
-            transaction.setMopayStatus(statusCode.toString());
-            transaction.setMopayTransactionId(bizaoResponse.getTransactionId());
-            
-            // Ensure initial status is set if it wasn't set before (for backward compatibility)
-            if (transaction.getInitialMopayStatus() == null) {
-                transaction.setInitialMopayStatus(transaction.getMopayStatus());
-            }
-            if (transaction.getInitialEfasheStatus() == null) {
-                transaction.setInitialEfasheStatus(transaction.getEfasheStatus() != null ? transaction.getEfasheStatus() : "PENDING");
-            }
-            
-            logger.info("BizaoPayment status check - Status: {}, Success: {}, Transaction ID: {}", 
-                statusCode, bizaoResponse.getSuccess(), bizaoResponse.getTransactionId());
-            
-            // If BizaoPayment status is SUCCESS (200 or 201) OR success flag is true, trigger EFASHE execute
-            boolean isSuccess = (statusCode != null && (statusCode == 200 || statusCode == 201)) 
-                || (bizaoResponse.getSuccess() != null && bizaoResponse.getSuccess());
-            
-            if (isSuccess && !"SUCCESS".equalsIgnoreCase(transaction.getEfasheStatus())) {
-                logger.info("BizaoPayment transaction SUCCESS detected (status: {}, success: {}). Triggering EFASHE execute...", 
-                    statusCode, bizaoResponse.getSuccess());
-                
-                // Execute EFASHE transaction
-                try {
-                    EfasheExecuteRequest executeRequest = new EfasheExecuteRequest();
-                    executeRequest.setTrxId(transaction.getTrxId());
-                    executeRequest.setCustomerAccountNumber(transaction.getCustomerAccountNumber());
-                    executeRequest.setAmount(transaction.getAmount());
-                    executeRequest.setVerticalId(getVerticalId(transaction.getServiceType()));
-                    
-                    String deliveryMethodId = transaction.getDeliveryMethodId();
-                    if (deliveryMethodId == null || deliveryMethodId.trim().isEmpty()) {
-                        deliveryMethodId = "direct_topup";
-                    }
-                    executeRequest.setDeliveryMethodId(deliveryMethodId);
-                    
-                    if ("sms".equals(deliveryMethodId)) {
-                        executeRequest.setDeliverTo(transaction.getDeliverTo());
-                    }
-                    
-                    executeResponse = efasheApiService.executeTransaction(executeRequest);
-                    
-                    // Log full execute response
-                    if (executeResponse != null) {
-                        try {
-                            ObjectMapper objectMapper = new ObjectMapper();
-                            String executeResponseJson = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(executeResponse);
-                            logger.info("═══════════════════════════════════════════════════════════════");
-                            logger.info("📋 EFASHE EXECUTE RESPONSE (Parsed)");
-                            logger.info("═══════════════════════════════════════════════════════════════");
-                            logger.info("{}", executeResponseJson);
-                            logger.info("═══════════════════════════════════════════════════════════════");
-                        } catch (Exception e) {
-                            logger.warn("Could not serialize execute response to JSON: {}", e.getMessage());
-                            logger.info("Execute Response - HttpStatusCode: {}, PollEndpoint: {}, RetryAfterSecs: {}, Message: {}", 
-                                executeResponse.getHttpStatusCode(),
-                                executeResponse.getPollEndpoint(),
-                                executeResponse.getRetryAfterSecs(),
-                                executeResponse.getMessage());
-                        }
-                    }
-                    
-                    if (executeResponse != null) {
-                        // Update transaction with execute response
-                        if (executeResponse.getPollEndpoint() != null && !executeResponse.getPollEndpoint().isEmpty()) {
-                            String cleanPollEndpoint = executeResponse.getPollEndpoint();
-                            if (cleanPollEndpoint.endsWith("/")) {
-                                cleanPollEndpoint = cleanPollEndpoint.substring(0, cleanPollEndpoint.length() - 1);
-                            }
-                            transaction.setPollEndpoint(cleanPollEndpoint);
-                            transaction.setRetryAfterSecs(executeResponse.getRetryAfterSecs());
-                        }
-                        
-                        // If /vend/execute returns HTTP 200 or 202, set status to SUCCESS immediately
-                        if (executeResponse.getHttpStatusCode() != null && 
-                            (executeResponse.getHttpStatusCode() == 200 || executeResponse.getHttpStatusCode() == 202)) {
-                            transaction.setEfasheStatus("SUCCESS");
-                            transaction.setMessage(executeResponse.getMessage() != null ? executeResponse.getMessage() : 
-                                "EFASHE transaction executed successfully");
-                            efasheTransactionRepository.save(transaction);
-                            logger.info("✅ EFASHE execute returned HTTP {} - Service delivered successfully", 
-                                executeResponse.getHttpStatusCode());
-                            
-                            // Send notification
-                            sendWhatsAppNotification(transaction);
-                        } else if (executeResponse.getPollEndpoint() != null && !executeResponse.getPollEndpoint().isEmpty()) {
-                            // If pollEndpoint is provided, poll for status
-                            transaction.setEfasheStatus("PENDING");
-                            transaction.setMessage("EFASHE transaction initiated. Poll endpoint: " + executeResponse.getPollEndpoint());
-                            efasheTransactionRepository.save(transaction);
-                            
-                            Integer retryAfterSecs = transaction.getRetryAfterSecs() != null && transaction.getRetryAfterSecs() > 0 
-                                ? transaction.getRetryAfterSecs() : 10;
-                            
-                            boolean pollSuccess = pollUntilSuccess(transaction, transaction.getPollEndpoint(), retryAfterSecs);
-                            
-                            if (!pollSuccess) {
-                                logger.warn("EFASHE polling completed but status is still not SUCCESS - Transaction ID: {}, Status: {}", 
-                                    transaction.getTransactionId(), transaction.getEfasheStatus());
-                            }
-                        } else {
-                            // Synchronous response
-                            String efasheStatus = executeResponse.getStatus() != null ? executeResponse.getStatus() : "SUCCESS";
-                            transaction.setEfasheStatus(efasheStatus);
-                            transaction.setMessage(executeResponse.getMessage() != null ? executeResponse.getMessage() : "EFASHE transaction executed successfully");
-                            efasheTransactionRepository.save(transaction);
-                            
-                            if ("SUCCESS".equalsIgnoreCase(efasheStatus)) {
-                                sendWhatsAppNotification(transaction);
-                            }
-                        }
-                    } else {
-                        // Execute returned null - check if we can poll instead
-                        if (transaction.getPollEndpoint() != null && !transaction.getPollEndpoint().isEmpty()) {
-                            logger.warn("⚠️ EFASHE execute returned null response, but pollEndpoint exists. Attempting to poll status instead. " +
-                                "Transaction ID: {}, PollEndpoint: {}", transaction.getTransactionId(), transaction.getPollEndpoint());
-                            
-                            // Try polling to check if service was already delivered
-                            Integer retryAfterSecs = transaction.getRetryAfterSecs() != null && transaction.getRetryAfterSecs() > 0 
-                                ? transaction.getRetryAfterSecs() : 10;
-                            
-                            boolean pollSuccess = pollUntilSuccess(transaction, transaction.getPollEndpoint(), retryAfterSecs);
-                            
-                            if (pollSuccess && "SUCCESS".equalsIgnoreCase(transaction.getEfasheStatus())) {
-                                logger.info("✅ Polling succeeded after execute returned null - Service was already delivered. Transaction ID: {}", 
-                                    transaction.getTransactionId());
-                                // Service was delivered, continue normally
-                            } else {
-                                transaction.setEfasheStatus("FAILED");
-                                transaction.setErrorMessage("EFASHE execute returned null response and polling failed");
-                                efasheTransactionRepository.save(transaction);
-                                logger.error("❌ EFASHE execute returned null response and polling failed - Transaction ID: {}", 
-                                    transaction.getTransactionId());
-                            }
-                        } else {
-                            transaction.setEfasheStatus("FAILED");
-                            transaction.setErrorMessage("EFASHE execute returned null response");
-                            efasheTransactionRepository.save(transaction);
-                            logger.error("❌ EFASHE execute returned null response and no pollEndpoint available - Transaction ID: {}. Check logs for detailed error information.", 
-                                transaction.getTransactionId());
-                        }
-                    }
-                } catch (Exception e) {
-                    transaction.setEfasheStatus("FAILED");
-                    transaction.setErrorMessage("Failed to execute EFASHE transaction: " + e.getMessage());
-                    efasheTransactionRepository.save(transaction);
-                    logger.error("Error executing EFASHE transaction after BizaoPayment SUCCESS: ", e);
-                }
-            }
-        }
-        
-        // Update existing transaction (never create new row)
-        efasheTransactionRepository.save(transaction);
-        logger.info("Updated existing transaction row - Transaction ID: {}, BizaoPayment Status: {} (Initial: {}), EFASHE Status: {} (Initial: {}), Cashback Sent: {}", 
-            transaction.getTransactionId(), transaction.getMopayStatus(), transaction.getInitialMopayStatus(),
-            transaction.getEfasheStatus(), transaction.getInitialEfasheStatus(), transaction.getCashbackSent());
-        
-        // Build response with all information
-        EfasheStatusResponse response = new EfasheStatusResponse();
-        
-        // Convert BizaoPaymentResponse to MoPayResponse format for compatibility
-        MoPayResponse moPayResponse = new MoPayResponse();
-        if (bizaoResponse != null) {
-            moPayResponse.setTransactionId(bizaoResponse.getTransactionId());
-            moPayResponse.setStatus(bizaoResponse.getStatus());
-            moPayResponse.setSuccess(bizaoResponse.getSuccess());
-            moPayResponse.setMessage(bizaoResponse.getMessage());
-        }
-        response.setMoPayResponse(moPayResponse);
-        response.setValidateResponse(null); // Validate was done in initiate, not in status check
-        response.setExecuteResponse(executeResponse);
-        response.setTransactionId(transactionId);
-        response.setMopayStatus(transaction.getMopayStatus());
-        response.setEfasheStatus(transaction.getEfasheStatus());
-        response.setMessage(transaction.getMessage());
-        response.setPollEndpoint(transaction.getPollEndpoint());
-        response.setRetryAfterSecs(transaction.getRetryAfterSecs());
-        
-        // Build transfers list - include full amount transfer and cashback transfers
-        List<EfasheStatusResponse.TransferInfo> transfers = new ArrayList<>();
-        
-        // Transfer 1: Full Amount Phone receives remaining amount
-        if (transaction.getFullAmountPhone() != null && transaction.getAmount() != null) {
-            EfasheStatusResponse.TransferInfo fullAmountTransfer = new EfasheStatusResponse.TransferInfo();
-            fullAmountTransfer.setType("FULL_AMOUNT");
-            fullAmountTransfer.setFromPhone(transaction.getCustomerPhone());
-            fullAmountTransfer.setToPhone(transaction.getFullAmountPhone());
-            BigDecimal fullAmount = transaction.getAmount()
-                .subtract(transaction.getCustomerCashbackAmount() != null ? transaction.getCustomerCashbackAmount() : BigDecimal.ZERO)
-                .subtract(transaction.getBesoftShareAmount() != null ? transaction.getBesoftShareAmount() : BigDecimal.ZERO);
-            fullAmountTransfer.setAmount(fullAmount);
-            fullAmountTransfer.setMessage("EFASHE " + transaction.getServiceType() + " - Full amount");
-            fullAmountTransfer.setTransactionId(transactionId);
-            transfers.add(fullAmountTransfer);
-        }
-        
-        // Transfer 2: Customer Cashback
-        if (transaction.getCustomerCashbackAmount() != null 
-            && transaction.getCustomerCashbackAmount().compareTo(BigDecimal.ZERO) > 0) {
-            EfasheStatusResponse.TransferInfo customerCashbackTransfer = new EfasheStatusResponse.TransferInfo();
-            customerCashbackTransfer.setType("CUSTOMER_CASHBACK");
-            customerCashbackTransfer.setFromPhone(transaction.getFullAmountPhone());
-            customerCashbackTransfer.setToPhone(transaction.getCustomerPhone());
-            customerCashbackTransfer.setAmount(transaction.getCustomerCashbackAmount());
-            customerCashbackTransfer.setMessage("EFASHE " + transaction.getServiceType() + " - Customer cashback");
-            customerCashbackTransfer.setTransactionId(transactionId);
-            transfers.add(customerCashbackTransfer);
-        }
-        
-        // Transfer 3: Besoft Share
-        if (transaction.getBesoftShareAmount() != null 
-            && transaction.getBesoftShareAmount().compareTo(BigDecimal.ZERO) > 0) {
-            EfasheStatusResponse.TransferInfo besoftShareTransfer = new EfasheStatusResponse.TransferInfo();
-            besoftShareTransfer.setType("BESOFT_SHARE");
-            besoftShareTransfer.setFromPhone(transaction.getFullAmountPhone());
-            besoftShareTransfer.setToPhone(transaction.getCashbackPhone());
-            besoftShareTransfer.setAmount(transaction.getBesoftShareAmount());
-            besoftShareTransfer.setMessage("EFASHE " + transaction.getServiceType() + " - Besoft share");
-            besoftShareTransfer.setTransactionId(transactionId);
-            transfers.add(besoftShareTransfer);
-        }
-        
-        response.setTransfers(transfers);
-        
-        // For ELECTRICITY transactions, fetch and include electricity tokens response
-        if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
-            try {
-                String meterNumber = transaction.getCustomerAccountNumber();
-                if (meterNumber != null && !meterNumber.trim().isEmpty()) {
-                    logger.info("ELECTRICITY transaction - Fetching tokens for meter: {} (requesting 3 tokens to find latest)", meterNumber);
-                    ElectricityTokensResponse tokensResponse = efasheApiService.getElectricityTokens(meterNumber, 3);
-                    
-                    if (tokensResponse != null && tokensResponse.getData() != null && !tokensResponse.getData().isEmpty()) {
-                        ElectricityTokensResponse.ElectricityTokenData latestTokenData = getLatestTokenByTimestamp(tokensResponse.getData());
-                        if (latestTokenData != null) {
-                            ElectricityTokensResponse latestTokenResponse = new ElectricityTokensResponse();
-                            latestTokenResponse.setStatus(tokensResponse.getStatus());
-                            latestTokenResponse.setData(java.util.List.of(latestTokenData));
-                            response.setElectricityTokens(latestTokenResponse);
-                        } else {
-                            response.setElectricityTokens(tokensResponse);
-                        }
-                    } else {
-                        response.setElectricityTokens(tokensResponse != null ? tokensResponse : new ElectricityTokensResponse());
-                        logger.warn("ELECTRICITY transaction - No token data returned");
-                    }
-                } else {
-                    logger.warn("ELECTRICITY transaction - Cannot fetch tokens: meter number is null or empty");
-                    response.setElectricityTokens(new ElectricityTokensResponse());
-                }
-            } catch (Exception e) {
-                logger.error("ELECTRICITY transaction - Error fetching tokens for status response: ", e);
-                response.setElectricityTokens(new ElectricityTokensResponse());
-            }
-            
-            // CRITICAL VALIDATION: For ELECTRICITY transactions, if efasheStatus is SUCCESS but no tokens are available, mark as FAILED
-            if ("SUCCESS".equalsIgnoreCase(transaction.getEfasheStatus())) {
-                ElectricityTokensResponse tokensResponse = response.getElectricityTokens();
-                boolean hasTokens = tokensResponse != null 
-                    && tokensResponse.getData() != null 
-                    && !tokensResponse.getData().isEmpty();
-                
-                if (!hasTokens) {
-                    logger.error("❌ ELECTRICITY transaction marked as SUCCESS but no tokens available - Marking as FAILED. Transaction ID: {}", transactionId);
-                    
-                    // Update transaction status in database
-                    transaction.setEfasheStatus("FAILED");
-                    transaction.setErrorMessage("Transaction marked as SUCCESS but no electricity tokens were delivered. Service not delivered.");
-                    efasheTransactionRepository.save(transaction);
-                    entityManager.flush();
-                    
-                    // Update response status
-                    response.setEfasheStatus("FAILED");
-                    response.setMessage("Transaction failed: No electricity tokens were delivered");
-                    
-                    logger.warn("⚠️ ELECTRICITY transaction status updated to FAILED - Transaction ID: {}, Reason: No tokens delivered", transactionId);
-                    logger.warn("⚠️ NOT SENDING WhatsApp/SMS notifications - Transaction marked as FAILED due to no tokens");
-                } else {
-                    logger.info("✅ ELECTRICITY transaction validated - Has tokens: true, Status: SUCCESS, Transaction ID: {}", transactionId);
-                }
-            }
-        }
-        
-        logger.info("Transaction status check result with BizaoPayment - Transaction ID: {}, BizaoPayment Status: {}, EFASHE Status: {}, Transfers: {}", 
-            transactionId, transaction.getMopayStatus(), response.getEfasheStatus(), transfers.size());
-        return response;
-    }
-    
-    /**
      * Send cashback transfers to customer and besoft phone after EFASHE execute completes
      * This creates separate MoPay payment requests for each cashback transfer
      * All transfers use the same transaction ID as the main transaction
@@ -2264,7 +1919,7 @@ public class EfashePaymentService {
             boolean refundTransferSuccess = false;
             try {
                 // Build MoPay request for refund transfer (same as cashback transfer)
-                MoPayInitiateRequest refundRequest = new MoPayInitiateRequest();
+                MopayOpenApiInitiateRequest refundRequest = new MopayOpenApiInitiateRequest();
                 refundRequest.setTransaction_id(refundTransactionId);
                 refundRequest.setAmount(refundAmount);
                 refundRequest.setCurrency("RWF");
@@ -2273,8 +1928,8 @@ public class EfashePaymentService {
                 refundRequest.setMessage("EFASHE " + transaction.getServiceType() + " - Refund (Transaction Failed)");
                 
                 // Create transfer to customer
-                List<MoPayInitiateRequest.Transfer> transfers = new ArrayList<>();
-                MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
+                List<MopayOpenApiInitiateRequest.Transfer> transfers = new ArrayList<>();
+                MopayOpenApiInitiateRequest.Transfer transfer = new MopayOpenApiInitiateRequest.Transfer();
                 transfer.setAmount(refundAmount);
                 Long toPhoneLong = Long.parseLong(normalizedCustomerPhone);
                 transfer.setPhone(toPhoneLong); // To: customer phone
@@ -2286,7 +1941,7 @@ public class EfashePaymentService {
                     refundTransactionId, refundAmount, normalizedFullAmountPhone, normalizedCustomerPhone);
                 
                 // Call MoPay to initiate the refund transfer
-                MoPayResponse refundResponse = moPayService.initiatePayment(refundRequest);
+                MoPayResponse refundResponse = mopayOpenApiService.initiatePayment(refundRequest);
                 
                 // Check if refund was successful: status 201 (CREATED) or 200 (OK) OR success flag is true
                 // This matches how we check MoPay success elsewhere in the codebase
@@ -2400,7 +2055,7 @@ public class EfashePaymentService {
                 cashbackTransactionId, mainTransactionId);
             
             // Build MoPay request for cashback transfer
-            MoPayInitiateRequest cashbackRequest = new MoPayInitiateRequest();
+            MopayOpenApiInitiateRequest cashbackRequest = new MopayOpenApiInitiateRequest();
             cashbackRequest.setTransaction_id(cashbackTransactionId); // Same transaction_id as full amount transfer
             cashbackRequest.setAmount(amount);
             cashbackRequest.setCurrency("RWF");
@@ -2409,8 +2064,8 @@ public class EfashePaymentService {
             cashbackRequest.setMessage(message);
             
             // Create transfer to recipient
-            List<MoPayInitiateRequest.Transfer> transfers = new ArrayList<>();
-            MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
+            List<MopayOpenApiInitiateRequest.Transfer> transfers = new ArrayList<>();
+            MopayOpenApiInitiateRequest.Transfer transfer = new MopayOpenApiInitiateRequest.Transfer();
             transfer.setAmount(amount);
             // Convert phone string to Long (MoPay API requires number in transfers)
             Long toPhoneLong = Long.parseLong(toPhone);
@@ -2427,9 +2082,9 @@ public class EfashePaymentService {
                 cashbackTransactionId, amount, fromPhone, toPhone);
             
             // Initiate the cashback transfer
-            logger.info("Calling MoPayService.initiatePayment for cashback transfer...");
-            MoPayResponse cashbackResponse = moPayService.initiatePayment(cashbackRequest);
-            logger.info("MoPayService.initiatePayment returned - Success: {}, Status: {}, Transaction ID: {}", 
+            logger.info("Calling mopayOpenApiService.initiatePayment for cashback transfer...");
+            MoPayResponse cashbackResponse = mopayOpenApiService.initiatePayment(cashbackRequest);
+            logger.info("mopayOpenApiService.initiatePayment returned - Success: {}, Status: {}, Transaction ID: {}", 
                 cashbackResponse != null ? cashbackResponse.getSuccess() : null,
                 cashbackResponse != null ? cashbackResponse.getStatus() : null,
                 cashbackResponse != null ? cashbackResponse.getTransactionId() : null);
@@ -4091,7 +3746,7 @@ public class EfashePaymentService {
         // Initiate MoPay refund transfer
         // NOTE: We do NOT call EFASHE API during refund processing - only MoPay transfer
         try {
-            MoPayInitiateRequest refundRequest = new MoPayInitiateRequest();
+            MopayOpenApiInitiateRequest refundRequest = new MopayOpenApiInitiateRequest();
             refundRequest.setTransaction_id(refundTransactionId);
             refundRequest.setAmount(refundAmount);
             refundRequest.setCurrency("RWF");
@@ -4100,8 +3755,8 @@ public class EfashePaymentService {
             refundRequest.setMessage(refundMessage);
             
             // Create transfer to receiver phone
-            List<MoPayInitiateRequest.Transfer> transfers = new ArrayList<>();
-            MoPayInitiateRequest.Transfer transfer = new MoPayInitiateRequest.Transfer();
+            List<MopayOpenApiInitiateRequest.Transfer> transfers = new ArrayList<>();
+            MopayOpenApiInitiateRequest.Transfer transfer = new MopayOpenApiInitiateRequest.Transfer();
             transfer.setAmount(refundAmount);
             Long receiverPhoneLong = Long.parseLong(normalizedReceiverPhone);
             transfer.setPhone(receiverPhoneLong); // To: receiver phone (CREDIT)
@@ -4113,7 +3768,7 @@ public class EfashePaymentService {
                 refundTransactionId, refundAmount, normalizedAdminPhone, normalizedReceiverPhone);
             
             // Call MoPay to initiate the refund transfer
-            MoPayResponse refundResponse = moPayService.initiatePayment(refundRequest);
+            MoPayResponse refundResponse = mopayOpenApiService.initiatePayment(refundRequest);
             
             // DETAILED LOGGING: Log the complete MoPay initiate response
             logger.info("═══════════════════════════════════════════════════════════════");
@@ -4289,7 +3944,7 @@ public class EfashePaymentService {
                 logger.info("Refund status poll attempt {}/{} - Transaction ID: {}", attempt, maxAttempts, refundTransactionId);
                 
                 // Check refund status using MoPay check-status endpoint ONLY (no EFASHE calls)
-                MoPayResponse statusResponse = moPayService.checkTransactionStatus(refundTransactionId);
+                MoPayResponse statusResponse = mopayOpenApiService.checkTransactionStatus(refundTransactionId);
                 
                 // DETAILED LOGGING: Log the complete MoPay response
                 logger.info("═══════════════════════════════════════════════════════════════");
@@ -4400,7 +4055,7 @@ public class EfashePaymentService {
                 logger.info("Refund status poll attempt {}/{} - Transaction ID: {}", attempt, maxAttempts, refundTransactionId);
                 
                 // Check refund status using MoPay check-status endpoint
-                MoPayResponse statusResponse = moPayService.checkTransactionStatus(refundTransactionId);
+                MoPayResponse statusResponse = mopayOpenApiService.checkTransactionStatus(refundTransactionId);
                 
                 if (statusResponse != null) {
                     Integer statusCode = statusResponse.getStatus();
@@ -4472,43 +4127,42 @@ public class EfashePaymentService {
     }
     
     /**
-     * Poll BizaoPayment status in the background
+     * Poll Mopay status in the background
      * Polls every 5 seconds for 1 minute (12 attempts)
      * When status is SUCCESS, triggers EFASHE execute and sends notifications
      * 
-     * @param bizaoTransactionId BizaoPayment transaction ID to poll
+     * @param mopayTransactionId Mopay transaction ID to poll
      * @param efasheTransactionId EFASHE transaction ID
      */
-    private void pollBizaoPaymentStatus(String bizaoTransactionId, String efasheTransactionId) {
-        logger.info("=== BACKGROUND BIZAO PAYMENT POLLING START ===");
-        logger.info("BizaoPayment Transaction ID: {}, EFASHE Transaction ID: {}, Will poll every 5 seconds for up to 60 seconds (1 minute)", 
-            bizaoTransactionId, efasheTransactionId);
+    private void pollMopayStatus(String mopayTransactionId, String efasheTransactionId) {
+        logger.info("=== BACKGROUND MOPAY ECW PAYMENT POLLING START ===");
+        logger.info("Mopay Transaction ID: {}, EFASHE Transaction ID: {}, Will poll every 5 seconds for up to 60 seconds (1 minute)", 
+            mopayTransactionId, efasheTransactionId);
         
         int maxAttempts = 12; // 60 seconds / 1 minute total (5 seconds per attempt)
         int pollIntervalSeconds = 5;
         
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
-                logger.info("BizaoPayment status poll attempt {}/{} - Transaction ID: {}", attempt, maxAttempts, bizaoTransactionId);
+                logger.info("Mopay status poll attempt {}/{} - Transaction ID: {}", attempt, maxAttempts, mopayTransactionId);
                 
-                // Check BizaoPayment status
-                BizaoPaymentResponse statusResponse = bizaoPaymentService.checkTransactionStatus(bizaoTransactionId);
+                // Check Mopay status
+                MopayECWPaymentResponse statusResponse = mopayPaymentService.checkTransactionStatus(mopayTransactionId);
                 
                 if (statusResponse != null) {
                     Integer statusCode = statusResponse.getStatus();
                     Boolean success = statusResponse.getSuccess();
                     
-                    logger.info("BizaoPayment status check - Transaction ID: {}, Status Code: {}, Success: {}", 
-                        bizaoTransactionId, statusCode, success);
+                    logger.info("Mopay status check - Transaction ID: {}, Status Code: {}, Success: {}", 
+                        mopayTransactionId, statusCode, success);
                     
                     // Check if payment is successful
-                    // Consider SUCCESS if status is 200/201 OR success flag is true
-                    boolean isSuccess = (statusCode != null && (statusCode == 200 || statusCode == 201)) 
+                    boolean isSuccess = "SUCCESSFUL".equalsIgnoreCase(statusResponse.getStatusDesc())
                         || (success != null && success);
                     
                     if (isSuccess) {
-                        logger.info("✅ BizaoPayment transaction SUCCESS detected - Transaction ID: {}, Status: {}", 
-                            bizaoTransactionId, statusCode);
+                        logger.info("✅ Mopay transaction SUCCESS detected - Transaction ID: {}, Status: {}", 
+                            mopayTransactionId, statusCode);
                         
                         // Update transaction status
                         try {
@@ -4516,9 +4170,9 @@ public class EfashePaymentService {
                             if (transactionOpt.isPresent()) {
                                 EfasheTransaction transaction = transactionOpt.get();
                                 
-                                // Update BizaoPayment status
+                                // Update Mopay status
                                 transaction.setMopayStatus(statusCode != null ? statusCode.toString() : "200");
-                                transaction.setMopayTransactionId(bizaoTransactionId);
+                                transaction.setMopayTransactionId(mopayTransactionId);
                                 
                                 // Only proceed with EFASHE execute if EFASHE status is not already SUCCESS
                                 if (!"SUCCESS".equalsIgnoreCase(transaction.getEfasheStatus())) {
@@ -4574,10 +4228,10 @@ public class EfashePaymentService {
                                             logger.error("❌ EFASHE execute failed - Transaction ID: {}, Response: {}", 
                                                 efasheTransactionId, executeResponse);
                                             transaction.setEfasheStatus("FAILED");
-                                            transaction.setErrorMessage("EFASHE execute failed after BizaoPayment success");
+                                            transaction.setErrorMessage("EFASHE execute failed after Mopay success");
                                         }
                                     } catch (Exception e) {
-                                        logger.error("❌ Error executing EFASHE transaction after BizaoPayment success - Transaction ID: {}", 
+                                        logger.error("❌ Error executing EFASHE transaction after Mopay success - Transaction ID: {}", 
                                             efasheTransactionId, e);
                                         transaction.setEfasheStatus("FAILED");
                                         transaction.setErrorMessage("EFASHE execute error: " + e.getMessage());
@@ -4587,21 +4241,21 @@ public class EfashePaymentService {
                                 }
                                 
                                 efasheTransactionRepository.save(transaction);
-                                logger.info("✅ Transaction updated after BizaoPayment SUCCESS - Transaction ID: {}", efasheTransactionId);
+                                logger.info("✅ Transaction updated after Mopay SUCCESS - Transaction ID: {}", efasheTransactionId);
                             } else {
-                                logger.warn("⚠️ Transaction not found for BizaoPayment polling - EFASHE Transaction ID: {}", efasheTransactionId);
+                                logger.warn("⚠️ Transaction not found for Mopay polling - EFASHE Transaction ID: {}", efasheTransactionId);
                             }
                         } catch (Exception e) {
-                            logger.error("Error updating transaction after BizaoPayment success: ", e);
+                            logger.error("Error updating transaction after Mopay success: ", e);
                         }
                         
-                        logger.info("=== BACKGROUND BIZAO PAYMENT POLLING END (SUCCESS) ===");
+                        logger.info("=== BACKGROUND MOPAY ECW PAYMENT POLLING END (SUCCESS) ===");
                         return;
                     } else {
                         // Check if it's explicitly failed
                         if (statusCode != null && statusCode >= 400) {
-                            logger.warn("⚠️ BizaoPayment status is FAILED - Transaction ID: {}, Status Code: {}", 
-                                bizaoTransactionId, statusCode);
+                        logger.warn("⚠️ Mopay status is FAILED - Transaction ID: {}, Status Code: {}", 
+                            mopayTransactionId, statusCode);
                             
                             // Update transaction status
                             try {
@@ -4610,21 +4264,21 @@ public class EfashePaymentService {
                                     EfasheTransaction transaction = transactionOpt.get();
                                     transaction.setMopayStatus(statusCode.toString());
                                     transaction.setEfasheStatus("FAILED");
-                                    transaction.setErrorMessage("BizaoPayment status failed: " + statusCode);
+                                    transaction.setErrorMessage("Mopay status failed: " + statusCode);
                                     efasheTransactionRepository.save(transaction);
                                 }
                             } catch (Exception e) {
-                                logger.error("Error updating transaction after BizaoPayment failure: ", e);
+                                logger.error("Error updating transaction after Mopay failure: ", e);
                             }
                             
-                            logger.info("=== BACKGROUND BIZAO PAYMENT POLLING END (FAILED) ===");
+                            logger.info("=== BACKGROUND MOPAY ECW PAYMENT POLLING END (FAILED) ===");
                             return;
                         }
                         // Still pending, continue polling
-                        logger.info("BizaoPayment status is still PENDING - will retry in {} second(s)", pollIntervalSeconds);
+                        logger.info("Mopay status is still PENDING - will retry in {} second(s)", pollIntervalSeconds);
                     }
                 } else {
-                    logger.warn("BizaoPayment status response is null for transaction: {}", bizaoTransactionId);
+                    logger.warn("Mopay status response is null for transaction: {}", mopayTransactionId);
                 }
                 
                 // Wait before next attempt (except on last attempt)
@@ -4633,11 +4287,11 @@ public class EfashePaymentService {
                 }
                 
             } catch (InterruptedException e) {
-                logger.error("BizaoPayment polling thread interrupted: ", e);
+                logger.error("Mopay polling thread interrupted: ", e);
                 Thread.currentThread().interrupt();
                 return;
             } catch (Exception e) {
-                logger.error("Error checking BizaoPayment status (attempt {}/{}): ", attempt, maxAttempts, e);
+                logger.error("Error checking Mopay status (attempt {}/{}): ", attempt, maxAttempts, e);
                 // Continue to next attempt even on error
                 if (attempt < maxAttempts) {
                     try {
@@ -4651,19 +4305,19 @@ public class EfashePaymentService {
         }
         
         // If we reach here, all attempts completed but status is still not SUCCESS
-        logger.warn("⚠️ BizaoPayment status check completed but status is still not SUCCESS after {} attempts - Transaction ID: {}", 
-            maxAttempts, bizaoTransactionId);
-        logger.info("=== BACKGROUND BIZAO PAYMENT POLLING END (MAX ATTEMPTS REACHED) ===");
+        logger.warn("⚠️ Mopay status check completed but status is still not SUCCESS after {} attempts - Transaction ID: {}", 
+            maxAttempts, mopayTransactionId);
+        logger.info("=== BACKGROUND MOPAY ECW PAYMENT POLLING END (MAX ATTEMPTS REACHED) ===");
     }
     
     /**
-     * Handle BizaoPayment webhook callback.
+     * Handle Mopay webhook callback.
      * Accepts either JWT-encoded payload or plain JSON (e.g. {"status": 200, "transactionId": "..."} or {"settings": {...}, "status": 200}).
      * When callback returns with status, updates the corresponding transaction status.
      */
     @Transactional
-    public void handleBizaoPaymentWebhook(String body) {
-        logger.info("=== BIZAO PAYMENT WEBHOOK RECEIVED ===");
+    public void handleMopayPaymentWebhook(String body) {
+        logger.info("=== MOPAY PAYMENT WEBHOOK RECEIVED ===");
         if (body == null) {
             body = "";
         }
@@ -4675,7 +4329,7 @@ public class EfashePaymentService {
             String statusDesc = null;
 
             if (trimmed.startsWith("{")) {
-                // Plain JSON callback (e.g. from MoPay/Bizao when they send JSON instead of JWT)
+                // Plain JSON callback (e.g. from Mopay when they send JSON instead of JWT)
                 ObjectMapper mapper = new ObjectMapper();
                 @SuppressWarnings("unchecked")
                 java.util.Map<String, Object> json = mapper.readValue(trimmed, java.util.Map.class);
@@ -4707,7 +4361,7 @@ public class EfashePaymentService {
                 }
             } else {
                 // JWT-encoded payload
-                SecretKey signingKey = Keys.hmacShaKeyFor(bizaoPaymentWebhookSigningKey.getBytes(StandardCharsets.UTF_8));
+                SecretKey signingKey = Keys.hmacShaKeyFor(mopayPaymentWebhookSigningKey.getBytes(StandardCharsets.UTF_8));
                 Claims claims = Jwts.parser()
                         .verifyWith(signingKey)
                         .build()
@@ -4734,13 +4388,13 @@ public class EfashePaymentService {
             }
 
             processWebhookPayload(transactionId, status, statusDesc);
-            logger.info("=== BIZAO PAYMENT WEBHOOK PROCESSED SUCCESSFULLY ===");
+            logger.info("=== MOPAY ECW PAYMENT WEBHOOK PROCESSED SUCCESSFULLY ===");
 
         } catch (io.jsonwebtoken.security.SecurityException | io.jsonwebtoken.ExpiredJwtException | io.jsonwebtoken.MalformedJwtException e) {
-            logger.error("❌ JWT verification failed for BizaoPayment webhook: ", e);
+            logger.error("❌ JWT verification failed for Mopay webhook: ", e);
             throw new RuntimeException("Invalid or expired JWT token: " + e.getMessage());
         } catch (Exception e) {
-            logger.error("❌ Error processing BizaoPayment webhook: ", e);
+            logger.error("❌ Error processing Mopay webhook: ", e);
             throw new RuntimeException("Failed to process webhook: " + e.getMessage());
         }
     }
@@ -4758,12 +4412,32 @@ public class EfashePaymentService {
      * Apply webhook payload to the matching EFASHE transaction: update status and optionally trigger execute.
      */
     private void processWebhookPayload(String transactionId, Integer status, String statusDesc) {
+        if (isPochiTransactionId(transactionId)) {
+            handlePochiWebhook(transactionId, status, statusDesc);
+            return;
+        }
+
+        handleEfasheWebhook(transactionId, status, statusDesc);
+    }
+
+    private boolean isPochiTransactionId(String transactionId) {
+        return transactionId != null && transactionId.startsWith("POCHI");
+    }
+
+    private void handlePochiWebhook(String transactionId, Integer status, String statusDesc) {
+        logger.info("Processing POCHI webhook - Transaction ID: {}, Status: {}, StatusDesc: {}", 
+            transactionId, status, statusDesc);
+        // Apply webhook status without calling MoPay status endpoints.
+        paymentService.applyWebhookStatus(transactionId, status, statusDesc);
+    }
+
+    private void handleEfasheWebhook(String transactionId, Integer status, String statusDesc) {
         Optional<EfasheTransaction> transactionOpt = efasheTransactionRepository.findByMopayTransactionId(transactionId);
         if (!transactionOpt.isPresent()) {
             transactionOpt = efasheTransactionRepository.findByTransactionId(transactionId);
         }
         if (!transactionOpt.isPresent()) {
-            logger.warn("⚠️ Transaction not found for BizaoPayment webhook - TransactionId: {}", transactionId);
+            logger.warn("⚠️ Transaction not found for Mopay webhook - TransactionId: {}", transactionId);
             throw new RuntimeException("Transaction not found for transactionId: " + transactionId);
         }
 
@@ -4774,8 +4448,9 @@ public class EfashePaymentService {
         // If callback returns 200/success but we already processed this transaction (efashe_status = SUCCESS),
         // do NOT run execute again – only update MoPay status and return. Prevents duplicate service delivery.
         boolean alreadySuccess = "SUCCESS".equalsIgnoreCase(transaction.getEfasheStatus());
-        boolean isSuccessful = (status != null && (status == 200 || status == 201))
-                || "SUCCESSFUL".equalsIgnoreCase(statusDesc);
+        boolean isSuccessful = "SUCCESSFUL".equalsIgnoreCase(statusDesc)
+                || (status != null && (status == 200 || status == 201)
+                    && (statusDesc == null || statusDesc.trim().isEmpty()));
         if (alreadySuccess && isSuccessful) {
             if (status != null) {
                 transaction.setMopayStatus(status.toString());
@@ -4790,7 +4465,7 @@ public class EfashePaymentService {
         }
 
         if (isSuccessful && !alreadySuccess) {
-            logger.info("✅ BizaoPayment transaction SUCCESS detected - Triggering EFASHE execute...");
+            logger.info("✅ Mopay transaction SUCCESS detected - Triggering EFASHE execute...");
             try {
                 EfasheExecuteRequest executeRequest = new EfasheExecuteRequest();
                 executeRequest.setTrxId(transaction.getTrxId());
@@ -4828,17 +4503,17 @@ public class EfashePaymentService {
                     sendWhatsAppNotification(transaction);
                 } else {
                     transaction.setEfasheStatus("FAILED");
-                    transaction.setErrorMessage("EFASHE execute failed after BizaoPayment success");
+                    transaction.setErrorMessage("EFASHE execute failed after Mopay success");
                 }
             } catch (Exception e) {
-                logger.error("❌ Error executing EFASHE transaction after BizaoPayment success - Transaction ID: {}", transaction.getTransactionId(), e);
+                logger.error("❌ Error executing EFASHE transaction after Mopay success - Transaction ID: {}", transaction.getTransactionId(), e);
                 transaction.setEfasheStatus("FAILED");
                 transaction.setErrorMessage("EFASHE execute error: " + e.getMessage());
             }
         } else if (!isSuccessful) {
-            logger.warn("⚠️ BizaoPayment transaction FAILED - Transaction ID: {}, Status: {}, StatusDesc: {}", transactionId, status, statusDesc);
+            logger.warn("⚠️ Mopay transaction FAILED - Transaction ID: {}, Status: {}, StatusDesc: {}", transactionId, status, statusDesc);
             transaction.setEfasheStatus("FAILED");
-            transaction.setErrorMessage("BizaoPayment failed - Status: " + status + ", StatusDesc: " + statusDesc);
+            transaction.setErrorMessage("Mopay failed - Status: " + status + ", StatusDesc: " + statusDesc);
         }
 
         efasheTransactionRepository.save(transaction);
@@ -4993,4 +4668,6 @@ public class EfashePaymentService {
             .build();
     }
 }
+
+
 

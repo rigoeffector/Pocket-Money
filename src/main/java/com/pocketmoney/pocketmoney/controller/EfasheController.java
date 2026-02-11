@@ -90,9 +90,9 @@ public class EfasheController {
     }
 
     /**
-     * Process a validated transaction by calling MoPay
+     * Process a validated transaction using the configured provider
      * POST /api/efashe/process/{transactionId}
-     * Updates validated flag to "PROCESS" and initiates MoPay payment
+     * Updates validated flag to "PROCESS" and initiates payment
      */
     @PostMapping("/process/{transactionId}")
     public ResponseEntity<ApiResponse<EfasheInitiateResponse>> processPayment(
@@ -108,9 +108,9 @@ public class EfasheController {
     }
 
     /**
-     * Check EFASHE transaction status using MoPay transaction ID
+     * Check EFASHE transaction status using the configured provider transaction ID
      * GET/POST /api/efashe/status/{transactionId}
-     * Automatically triggers EFASHE validate and execute when MoPay status is SUCCESS
+     * Automatically triggers EFASHE validate and execute when payment status is SUCCESS
      * Supports both GET and POST methods for flexibility
      */
     @GetMapping("/status/{transactionId}")
@@ -443,38 +443,37 @@ public class EfasheController {
     }
 
     /**
-     * Process a validated transaction by calling BizaoPayment
+     * Legacy alias for processing a validated transaction.
      * POST /api/efashe/bizao/process/{transactionId}
-     * Updates validated flag to "PROCESS" and initiates BizaoPayment payment
+     * Uses the configured provider from application properties.
      */
     @PostMapping("/bizao/process/{transactionId}")
-    public ResponseEntity<ApiResponse<EfasheInitiateResponse>> processPaymentWithBizao(
+    public ResponseEntity<ApiResponse<EfasheInitiateResponse>> processPaymentLegacy(
             @PathVariable("transactionId") String transactionId) {
         try {
-            EfasheInitiateResponse response = efashePaymentService.processPaymentWithBizao(transactionId);
-            return ResponseEntity.ok(ApiResponse.success("EFASHE payment processed successfully with BizaoPayment", response));
+            EfasheInitiateResponse response = efashePaymentService.processPayment(transactionId);
+            return ResponseEntity.ok(ApiResponse.success("EFASHE payment processed successfully", response));
         } catch (RuntimeException e) {
-            logger.error("Error processing EFASHE payment with BizaoPayment: ", e);
+            logger.error("Error processing EFASHE payment (legacy endpoint): ", e);
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.error(e.getMessage()));
         }
     }
 
     /**
-     * Check EFASHE transaction status using BizaoPayment transaction ID
+     * Legacy alias for checking transaction status.
      * GET/POST /api/efashe/bizao/status/{transactionId}
-     * Automatically triggers EFASHE validate and execute when BizaoPayment status is SUCCESS
-     * Supports both GET and POST methods for flexibility
+     * Uses the configured provider from application properties.
      */
     @GetMapping("/bizao/status/{transactionId}")
     @PostMapping("/bizao/status/{transactionId}")
-    public ResponseEntity<ApiResponse<EfasheStatusResponse>> checkTransactionStatusWithBizao(
+    public ResponseEntity<ApiResponse<EfasheStatusResponse>> checkTransactionStatusLegacy(
             @PathVariable("transactionId") String transactionId) {
         try {
-            EfasheStatusResponse response = efashePaymentService.checkTransactionStatusWithBizao(transactionId);
+            EfasheStatusResponse response = efashePaymentService.checkTransactionStatus(transactionId);
             return ResponseEntity.ok(ApiResponse.success("Transaction status retrieved successfully", response));
         } catch (RuntimeException e) {
-            logger.error("Error checking EFASHE transaction status with BizaoPayment: ", e);
+            logger.error("Error checking EFASHE transaction status (legacy endpoint): ", e);
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.error(e.getMessage()));
         }

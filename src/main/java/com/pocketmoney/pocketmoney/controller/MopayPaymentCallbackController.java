@@ -12,33 +12,33 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 @RequestMapping("/api/v1/payments")
-public class BizaoPaymentCallbackController {
+public class MopayPaymentCallbackController {
 
-    private static final Logger logger = LoggerFactory.getLogger(BizaoPaymentCallbackController.class);
+    private static final Logger logger = LoggerFactory.getLogger(MopayPaymentCallbackController.class);
 
     private final EfashePaymentService efashePaymentService;
 
-    public BizaoPaymentCallbackController(EfashePaymentService efashePaymentService) {
+    public MopayPaymentCallbackController(EfashePaymentService efashePaymentService) {
         this.efashePaymentService = efashePaymentService;
     }
 
     /**
-     * BizaoPayment webhook callback endpoint
+     * Mopay webhook callback endpoint
      * POST /api/v1/payments/callback
-     * Receives JWT-encoded webhook notifications from BizaoPayment
+     * Receives JWT-encoded webhook notifications from Mopay
      */
     @PostMapping("/callback")
-    public ResponseEntity<java.util.Map<String, Object>> handleBizaoPaymentWebhook(@RequestBody String jwtToken) {
+    public ResponseEntity<java.util.Map<String, Object>> handleMopayPaymentWebhook(@RequestBody String jwtToken) {
         try {
-            logger.info("Received BizaoPayment webhook callback - JWT Token: {}", jwtToken);
-            efashePaymentService.handleBizaoPaymentWebhook(jwtToken);
+            logger.info("Received Mopay webhook callback - JWT Token: {}", jwtToken);
+            efashePaymentService.handleMopayPaymentWebhook(jwtToken);
             java.util.Map<String, Object> response = new java.util.HashMap<>();
             response.put("status", HttpStatus.OK.value());
             response.put("message", "Webhook received successfully");
             response.put("transactionId", null);
             return ResponseEntity.ok(response);
         } catch (RuntimeException e) {
-            logger.error("Error processing BizaoPayment webhook: ", e);
+            logger.error("Error processing Mopay webhook: ", e);
             java.util.Map<String, Object> response = new java.util.HashMap<>();
             response.put("status", HttpStatus.NOT_FOUND.value());
             response.put("message", e.getMessage() != null ? e.getMessage() : "Error processing webhook");
