@@ -30,7 +30,7 @@ public class MopayPaymentCallbackController {
     @PostMapping("/callback")
     public ResponseEntity<java.util.Map<String, Object>> handleMopayPaymentWebhook(@RequestBody String jwtToken) {
         try {
-            logger.info("Received BizaoPayment webhook callback - JWT Token: {}", jwtToken);
+            logger.info("Received Mopay webhook callback - JWT Token: {}", jwtToken);
             efashePaymentService.handleMopayPaymentWebhook(jwtToken);
             java.util.Map<String, Object> response = new java.util.HashMap<>();
             response.put("status", HttpStatus.OK.value());
@@ -38,7 +38,7 @@ public class MopayPaymentCallbackController {
             response.put("transactionId", null);
             return ResponseEntity.ok(response);
         } catch (RuntimeException e) {
-            logger.error("Error processing BizaoPayment webhook: ", e);
+            logger.error("Error processing Mopay webhook: ", e);
             java.util.Map<String, Object> response = new java.util.HashMap<>();
             response.put("status", HttpStatus.NOT_FOUND.value());
             response.put("message", e.getMessage() != null ? e.getMessage() : "Error processing webhook");

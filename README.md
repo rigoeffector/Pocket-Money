@@ -127,7 +127,7 @@ spring.profiles.active=dev
 - **Database**: PostgreSQL on `localhost:5432`, database `pocketmoney_db`
 - **JWT**: Secret and expiration in properties (override with `JWT_SECRET` in prod)
 - **EFASHE**: API URL and keys in `application.properties`
-- **SMS / WhatsApp / MoPay / BizaoPayment**: In `application-dev.properties` (or prod with env vars)
+- **SMS / WhatsApp / MopayOpenApi / MopayECWPayment**: In `application-dev.properties` (or prod with env vars)
 
 ### Environment variables (production)
 
@@ -137,7 +137,7 @@ Prefer env vars for production:
 - `SMS_API_KEY`, `SMS_API_URL`, `SMS_SENDER_ID`
 - `WHATSAPP_API_KEY`
 - `MOPAY_API_TOKEN`
-- `BIZAOPAYMENT_API_URL`, `BIZAOPAYMENT_API_TOKEN`, `BIZAOPAYMENT_WEBHOOK_SIGNING_KEY`
+- `MOPAYPAYMENT_API_URL`, `MOPAYPAYMENT_API_TOKEN`, `MOPAYPAYMENT_WEBHOOK_SIGNING_KEY`
 - `SERVER_PORT` (default 8383)
 
 ---
@@ -252,7 +252,7 @@ pocketmoney/
 
 3. **Database**: Run migrations on the server (e.g. `apply_migrations_remote.sh` or manual `psql` with `all_migrations_consolidated.sql`).
 
-4. **Environment**: Set production env vars on the server (JWT, SMS, MoPay, BizaoPayment, etc.) or adjust `application-prod.properties`.
+4. **Environment**: Set production env vars on the server (JWT, SMS, MopayOpenApi, MopayECWPayment, etc.) or adjust `application-prod.properties`.
 
 ---
 

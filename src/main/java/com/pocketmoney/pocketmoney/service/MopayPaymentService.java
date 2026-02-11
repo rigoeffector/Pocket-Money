@@ -1,9 +1,10 @@
 package com.pocketmoney.pocketmoney.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.pocketmoney.pocketmoney.dto.BizaoPaymentInitiateRequest;
-import com.pocketmoney.pocketmoney.dto.BizaoPaymentResponse;
-import com.pocketmoney.pocketmoney.dto.BizaoAccountHolderResponse;
+import com.pocketmoney.pocketmoney.dto.MopayECWPaymentInitiateRequest;
+import com.pocketmoney.pocketmoney.dto.MopayECWPaymentResponse;
+import com.pocketmoney.pocketmoney.dto.MopayECWAccountHolderResponse;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -18,10 +19,10 @@ public class MopayPaymentService {
     private static final Logger logger = LoggerFactory.getLogger(MopayPaymentService.class);
 
     @Value("${mopay.api.url:http://41.186.14.66:443}")
-    private String bizaoPaymentApiUrl;
+    private String mopayPaymentApiUrl;
 
     @Value("${mopay.api.token:dW5vdGlmeTpRMG5XMUMhLkBEM1YjJTgqTTIxMkBf}")
-    private String bizaoPaymentApiToken;
+    private String mopayPaymentApiToken;
 
     private final RestTemplate restTemplate;
 
@@ -29,29 +30,29 @@ public class MopayPaymentService {
         this.restTemplate = restTemplate;
     }
 
-    public BizaoPaymentResponse initiatePayment(BizaoPaymentInitiateRequest request) {
-        String url = bizaoPaymentApiUrl + "/api/v1/payment";
+    public MopayECWPaymentResponse initiatePayment(MopayECWPaymentInitiateRequest request) {
+        String url = mopayPaymentApiUrl + "/api/v1/payment";
         
-        logger.info("Initiating BizaoPayment payment to: {}", url);
-        logger.info("BizaoPayment request - Account No: {}, Amount: {}, Currency: {}, Title: {}", 
+        logger.info("Initiating MopayECW payment to: {}", url);
+        logger.info("MopayECW request - Account No: {}, Amount: {}, Currency: {}, Title: {}", 
             request.getAccount_no(), request.getAmount(), request.getCurrency(), request.getTitle());
         
         if (request.getTransfers() != null && !request.getTransfers().isEmpty()) {
             for (int i = 0; i < request.getTransfers().size(); i++) {
-                BizaoPaymentInitiateRequest.Transfer transfer = request.getTransfers().get(i);
+                MopayECWPaymentInitiateRequest.Transfer transfer = request.getTransfers().get(i);
                 logger.info("Transfer #{} - Account No: {}, Amount: {}, Message: {}", 
                     i + 1, transfer.getAccount_no(), transfer.getAmount(), transfer.getMessage());
             }
         }
-        logger.debug("Full BizaoPayment request: {}", request);
+        logger.debug("Full MopayECW request: {}", request);
         
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
-        // BizaoPayment expects Authorization header with the token directly
-        headers.set("Authorization", bizaoPaymentApiToken);
-        logger.debug("BizaoPayment request headers - Authorization: {}...", bizaoPaymentApiToken.substring(0, Math.min(10, bizaoPaymentApiToken.length())));
+        // MopayECW expects Authorization header with the token directly
+        headers.set("Authorization", mopayPaymentApiToken);
+        logger.debug("MopayECW request headers - Authorization: {}...", mopayPaymentApiToken.substring(0, Math.min(10, mopayPaymentApiToken.length())));
 
-        HttpEntity<BizaoPaymentInitiateRequest> entity = new HttpEntity<>(request, headers);
+        HttpEntity<MopayECWPaymentInitiateRequest> entity = new HttpEntity<>(request, headers);
 
         try {
             // First, get raw response to check structure
@@ -65,25 +66,25 @@ public class MopayPaymentService {
             int httpStatusCode = rawResponse.getStatusCode().value();
             String responseBodyString = rawResponse.getBody();
             
-            logger.info("BizaoPayment HTTP response status: {}", httpStatusCode);
-            logger.info("BizaoPayment raw response body: {}", responseBodyString);
+            logger.info("MopayECW HTTP response status: {}", httpStatusCode);
+            logger.info("MopayECW raw response body: {}", responseBodyString);
             
             if (responseBodyString == null || responseBodyString.trim().isEmpty()) {
-                logger.warn("BizaoPayment returned null or empty response body");
-                BizaoPaymentResponse errorResponse = new BizaoPaymentResponse();
+                logger.warn("MopayECW returned null or empty response body");
+                MopayECWPaymentResponse errorResponse = new MopayECWPaymentResponse();
                 errorResponse.setStatus(httpStatusCode);
                 errorResponse.setSuccess(false);
-                errorResponse.setMessage("BizaoPayment returned null or empty response");
+                errorResponse.setMessage("MopayECW returned null or empty response");
                 return errorResponse;
             }
             
             // Try to parse the response
             ObjectMapper objectMapper = new ObjectMapper();
-            BizaoPaymentResponse responseBody;
+            MopayECWPaymentResponse responseBody;
             
             try {
-                // First, try to parse as direct BizaoPaymentResponse
-                responseBody = objectMapper.readValue(responseBodyString, BizaoPaymentResponse.class);
+                // First, try to parse as direct MopayECW response
+                responseBody = objectMapper.readValue(responseBodyString, MopayECWPaymentResponse.class);
                 
                 // Check if response is wrapped in a "data" field
                 if (responseBody.getTransactionId() == null) {
@@ -117,12 +118,12 @@ public class MopayPaymentService {
                     }
                 }
             } catch (Exception e) {
-                logger.error("Failed to parse BizaoPayment response: {}", e.getMessage());
+                logger.error("Failed to parse MopayECW response: {}", e.getMessage());
                 // Try to manually extract fields from the JSON string
                 try {
                     @SuppressWarnings("unchecked")
                     java.util.Map<String, Object> responseMap = objectMapper.readValue(responseBodyString, java.util.Map.class);
-                    responseBody = new BizaoPaymentResponse();
+                    responseBody = new MopayECWPaymentResponse();
                     responseBody.setStatus(httpStatusCode);
                     
                     // Extract all available fields
@@ -173,12 +174,12 @@ public class MopayPaymentService {
                         responseBody.setSuccess(false);
                     }
                     
-                    logger.info("✅ Manually extracted BizaoPayment response fields - TransactionId: {}, Status: {}, StatusDesc: {}", 
+                    logger.info("✅ Manually extracted MopayECW response fields - TransactionId: {}, Status: {}, StatusDesc: {}", 
                         responseBody.getTransactionId(), responseBody.getStatus(), responseBody.getStatusDesc());
                 } catch (Exception parseException) {
-                    logger.error("Failed to manually extract BizaoPayment response fields: {}", parseException.getMessage());
+                    logger.error("Failed to manually extract MopayECW response fields: {}", parseException.getMessage());
                     // Fallback: create basic response with raw message
-                    responseBody = new BizaoPaymentResponse();
+                    responseBody = new MopayECWPaymentResponse();
                     responseBody.setStatus(httpStatusCode);
                     responseBody.setSuccess(false);
                     responseBody.setMessage("Failed to parse response: " + responseBodyString);
@@ -192,9 +193,9 @@ public class MopayPaymentService {
             
             // Log transaction ID if present
             if (responseBody.getTransactionId() != null && !responseBody.getTransactionId().trim().isEmpty()) {
-                logger.info("✅ BizaoPayment transaction ID received: {}", responseBody.getTransactionId());
+                logger.info("✅ MopayECW transaction ID received: {}", responseBody.getTransactionId());
             } else {
-                logger.warn("⚠️ BizaoPayment response does not contain transactionId. Status: {}, Success: {}, Response: {}", 
+                logger.warn("⚠️ MopayECW response does not contain transactionId. Status: {}, Success: {}, Response: {}", 
                     responseBody.getStatus(), responseBody.getSuccess(), responseBodyString);
             }
             
@@ -204,26 +205,26 @@ public class MopayPaymentService {
             int statusCode = e.getStatusCode().value();
             String responseBody = e.getResponseBodyAsString();
             
-            logger.error("❌ BizaoPayment HTTP error - Status: {}, Response: {}", statusCode, responseBody);
-            logger.error("BizaoPayment error details - URL: {}, Headers sent: Authorization={}", url, 
-                bizaoPaymentApiToken != null && bizaoPaymentApiToken.length() > 10 ? bizaoPaymentApiToken.substring(0, 10) + "..." : "null");
+            logger.error("❌ MopayECW HTTP error - Status: {}, Response: {}", statusCode, responseBody);
+            logger.error("MopayECW error details - URL: {}, Headers sent: Authorization={}", url, 
+                mopayPaymentApiToken != null && mopayPaymentApiToken.length() > 10 ? mopayPaymentApiToken.substring(0, 10) + "..." : "null");
             
-            BizaoPaymentResponse errorResponse = new BizaoPaymentResponse();
+            MopayECWPaymentResponse errorResponse = new MopayECWPaymentResponse();
             errorResponse.setStatus(statusCode);
             errorResponse.setSuccess(false);
             
             // Try to parse the error response body
             try {
                 ObjectMapper objectMapper = new ObjectMapper();
-                BizaoPaymentResponse parsedError = objectMapper.readValue(responseBody, BizaoPaymentResponse.class);
+                MopayECWPaymentResponse parsedError = objectMapper.readValue(responseBody, MopayECWPaymentResponse.class);
                 // Use errorMessage if available, otherwise use message
                 String errorMsg = parsedError.getErrorMessage() != null ? parsedError.getErrorMessage() : parsedError.getMessage();
                 errorResponse.setMessage(errorMsg);
                 errorResponse.setTransactionId(parsedError.getTransactionId());
-                logger.info("Parsed BizaoPayment error response - Status: {}, Message: {}, TransactionId: {}", 
+                logger.info("Parsed MopayECW error response - Status: {}, Message: {}, TransactionId: {}", 
                     statusCode, errorMsg, parsedError.getTransactionId());
             } catch (Exception parseException) {
-                logger.warn("Failed to parse BizaoPayment error response, using raw body: {}", responseBody);
+                logger.warn("Failed to parse MopayECW error response, using raw body: {}", responseBody);
                 logger.warn("Parse exception: {}", parseException.getMessage());
                 // If parsing fails, use the raw response body as message
                 errorResponse.setMessage(responseBody != null && !responseBody.isEmpty() ? responseBody : e.getMessage());
@@ -231,45 +232,45 @@ public class MopayPaymentService {
             
             return errorResponse;
         } catch (Exception e) {
-            logger.error("Error initiating BizaoPayment payment: ", e);
-            BizaoPaymentResponse errorResponse = new BizaoPaymentResponse();
+            logger.error("Error initiating MopayECW payment: ", e);
+            MopayECWPaymentResponse errorResponse = new MopayECWPaymentResponse();
             errorResponse.setSuccess(false);
             errorResponse.setMessage("Failed to initiate payment: " + e.getMessage());
             return errorResponse;
         }
     }
 
-    public BizaoPaymentResponse checkTransactionStatus(String transactionId) {
-        String url = bizaoPaymentApiUrl + "/api/v1/momo/transactionstatus/" + transactionId;
+    public MopayECWPaymentResponse checkTransactionStatus(String transactionId) {
+        String url = mopayPaymentApiUrl + "/api/v1/momo/transactionstatus/" + transactionId;
         
-        logger.info("Checking BizaoPayment transaction status - URL: {}, Transaction ID: {}", url, transactionId);
+        logger.info("Checking MopayECW transaction status - URL: {}, Transaction ID: {}", url, transactionId);
         
         HttpHeaders headers = new HttpHeaders();
-        // BizaoPayment expects Authorization header with the token directly
-        headers.set("Authorization", bizaoPaymentApiToken);
-        logger.debug("BizaoPayment check status headers - Authorization: {}...", bizaoPaymentApiToken.substring(0, Math.min(10, bizaoPaymentApiToken.length())));
+        // MopayECW expects Authorization header with the token directly
+        headers.set("Authorization", mopayPaymentApiToken);
+        logger.debug("MopayECW check status headers - Authorization: {}...", mopayPaymentApiToken.substring(0, Math.min(10, mopayPaymentApiToken.length())));
 
         HttpEntity<String> entity = new HttpEntity<>(headers);
 
         try {
-            ResponseEntity<BizaoPaymentResponse> response = restTemplate.exchange(
+            ResponseEntity<MopayECWPaymentResponse> response = restTemplate.exchange(
                     url,
                     HttpMethod.GET,
                     entity,
-                    BizaoPaymentResponse.class
+                    MopayECWPaymentResponse.class
             );
             
-            BizaoPaymentResponse responseBody = response.getBody();
+            MopayECWPaymentResponse responseBody = response.getBody();
             int httpStatusCode = response.getStatusCode().value();
-            logger.info("BizaoPayment check status HTTP response: {}", httpStatusCode);
-            logger.debug("BizaoPayment check status response body: {}", responseBody);
+            logger.info("MopayECW check status HTTP response: {}", httpStatusCode);
+            logger.debug("MopayECW check status response body: {}", responseBody);
             
             if (responseBody == null) {
-                logger.warn("BizaoPayment check status returned null response body");
-                BizaoPaymentResponse errorResponse = new BizaoPaymentResponse();
+                logger.warn("MopayECW check status returned null response body");
+                MopayECWPaymentResponse errorResponse = new MopayECWPaymentResponse();
                 errorResponse.setStatus(httpStatusCode);
                 errorResponse.setSuccess(false);
-                errorResponse.setMessage("BizaoPayment check status returned null response");
+                errorResponse.setMessage("MopayECW check status returned null response");
                 return errorResponse;
             }
             
@@ -283,17 +284,17 @@ public class MopayPaymentService {
             int statusCode = e.getStatusCode().value();
             String responseBody = e.getResponseBodyAsString();
             
-            logger.error("BizaoPayment check status HTTP error - Status: {}, Response: {}", statusCode, responseBody);
+            logger.error("MopayECW check status HTTP error - Status: {}, Response: {}", statusCode, responseBody);
             
-            BizaoPaymentResponse errorResponse = new BizaoPaymentResponse();
+            MopayECWPaymentResponse errorResponse = new MopayECWPaymentResponse();
             errorResponse.setStatus(statusCode);
             errorResponse.setSuccess(false);
             errorResponse.setMessage(responseBody != null && !responseBody.isEmpty() ? responseBody : e.getMessage());
             
             return errorResponse;
         } catch (Exception e) {
-            logger.error("Error checking BizaoPayment transaction status: ", e);
-            BizaoPaymentResponse errorResponse = new BizaoPaymentResponse();
+            logger.error("Error checking MopayECW transaction status: ", e);
+            MopayECWPaymentResponse errorResponse = new MopayECWPaymentResponse();
             errorResponse.setSuccess(false);
             errorResponse.setMessage("Failed to check transaction status: " + e.getMessage());
             return errorResponse;
@@ -305,36 +306,36 @@ public class MopayPaymentService {
      * GET api/v1/momo/accountholder/information/{phone}
      * 
      * @param phone Phone number (e.g., "250794230137")
-     * @return BizaoAccountHolderResponse with customer information
+     * @return MopayECWAccountHolderResponse with customer information
      */
-    public BizaoAccountHolderResponse getAccountHolderInformation(String phone) {
-        String url = bizaoPaymentApiUrl + "/api/v1/momo/accountholder/information/" + phone;
+    public MopayECWAccountHolderResponse getAccountHolderInformation(String phone) {
+        String url = mopayPaymentApiUrl + "/api/v1/momo/accountholder/information/" + phone;
         
-        logger.info("Getting BizaoPayment account holder information - URL: {}, Phone: {}", url, phone);
+        logger.info("Getting MopayECW account holder information - URL: {}, Phone: {}", url, phone);
         
         HttpHeaders headers = new HttpHeaders();
-        // BizaoPayment expects Authorization header with the token directly
-        headers.set("Authorization", bizaoPaymentApiToken);
-        logger.debug("BizaoPayment account holder info headers - Authorization: {}...", bizaoPaymentApiToken.substring(0, Math.min(10, bizaoPaymentApiToken.length())));
+        // MopayECW expects Authorization header with the token directly
+        headers.set("Authorization", mopayPaymentApiToken);
+        logger.debug("MopayECW account holder info headers - Authorization: {}...", mopayPaymentApiToken.substring(0, Math.min(10, mopayPaymentApiToken.length())));
 
         HttpEntity<String> entity = new HttpEntity<>(headers);
 
         try {
-            ResponseEntity<BizaoAccountHolderResponse> response = restTemplate.exchange(
+            ResponseEntity<MopayECWAccountHolderResponse> response = restTemplate.exchange(
                     url,
                     HttpMethod.GET,
                     entity,
-                    BizaoAccountHolderResponse.class
+                    MopayECWAccountHolderResponse.class
             );
             
-            BizaoAccountHolderResponse responseBody = response.getBody();
+            MopayECWAccountHolderResponse responseBody = response.getBody();
             int httpStatusCode = response.getStatusCode().value();
-            logger.info("BizaoPayment account holder info HTTP response: {}", httpStatusCode);
-            logger.debug("BizaoPayment account holder info response body: {}", responseBody);
+            logger.info("MopayECW account holder info HTTP response: {}", httpStatusCode);
+            logger.debug("MopayECW account holder info response body: {}", responseBody);
             
             if (responseBody == null) {
-                logger.warn("BizaoPayment account holder info returned null response body");
-                BizaoAccountHolderResponse errorResponse = new BizaoAccountHolderResponse();
+                logger.warn("MopayECW account holder info returned null response body");
+                MopayECWAccountHolderResponse errorResponse = new MopayECWAccountHolderResponse();
                 errorResponse.setStatus(httpStatusCode);
                 return errorResponse;
             }
@@ -344,21 +345,21 @@ public class MopayPaymentService {
                 responseBody.setStatus(httpStatusCode);
             }
             
-            logger.info("BizaoPayment account holder info - Name: {}, Status: {}", responseBody.getFullName(), responseBody.getStatus());
+            logger.info("MopayECW account holder info - Name: {}, Status: {}", responseBody.getFullName(), responseBody.getStatus());
             return responseBody;
         } catch (HttpClientErrorException e) {
             int statusCode = e.getStatusCode().value();
             String responseBody = e.getResponseBodyAsString();
             
-            logger.error("BizaoPayment account holder info HTTP error - Status: {}, Response: {}", statusCode, responseBody);
+            logger.error("MopayECW account holder info HTTP error - Status: {}, Response: {}", statusCode, responseBody);
             
-            BizaoAccountHolderResponse errorResponse = new BizaoAccountHolderResponse();
+            MopayECWAccountHolderResponse errorResponse = new MopayECWAccountHolderResponse();
             errorResponse.setStatus(statusCode);
             
             return errorResponse;
         } catch (Exception e) {
-            logger.error("Error getting BizaoPayment account holder information: ", e);
-            BizaoAccountHolderResponse errorResponse = new BizaoAccountHolderResponse();
+            logger.error("Error getting MopayECW account holder information: ", e);
+            MopayECWAccountHolderResponse errorResponse = new MopayECWAccountHolderResponse();
             errorResponse.setStatus(500);
             return errorResponse;
         }

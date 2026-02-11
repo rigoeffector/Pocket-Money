@@ -6,7 +6,7 @@ import java.math.BigDecimal;
 import java.util.List;
 
 @Data
-public class BizaoPaymentInitiateRequest {
+public class MopayECWPaymentInitiateRequest {
     @JsonProperty("transactionId")
     private String transactionId;
     

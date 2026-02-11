@@ -4,7 +4,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 
 @Data
-public class BizaoPaymentResponse {
+public class MopayECWPaymentResponse {
     private Integer status; // HTTP status code (e.g., 200, 201)
     
     @JsonProperty("transactionId")
@@ -17,7 +17,7 @@ public class BizaoPaymentResponse {
     @JsonProperty("errorMessage")
     private String errorMessage;
     
-    // Fields from BizaoPayment API response
+    // Fields from Mopay API response
     private java.math.BigDecimal amount;
     private Integer charges;
     private String currency;
