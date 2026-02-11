@@ -100,23 +100,9 @@
         {
             "id": "payment_ack",
             "content": "payment_request_sent",
-            "inputs": [
-                {
-                    "input": 1,
-                    "value": null,
-                    "action": "",
-                    "next_step": "home"
-                },
-                {
-                    "input": 2,
-                    "value": null,
-                    "action": "end_session",
-                    "next_step": ""
-                }
-            ],
-            "allow_back": true,
+            "allow_back": false,
             "validation": "action_completed",
-            "is_end_session": false
+            "is_end_session": true
         },
         {
             "id": "electricity_meter_select",
