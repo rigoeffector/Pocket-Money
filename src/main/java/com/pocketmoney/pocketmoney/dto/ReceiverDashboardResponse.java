@@ -1,5 +1,6 @@
 package com.pocketmoney.pocketmoney.dto;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.pocketmoney.pocketmoney.entity.BalanceAssignmentStatus;
 import com.pocketmoney.pocketmoney.entity.ReceiverStatus;
 import com.pocketmoney.pocketmoney.entity.TransactionStatus;
@@ -23,6 +24,10 @@ public class ReceiverDashboardResponse {
     private String receiverPhone;
     private String email;
     private String address;
+    @JsonInclude(JsonInclude.Include.ALWAYS)
+    private String country;
+    @JsonInclude(JsonInclude.Include.ALWAYS)
+    private String countryCode;
     
     // Wallet information
     private BigDecimal walletBalance;

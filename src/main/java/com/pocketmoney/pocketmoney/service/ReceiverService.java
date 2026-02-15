@@ -189,6 +189,8 @@ public class ReceiverService {
         receiver.setStatus(request.getStatus() != null ? request.getStatus() : ReceiverStatus.NOT_ACTIVE);
         receiver.setEmail(email);
         receiver.setAddress(request.getAddress());
+        receiver.setCountry(request.getCountry());
+        receiver.setCountryCode(request.getCountryCode());
         receiver.setDescription(request.getDescription());
         receiver.setIsFlexible(request.getIsFlexible() != null ? request.getIsFlexible() : false);
 
@@ -361,6 +363,12 @@ public class ReceiverService {
         }
         if (request.getAddress() != null) {
             receiver.setAddress(request.getAddress());
+        }
+        if (request.getCountry() != null) {
+            receiver.setCountry(request.getCountry());
+        }
+        if (request.getCountryCode() != null) {
+            receiver.setCountryCode(request.getCountryCode());
         }
         if (request.getDescription() != null) {
             receiver.setDescription(request.getDescription());
@@ -967,6 +975,8 @@ public class ReceiverService {
         response.setStatus(receiver.getStatus());
         response.setEmail(receiver.getEmail());
         response.setAddress(receiver.getAddress());
+        response.setCountry(receiver.getCountry());
+        response.setCountryCode(receiver.getCountryCode());
         response.setDescription(receiver.getDescription());
         response.setWalletBalance(receiver.getWalletBalance());
         response.setTotalReceived(receiver.getTotalReceived());
@@ -1173,6 +1183,8 @@ public class ReceiverService {
         response.setStatus(receiver.getStatus());
         response.setEmail(receiver.getEmail());
         response.setAddress(receiver.getAddress());
+        response.setCountry(receiver.getCountry());
+        response.setCountryCode(receiver.getCountryCode());
         response.setDescription(receiver.getDescription());
         
         // Check if receiver has parent (is submerchant) - access parent to trigger lazy load if needed
@@ -1600,6 +1612,8 @@ public class ReceiverService {
         response.setReceiverPhone(receiver.getReceiverPhone());
         response.setEmail(receiver.getEmail());
         response.setAddress(receiver.getAddress());
+        response.setCountry(receiver.getCountry());
+        response.setCountryCode(receiver.getCountryCode());
         
         // Wallet information - use shared balance if submerchant (parent's balance)
         Receiver balanceOwner = receiver.getParentReceiver() != null ? receiver.getParentReceiver() : receiver;

@@ -204,10 +204,12 @@ public class PaymentController {
             @RequestParam(value = "page", defaultValue = "0") int page,
             @RequestParam(value = "size", defaultValue = "20") int size,
             @RequestParam(value = "paymentCategory", required = false) String paymentCategory,
+            @RequestParam(value = "transactionType", required = false) String transactionType,
+            @RequestParam(value = "search", required = false) String search,
             @RequestParam(value = "fromDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime fromDate,
             @RequestParam(value = "toDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate) {
         try {
-            ReceiverTransactionsResponse response = paymentService.getTransactionsByReceiver(receiverId, page, size, paymentCategory, fromDate, toDate);
+            ReceiverTransactionsResponse response = paymentService.getTransactionsByReceiver(receiverId, page, size, paymentCategory, transactionType, search, fromDate, toDate);
             return ResponseEntity.ok(ApiResponse.success("Receiver transactions retrieved successfully", response));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)

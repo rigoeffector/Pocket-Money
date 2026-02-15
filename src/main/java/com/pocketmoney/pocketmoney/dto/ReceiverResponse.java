@@ -1,5 +1,6 @@
 package com.pocketmoney.pocketmoney.dto;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.pocketmoney.pocketmoney.entity.ReceiverStatus;
 import lombok.AllArgsConstructor;
 import lombok.Data;
@@ -24,6 +25,10 @@ public class ReceiverResponse {
     private ReceiverStatus status;
     private String email;
     private String address;
+    @JsonInclude(JsonInclude.Include.ALWAYS)
+    private String country;
+    @JsonInclude(JsonInclude.Include.ALWAYS)
+    private String countryCode;
     private String description;
     private BigDecimal walletBalance;
     private BigDecimal totalReceived;

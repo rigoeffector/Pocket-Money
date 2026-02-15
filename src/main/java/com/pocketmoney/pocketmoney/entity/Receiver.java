@@ -54,6 +54,12 @@ public class Receiver {
     @Column(name = "address")
     private String address;
 
+    @Column(name = "country")
+    private String country;
+
+    @Column(name = "country_code")
+    private String countryCode;
+
     @Column(name = "description")
     private String description;
 

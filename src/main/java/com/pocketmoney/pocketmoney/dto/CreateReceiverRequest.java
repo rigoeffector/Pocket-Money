@@ -36,6 +36,10 @@ public class CreateReceiverRequest {
 
     private String address;
 
+    private String country;
+
+    private String countryCode;
+
     private String description;
 
     private Boolean isFlexible = false; // If true, users can pay without checking receiver's remaining balance

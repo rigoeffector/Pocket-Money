@@ -31,6 +31,10 @@ public class UpdateReceiverRequest {
 
     private String address;
 
+    private String country;
+
+    private String countryCode;
+
     private String description;
 
     private java.math.BigDecimal assignedBalance;

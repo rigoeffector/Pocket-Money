@@ -2447,7 +2447,7 @@ public class PaymentService {
     }
 
     @Transactional(readOnly = true)
-    public ReceiverTransactionsResponse getTransactionsByReceiver(UUID receiverId, int page, int size, String paymentCategory, LocalDateTime fromDate, LocalDateTime toDate) {
+    public ReceiverTransactionsResponse getTransactionsByReceiver(UUID receiverId, int page, int size, String paymentCategory, String transactionType, String search, LocalDateTime fromDate, LocalDateTime toDate) {
         // Get current authenticated user
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         if (authentication == null || !authentication.isAuthenticated()) {
@@ -2495,6 +2495,22 @@ public class PaymentService {
             queryBuilder.append("AND pc.name = :paymentCategory ");
         }
         
+        // Add transaction type filter if provided
+        if (transactionType != null && !transactionType.trim().isEmpty()) {
+            queryBuilder.append("AND t.transactionType = :transactionType ");
+        }
+        
+        // Add search filter if provided (search in user phone, user name, transaction ID, mopay transaction ID)
+        if (search != null && !search.trim().isEmpty()) {
+            queryBuilder.append("AND (");
+            queryBuilder.append("LOWER(COALESCE(u.phone, '')) LIKE LOWER(:search) OR ");
+            queryBuilder.append("LOWER(COALESCE(u.name, '')) LIKE LOWER(:search) OR ");
+            queryBuilder.append("LOWER(CAST(t.id AS string)) LIKE LOWER(:search) OR ");
+            queryBuilder.append("LOWER(COALESCE(t.mopayTransactionId, '')) LIKE LOWER(:search) OR ");
+            queryBuilder.append("LOWER(COALESCE(t.phoneNumber, '')) LIKE LOWER(:search)");
+            queryBuilder.append(") ");
+        }
+        
         // Add date range filters
         if (fromDate != null) {
             queryBuilder.append("AND t.createdAt >= :fromDate ");
@@ -2514,6 +2530,21 @@ public class PaymentService {
             query.setParameter("paymentCategory", paymentCategory.trim());
         }
         
+        // Set transaction type parameter if provided
+        if (transactionType != null && !transactionType.trim().isEmpty()) {
+            try {
+                TransactionType type = TransactionType.valueOf(transactionType.trim().toUpperCase());
+                query.setParameter("transactionType", type);
+            } catch (IllegalArgumentException e) {
+                throw new RuntimeException("Invalid transaction type: " + transactionType + ". Valid types are: TOP_UP, PAYMENT, REFUND");
+            }
+        }
+        
+        // Set search parameter if provided
+        if (search != null && !search.trim().isEmpty()) {
+            query.setParameter("search", "%" + search.trim() + "%");
+        }
+        
         // Set date parameters if provided
         if (fromDate != null) {
             query.setParameter("fromDate", fromDate);
@@ -2526,11 +2557,28 @@ public class PaymentService {
         StringBuilder countQueryBuilder = new StringBuilder();
         countQueryBuilder.append("SELECT COUNT(t) FROM Transaction t ");
         countQueryBuilder.append("LEFT JOIN t.paymentCategory pc ");
+        countQueryBuilder.append("LEFT JOIN t.user u ");
         countQueryBuilder.append("WHERE t.receiver.id = :receiverId ");
         
         // Add payment category filter if provided
         if (paymentCategory != null && !paymentCategory.trim().isEmpty()) {
             countQueryBuilder.append("AND pc.name = :paymentCategory ");
+        }
+        
+        // Add transaction type filter if provided
+        if (transactionType != null && !transactionType.trim().isEmpty()) {
+            countQueryBuilder.append("AND t.transactionType = :transactionType ");
+        }
+        
+        // Add search filter if provided
+        if (search != null && !search.trim().isEmpty()) {
+            countQueryBuilder.append("AND (");
+            countQueryBuilder.append("LOWER(COALESCE(u.phone, '')) LIKE LOWER(:search) OR ");
+            countQueryBuilder.append("LOWER(COALESCE(u.name, '')) LIKE LOWER(:search) OR ");
+            countQueryBuilder.append("LOWER(CAST(t.id AS string)) LIKE LOWER(:search) OR ");
+            countQueryBuilder.append("LOWER(COALESCE(t.mopayTransactionId, '')) LIKE LOWER(:search) OR ");
+            countQueryBuilder.append("LOWER(COALESCE(t.phoneNumber, '')) LIKE LOWER(:search)");
+            countQueryBuilder.append(") ");
         }
         
         if (fromDate != null) {
@@ -2546,6 +2594,21 @@ public class PaymentService {
         // Set payment category parameter if provided
         if (paymentCategory != null && !paymentCategory.trim().isEmpty()) {
             countQuery.setParameter("paymentCategory", paymentCategory.trim());
+        }
+        
+        // Set transaction type parameter if provided
+        if (transactionType != null && !transactionType.trim().isEmpty()) {
+            try {
+                TransactionType type = TransactionType.valueOf(transactionType.trim().toUpperCase());
+                countQuery.setParameter("transactionType", type);
+            } catch (IllegalArgumentException e) {
+                throw new RuntimeException("Invalid transaction type: " + transactionType + ". Valid types are: TOP_UP, PAYMENT, REFUND");
+            }
+        }
+        
+        // Set search parameter if provided
+        if (search != null && !search.trim().isEmpty()) {
+            countQuery.setParameter("search", "%" + search.trim() + "%");
         }
         
         if (fromDate != null) {
@@ -2567,7 +2630,29 @@ public class PaymentService {
         StringBuilder statsQueryBuilder = new StringBuilder();
         statsQueryBuilder.append("SELECT t FROM Transaction t ");
         statsQueryBuilder.append("LEFT JOIN FETCH t.user u ");
+        statsQueryBuilder.append("LEFT JOIN t.paymentCategory pc ");
         statsQueryBuilder.append("WHERE t.receiver.id = :receiverId ");
+        
+        // Add payment category filter if provided
+        if (paymentCategory != null && !paymentCategory.trim().isEmpty()) {
+            statsQueryBuilder.append("AND pc.name = :paymentCategory ");
+        }
+        
+        // Add transaction type filter if provided
+        if (transactionType != null && !transactionType.trim().isEmpty()) {
+            statsQueryBuilder.append("AND t.transactionType = :transactionType ");
+        }
+        
+        // Add search filter if provided
+        if (search != null && !search.trim().isEmpty()) {
+            statsQueryBuilder.append("AND (");
+            statsQueryBuilder.append("LOWER(COALESCE(u.phone, '')) LIKE LOWER(:search) OR ");
+            statsQueryBuilder.append("LOWER(COALESCE(u.name, '')) LIKE LOWER(:search) OR ");
+            statsQueryBuilder.append("LOWER(CAST(t.id AS string)) LIKE LOWER(:search) OR ");
+            statsQueryBuilder.append("LOWER(COALESCE(t.mopayTransactionId, '')) LIKE LOWER(:search) OR ");
+            statsQueryBuilder.append("LOWER(COALESCE(t.phoneNumber, '')) LIKE LOWER(:search)");
+            statsQueryBuilder.append(") ");
+        }
         
         if (fromDate != null) {
             statsQueryBuilder.append("AND t.createdAt >= :fromDate ");
@@ -2578,6 +2663,26 @@ public class PaymentService {
         
         Query statsQuery = entityManager.createQuery(statsQueryBuilder.toString(), Transaction.class);
         statsQuery.setParameter("receiverId", receiverId);
+        
+        // Set payment category parameter if provided
+        if (paymentCategory != null && !paymentCategory.trim().isEmpty()) {
+            statsQuery.setParameter("paymentCategory", paymentCategory.trim());
+        }
+        
+        // Set transaction type parameter if provided
+        if (transactionType != null && !transactionType.trim().isEmpty()) {
+            try {
+                TransactionType type = TransactionType.valueOf(transactionType.trim().toUpperCase());
+                statsQuery.setParameter("transactionType", type);
+            } catch (IllegalArgumentException e) {
+                throw new RuntimeException("Invalid transaction type: " + transactionType + ". Valid types are: TOP_UP, PAYMENT, REFUND");
+            }
+        }
+        
+        // Set search parameter if provided
+        if (search != null && !search.trim().isEmpty()) {
+            statsQuery.setParameter("search", "%" + search.trim() + "%");
+        }
         
         if (fromDate != null) {
             statsQuery.setParameter("fromDate", fromDate);
