@@ -829,8 +829,30 @@ public class EfashePaymentService {
             response.setFullAmountPhoneReceives(fullAmountPhoneReceives);
             response.setValidated("PROCESS");
 
-            logger.info("EFASHE payment processed successfully - Transaction ID: {}, Mopay Transaction ID: {}", 
-                transactionId, mopayTransactionId);
+            logger.info("EFASHE payment processed successfully - Transaction ID: {}, Mopay Transaction ID: {}, Status: {}", 
+                transactionId, mopayTransactionId, initialMopayStatus);
+
+            // CRITICAL: If MoPay is already SUCCESS (synchronous success), automatically trigger status check
+            // This will trigger EFASHE execute to deliver the service immediately
+            // If MoPay is PENDING, the webhook callback will trigger execute later
+            if (moPayResponse != null && moPayResponse.getStatus() != null && 
+                (moPayResponse.getStatus() == 200 || moPayResponse.getStatus() == 201)) {
+                logger.info("✅ MoPay payment is already SUCCESS (status: {}) - Automatically triggering status check to deliver service", 
+                    moPayResponse.getStatus());
+                try {
+                    // Trigger status check which will automatically execute EFASHE if MoPay is SUCCESS
+                    // This ensures the service is delivered immediately without waiting for webhook callback
+                    checkTransactionStatus(mopayTransactionId);
+                    logger.info("✅ Service delivery triggered automatically after MoPay SUCCESS");
+                } catch (Exception e) {
+                    logger.error("⚠️ Error automatically triggering service delivery after MoPay SUCCESS: {}", e.getMessage(), e);
+                    // Don't fail the response - the webhook callback will handle it
+                    logger.info("Service delivery will be triggered by webhook callback");
+                }
+            } else {
+                logger.info("MoPay payment is PENDING (status: {}) - Service will be delivered when webhook callback arrives", 
+                    initialMopayStatus);
+            }
 
             return response;
         }
@@ -941,8 +963,29 @@ public class EfashePaymentService {
         response.setFullAmountPhoneReceives(fullAmountPhoneReceives);
         response.setValidated("PROCESS");
 
-        logger.info("EFASHE payment initiated with Mopay - Transaction ID: {}, Mopay Transaction ID: {}. Waiting for webhook callback...", 
-            transactionId, mopayTransactionId);
+        logger.info("EFASHE payment initiated with Mopay - Transaction ID: {}, Mopay Transaction ID: {}, Status: {}", 
+            transactionId, mopayTransactionId, initialMopayStatus);
+
+        // CRITICAL: If MoPay is already SUCCESS (synchronous success), automatically trigger status check
+        // This will trigger EFASHE execute to deliver the service immediately
+        // If MoPay is PENDING, the webhook callback will trigger execute later
+        if (mopayResponse.getStatus() != null && (mopayResponse.getStatus() == 200 || mopayResponse.getStatus() == 201)) {
+            logger.info("✅ MoPay payment is already SUCCESS (status: {}) - Automatically triggering status check to deliver service", 
+                mopayResponse.getStatus());
+            try {
+                // Trigger status check which will automatically execute EFASHE if MoPay is SUCCESS
+                // This ensures the service is delivered immediately without waiting for webhook callback
+                checkTransactionStatus(mopayTransactionId);
+                logger.info("✅ Service delivery triggered automatically after MoPay SUCCESS");
+            } catch (Exception e) {
+                logger.error("⚠️ Error automatically triggering service delivery after MoPay SUCCESS: {}", e.getMessage(), e);
+                // Don't fail the response - the webhook callback will handle it
+                logger.info("Service delivery will be triggered by webhook callback");
+            }
+        } else {
+            logger.info("MoPay payment is PENDING (status: {}) - Service will be delivered when webhook callback arrives", 
+                initialMopayStatus);
+        }
 
         return response;
     }

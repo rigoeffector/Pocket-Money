@@ -36,6 +36,7 @@ public class PaymentResponse {
     // Receiver information (to identify which receiver/submerchant made this transaction)
     private UUID receiverId;
     private String receiverCompanyName;
+    private String momoCode; // MoMo merchant code (if configured)
     private Boolean isSubmerchant; // true if transaction was made by a submerchant
     // Payment method information
     private String payerPhone; // Phone number used for payment (if MOMO payment)

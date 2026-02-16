@@ -26,6 +26,7 @@ import org.apache.pdfbox.pdmodel.font.PDType1Font;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 
 import javax.imageio.ImageIO;
+import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -147,8 +148,9 @@ public class QrCodeService {
             );
         }
 
-        // Generate QR code image
-        String qrCodeBase64 = generateQrCodeImage(qrCodeUrl, 300, 300);
+        // Generate QR code image with MomoCode text below (if available)
+        BufferedImage qrImageWithText = generateQrCodeWithText(qrCodeUrl, momoCode, 300, 300);
+        String qrCodeBase64 = convertBufferedImageToBase64(qrImageWithText);
 
         // Create response
         GenerateQrCodeResponse response = new GenerateQrCodeResponse();
@@ -167,22 +169,59 @@ public class QrCodeService {
     }
 
     /**
-     * Generate QR code image from text and return as Base64 encoded string
+     * Convert BufferedImage to Base64 encoded string
      */
-    private String generateQrCodeImage(String text, int width, int height) {
+    private String convertBufferedImageToBase64(BufferedImage image) {
         try {
-            BufferedImage image = generateQrCodeBufferedImage(text, width, height);
-            
-            // Convert BufferedImage to Base64
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             ImageIO.write(image, "PNG", baos);
             byte[] imageBytes = baos.toByteArray();
             return "data:image/png;base64," + Base64.getEncoder().encodeToString(imageBytes);
-
         } catch (IOException e) {
-            logger.error("Error generating QR code: {}", e.getMessage(), e);
-            throw new RuntimeException("Failed to generate QR code: " + e.getMessage());
+            logger.error("Error converting image to Base64: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to convert image to Base64: " + e.getMessage());
         }
+    }
+
+    /**
+     * Generate QR code image with MomoCode text below it (if available)
+     */
+    private BufferedImage generateQrCodeWithText(String qrCodeText, String momoCode, int qrWidth, int qrHeight) {
+        BufferedImage qrImage = generateQrCodeBufferedImage(qrCodeText, qrWidth, qrHeight);
+        
+        // If no momoCode, return QR code as is
+        if (momoCode == null || momoCode.trim().isEmpty()) {
+            return qrImage;
+        }
+        
+        // Create a larger image to accommodate QR code + text
+        int padding = 20;
+        int textHeight = 40;
+        int totalWidth = qrWidth;
+        int totalHeight = qrHeight + textHeight + padding;
+        
+        BufferedImage compositeImage = new BufferedImage(totalWidth, totalHeight, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g2d = compositeImage.createGraphics();
+        
+        // Set white background
+        g2d.setColor(Color.WHITE);
+        g2d.fillRect(0, 0, totalWidth, totalHeight);
+        
+        // Draw QR code at the top
+        g2d.drawImage(qrImage, 0, 0, null);
+        
+        // Draw MomoCode text below QR code
+        g2d.setColor(Color.BLACK);
+        g2d.setFont(new Font("Arial", Font.BOLD, 18));
+        FontMetrics fm = g2d.getFontMetrics();
+        int textWidth = fm.stringWidth(momoCode);
+        int xPosition = (totalWidth - textWidth) / 2;
+        int yPosition = qrHeight + padding + fm.getAscent();
+        
+        g2d.drawString(momoCode, xPosition, yPosition);
+        
+        g2d.dispose();
+        return compositeImage;
     }
 
     /**
@@ -191,9 +230,10 @@ public class QrCodeService {
     public byte[] generateQrCodeImageBytes(UUID receiverId) {
         GenerateQrCodeResponse response = generateQrCode(receiverId);
         String qrCodeUrl = response.getQrCodeUrl();
+        String momoCode = response.getMomoCode();
         
         try {
-            BufferedImage image = generateQrCodeBufferedImage(qrCodeUrl, 500, 500);
+            BufferedImage image = generateQrCodeWithText(qrCodeUrl, momoCode, 500, 500);
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             ImageIO.write(image, "PNG", baos);
             return baos.toByteArray();
@@ -217,8 +257,9 @@ public class QrCodeService {
             PDPage page = new PDPage(PDRectangle.A4);
             document.addPage(page);
             
-            // Generate QR code image - larger size for better visibility
-            BufferedImage qrImage = generateQrCodeBufferedImage(qrCodeUrl, 500, 500);
+            // Generate QR code image with MomoCode text below (if available)
+            String momoCode = response.getMomoCode();
+            BufferedImage qrImage = generateQrCodeWithText(qrCodeUrl, momoCode, 500, 500);
             ByteArrayOutputStream imageBaos = new ByteArrayOutputStream();
             ImageIO.write(qrImage, "PNG", imageBaos);
             byte[] imageBytes = imageBaos.toByteArray();
@@ -233,9 +274,9 @@ public class QrCodeService {
                 float pageHeight = page.getMediaBox().getHeight();
                 float margin = 50;
                 
-                // Calculate position to center the QR code perfectly
+                // Calculate position to center the QR code image (which may include MomoCode text)
                 float imageWidth = 500;
-                float imageHeight = 500;
+                float imageHeight = qrImage.getHeight(); // Use actual height (includes MomoCode if present)
                 float xPosition = (pageWidth - imageWidth) / 2;
                 
                 // Calculate vertical center position
@@ -263,10 +304,10 @@ public class QrCodeService {
                 contentStream.showText(merchantName);
                 contentStream.endText();
                 
-                // Draw QR code image - perfectly centered
+                // Draw QR code image (with MomoCode text if available) - perfectly centered
                 contentStream.drawImage(pdImage, xPosition, yPosition, imageWidth, imageHeight);
                 
-                // Add instructions below QR code
+                // Add instructions below QR code (or below MomoCode if present)
                 contentStream.beginText();
                 contentStream.setFont(PDType1Font.HELVETICA, 14);
                 String instruction = "Scan this QR code to make a payment";

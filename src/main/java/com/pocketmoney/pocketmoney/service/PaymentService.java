@@ -3161,6 +3161,7 @@ public class PaymentService {
         if (transaction.getReceiver() != null) {
             response.setReceiverId(transaction.getReceiver().getId());
             response.setReceiverCompanyName(transaction.getReceiver().getCompanyName());
+            response.setMomoCode(transaction.getReceiver().getMomoCode()); // Include momoCode if available
             // Check if this transaction was made by a submerchant (not the main receiver)
             if (mainReceiverId != null) {
                 response.setIsSubmerchant(!transaction.getReceiver().getId().equals(mainReceiverId));
