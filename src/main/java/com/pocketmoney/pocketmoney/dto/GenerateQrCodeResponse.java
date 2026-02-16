@@ -10,6 +10,7 @@ public class GenerateQrCodeResponse {
     private String receiverName;
     private UUID paymentCategoryId;
     private String paymentCategoryName;
+    private String momoCode; // MoMo merchant code (if configured)
     private String qrCodeData; // Base64 encoded QR code image
     private String qrCodeUrl; // URL/Deep link that the QR code encodes
 }

@@ -22,6 +22,8 @@ public class ReceiverLoginResponse {
     private String managerName;
     private String username;
     private String receiverPhone;
+    private String momoAccountPhone;
+    private String momoCode; // MoMo merchant code
     private String accountNumber;
     private ReceiverStatus status;
     private String email;

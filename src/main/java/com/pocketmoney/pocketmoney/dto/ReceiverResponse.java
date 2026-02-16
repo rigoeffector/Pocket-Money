@@ -21,6 +21,7 @@ public class ReceiverResponse {
     private String username;
     private String receiverPhone;
     private String momoAccountPhone; // MoMo account phone for receiving top-up payments (if configured)
+    private String momoCode; // MoMo merchant code for QR code display
     private String accountNumber;
     private ReceiverStatus status;
     private String email;

@@ -4,6 +4,7 @@ import com.pocketmoney.pocketmoney.dto.AssignNfcCardRequest;
 import com.pocketmoney.pocketmoney.dto.CardDetailsResponse;
 import com.pocketmoney.pocketmoney.dto.CreateUserRequest;
 import com.pocketmoney.pocketmoney.dto.NfcCardResponse;
+import com.pocketmoney.pocketmoney.dto.PaginatedResponse;
 import com.pocketmoney.pocketmoney.dto.UpdateUserRequest;
 import com.pocketmoney.pocketmoney.dto.MerchantBalanceInfo;
 import com.pocketmoney.pocketmoney.dto.UserLoginResponse;
@@ -15,6 +16,7 @@ import com.pocketmoney.pocketmoney.entity.User;
 import com.pocketmoney.pocketmoney.entity.UserStatus;
 import com.pocketmoney.pocketmoney.repository.MerchantUserBalanceRepository;
 import com.pocketmoney.pocketmoney.repository.ReceiverRepository;
+import com.pocketmoney.pocketmoney.repository.TransactionRepository;
 import com.pocketmoney.pocketmoney.repository.UserRepository;
 import com.pocketmoney.pocketmoney.util.JwtUtil;
 import org.slf4j.Logger;
@@ -25,7 +27,10 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.Query;
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -39,14 +44,19 @@ public class UserService {
     private final UserRepository userRepository;
     private final MerchantUserBalanceRepository merchantUserBalanceRepository;
     private final ReceiverRepository receiverRepository;
+    private final TransactionRepository transactionRepository;
+    private final EntityManager entityManager;
     private final PasswordEncoder passwordEncoder;
     private final JwtUtil jwtUtil;
 
     public UserService(UserRepository userRepository, MerchantUserBalanceRepository merchantUserBalanceRepository,
-                      ReceiverRepository receiverRepository, PasswordEncoder passwordEncoder, JwtUtil jwtUtil) {
+                      ReceiverRepository receiverRepository, TransactionRepository transactionRepository,
+                      EntityManager entityManager, PasswordEncoder passwordEncoder, JwtUtil jwtUtil) {
         this.userRepository = userRepository;
         this.merchantUserBalanceRepository = merchantUserBalanceRepository;
         this.receiverRepository = receiverRepository;
+        this.transactionRepository = transactionRepository;
+        this.entityManager = entityManager;
         this.passwordEncoder = passwordEncoder;
         this.jwtUtil = jwtUtil;
     }
@@ -165,6 +175,90 @@ public class UserService {
                 .stream()
                 .map(this::mapToResponse)
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * Get all customers who have made transactions (paginated)
+     * Returns distinct users who have at least one transaction in the system
+     * Supports search by name or phone number
+     */
+    @Transactional(readOnly = true)
+    public PaginatedResponse<UserResponse> getCustomersWithTransactions(int page, int size, String search) {
+        // Build query to get distinct users who have made transactions
+        StringBuilder queryBuilder = new StringBuilder();
+        queryBuilder.append("SELECT DISTINCT u FROM User u ");
+        queryBuilder.append("INNER JOIN Transaction t ON t.user.id = u.id ");
+        queryBuilder.append("WHERE 1=1 ");
+        
+        // Add search filter if provided
+        if (search != null && !search.trim().isEmpty()) {
+            queryBuilder.append("AND (");
+            queryBuilder.append("LOWER(u.fullNames) LIKE LOWER(:search) OR ");
+            queryBuilder.append("LOWER(u.phoneNumber) LIKE LOWER(:search) OR ");
+            queryBuilder.append("LOWER(COALESCE(u.email, '')) LIKE LOWER(:search)");
+            queryBuilder.append(") ");
+        }
+        
+        queryBuilder.append("ORDER BY u.lastTransactionDate DESC NULLS LAST, u.createdAt DESC");
+        
+        // Create query
+        Query query = entityManager.createQuery(queryBuilder.toString(), User.class);
+        
+        // Set search parameter if provided
+        if (search != null && !search.trim().isEmpty()) {
+            query.setParameter("search", "%" + search.trim() + "%");
+        }
+        
+        // Get total count (for pagination)
+        StringBuilder countQueryBuilder = new StringBuilder();
+        countQueryBuilder.append("SELECT COUNT(DISTINCT u.id) FROM User u ");
+        countQueryBuilder.append("INNER JOIN Transaction t ON t.user.id = u.id ");
+        countQueryBuilder.append("WHERE 1=1 ");
+        
+        if (search != null && !search.trim().isEmpty()) {
+            countQueryBuilder.append("AND (");
+            countQueryBuilder.append("LOWER(u.fullNames) LIKE LOWER(:search) OR ");
+            countQueryBuilder.append("LOWER(u.phoneNumber) LIKE LOWER(:search) OR ");
+            countQueryBuilder.append("LOWER(COALESCE(u.email, '')) LIKE LOWER(:search)");
+            countQueryBuilder.append(") ");
+        }
+        
+        Query countQuery = entityManager.createQuery(countQueryBuilder.toString(), Long.class);
+        
+        if (search != null && !search.trim().isEmpty()) {
+            countQuery.setParameter("search", "%" + search.trim() + "%");
+        }
+        
+        long totalElements = (Long) countQuery.getSingleResult();
+        
+        // Apply pagination
+        int offset = page * size;
+        query.setFirstResult(offset);
+        query.setMaxResults(size);
+        
+        @SuppressWarnings("unchecked")
+        List<User> users = (List<User>) query.getResultList();
+        
+        // Convert to UserResponse
+        List<UserResponse> content = users.stream()
+                .map(this::mapToResponse)
+                .collect(Collectors.toList());
+        
+        // Calculate pagination metadata
+        int totalPages = (int) Math.ceil((double) totalElements / size);
+        boolean isFirst = page == 0;
+        boolean isLast = page >= totalPages - 1;
+        
+        PaginatedResponse<UserResponse> response = new PaginatedResponse<>();
+        response.setContent(content);
+        response.setCurrentPage(page);
+        response.setPageSize(size);
+        response.setTotalElements(totalElements);
+        response.setTotalPages(totalPages);
+        response.setFirst(isFirst);
+        response.setLast(isLast);
+        
+        return response;
     }
 
     @Transactional(readOnly = true)

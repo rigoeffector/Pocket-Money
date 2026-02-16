@@ -185,6 +185,7 @@ public class ReceiverService {
         receiver.setUsername(request.getUsername());
         receiver.setPassword(passwordEncoder.encode(request.getPassword())); // Hash the password
         receiver.setReceiverPhone(request.getReceiverPhone());
+        receiver.setMomoCode(request.getMomoCode());
         receiver.setAccountNumber(request.getAccountNumber());
         receiver.setStatus(request.getStatus() != null ? request.getStatus() : ReceiverStatus.NOT_ACTIVE);
         receiver.setEmail(email);
@@ -379,6 +380,11 @@ public class ReceiverService {
             // Normalize phone number: remove non-digit characters
             String normalizedMomoPhone = request.getMomoAccountPhone().replaceAll("[^0-9]", "");
             receiver.setMomoAccountPhone(normalizedMomoPhone);
+        }
+        
+        // Update MoMo code if provided
+        if (request.getMomoCode() != null) {
+            receiver.setMomoCode(request.getMomoCode().trim());
         }
         
         // Update flexible mode if provided
@@ -971,6 +977,8 @@ public class ReceiverService {
         response.setManagerName(receiver.getManagerName());
         response.setUsername(receiver.getUsername());
         response.setReceiverPhone(receiver.getReceiverPhone());
+        response.setMomoAccountPhone(receiver.getMomoAccountPhone());
+        response.setMomoCode(receiver.getMomoCode());
         response.setAccountNumber(receiver.getAccountNumber());
         response.setStatus(receiver.getStatus());
         response.setEmail(receiver.getEmail());
@@ -1179,6 +1187,7 @@ public class ReceiverService {
         response.setUsername(receiver.getUsername());
         response.setReceiverPhone(receiver.getReceiverPhone());
         response.setMomoAccountPhone(receiver.getMomoAccountPhone()); // MoMo account phone (if configured)
+        response.setMomoCode(receiver.getMomoCode()); // MoMo merchant code (if configured)
         response.setAccountNumber(receiver.getAccountNumber());
         response.setStatus(receiver.getStatus());
         response.setEmail(receiver.getEmail());

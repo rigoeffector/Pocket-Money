@@ -41,6 +41,9 @@ public class Receiver {
     @Column(name = "momo_account_phone")
     private String momoAccountPhone; // MoMo account phone for receiving top-up payments
 
+    @Column(name = "momo_code")
+    private String momoCode; // MoMo merchant code for QR code display
+
     @Column(name = "account_number")
     private String accountNumber;
 

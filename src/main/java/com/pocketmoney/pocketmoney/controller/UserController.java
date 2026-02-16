@@ -49,6 +49,31 @@ public class UserController {
         return ResponseEntity.ok(ApiResponse.success("Users retrieved successfully", users));
     }
 
+    /**
+     * Get all customers who have made transactions (paginated)
+     * GET /api/users/customers
+     * 
+     * Query parameters:
+     *   - page: Page number (default: 0)
+     *   - size: Page size (default: 20)
+     *   - search: Optional search term to search by name, phone, or email
+     * 
+     * Returns paginated list of users who have at least one transaction
+     */
+    @GetMapping("/customers")
+    public ResponseEntity<ApiResponse<PaginatedResponse<UserResponse>>> getCustomersWithTransactions(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size,
+            @RequestParam(required = false) String search) {
+        try {
+            PaginatedResponse<UserResponse> response = userService.getCustomersWithTransactions(page, size, search);
+            return ResponseEntity.ok(ApiResponse.success("Customers retrieved successfully", response));
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
     @GetMapping("/phone/{phoneNumber}")
     public ResponseEntity<ApiResponse<UserResponse>> getUserByPhoneNumber(@PathVariable String phoneNumber) {
         try {

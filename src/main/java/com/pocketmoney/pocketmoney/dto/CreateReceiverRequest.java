@@ -26,6 +26,8 @@ public class CreateReceiverRequest {
     @Pattern(regexp = "^[0-9]{10,15}$", message = "Phone number must be between 10 and 15 digits")
     private String receiverPhone;
 
+    private String momoCode; // MoMo merchant code
+
     private String accountNumber;
 
     @NotNull(message = "Status is required")

@@ -127,12 +127,25 @@ public class QrCodeService {
         UUID paymentCategoryId = paymentCategory.getId();
         
         // Create JSON payload for QR code
-        // Format: {"receiverId":"uuid","paymentCategoryId":"uuid","type":"merchant_payment"}
-        String qrCodeUrl = String.format(
-            "{\"receiverId\":\"%s\",\"paymentCategoryId\":\"%s\",\"type\":\"merchant_payment\"}",
-            targetReceiverId.toString(),
-            paymentCategoryId.toString()
-        );
+        // Format: {"receiverId":"uuid","paymentCategoryId":"uuid","type":"merchant_payment","momoCode":"code"} (momoCode is optional)
+        String momoCode = targetReceiver.getMomoCode();
+        String qrCodeUrl;
+        if (momoCode != null && !momoCode.trim().isEmpty()) {
+            // Include momoCode in QR code payload if available
+            qrCodeUrl = String.format(
+                "{\"receiverId\":\"%s\",\"paymentCategoryId\":\"%s\",\"type\":\"merchant_payment\",\"momoCode\":\"%s\"}",
+                targetReceiverId.toString(),
+                paymentCategoryId.toString(),
+                momoCode.trim()
+            );
+        } else {
+            // Standard format without momoCode
+            qrCodeUrl = String.format(
+                "{\"receiverId\":\"%s\",\"paymentCategoryId\":\"%s\",\"type\":\"merchant_payment\"}",
+                targetReceiverId.toString(),
+                paymentCategoryId.toString()
+            );
+        }
 
         // Generate QR code image
         String qrCodeBase64 = generateQrCodeImage(qrCodeUrl, 300, 300);
@@ -143,6 +156,7 @@ public class QrCodeService {
         response.setReceiverName(targetReceiver.getCompanyName());
         response.setPaymentCategoryId(paymentCategoryId);
         response.setPaymentCategoryName(paymentCategory.getName());
+        response.setMomoCode(targetReceiver.getMomoCode()); // Include momoCode in response
         response.setQrCodeData(qrCodeBase64);
         response.setQrCodeUrl(qrCodeUrl);
 

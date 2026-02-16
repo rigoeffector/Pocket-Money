@@ -155,6 +155,20 @@ public class EfashePaymentService {
             if (request.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
                 throw new RuntimeException("Amount must be positive for service type: " + request.getServiceType());
             }
+            
+            // For AIRTIME service type, amount must be an even number
+            if (request.getServiceType() == EfasheServiceType.AIRTIME) {
+                BigDecimal amount = request.getAmount();
+                // Check if amount is a whole number (no decimal places)
+                if (amount.scale() > 0 && amount.stripTrailingZeros().scale() > 0) {
+                    throw new RuntimeException("Airtime amount must be a whole number (no decimals)");
+                }
+                // Check if amount is even (remainder when divided by 2 is 0)
+                BigDecimal remainder = amount.remainder(BigDecimal.valueOf(2));
+                if (remainder.compareTo(BigDecimal.ZERO) != 0) {
+                    throw new RuntimeException("Airtime amount must be an even number. Please enter an even amount (e.g., 1000, 2000, 5000)");
+                }
+            }
         }
 
         // Get EFASHE settings for the service type
@@ -471,10 +485,27 @@ public class EfashePaymentService {
             throw new RuntimeException("This endpoint only supports AIRTIME service type");
         }
 
+        // Validate amount for AIRTIME - must be positive and even
+        if (request.getAmount() == null) {
+            throw new RuntimeException("Amount is required for airtime purchase");
+        }
+        if (request.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
+            throw new RuntimeException("Amount must be positive for airtime purchase");
+        }
+        
+        BigDecimal amount = request.getAmount();
+        // Check if amount is a whole number (no decimal places)
+        if (amount.scale() > 0 && amount.stripTrailingZeros().scale() > 0) {
+            throw new RuntimeException("Airtime amount must be a whole number (no decimals)");
+        }
+        // Check if amount is even (remainder when divided by 2 is 0)
+        BigDecimal remainder = amount.remainder(BigDecimal.valueOf(2));
+        if (remainder.compareTo(BigDecimal.ZERO) != 0) {
+            throw new RuntimeException("Airtime amount must be an even number. Please enter an even amount (e.g., 1000, 2000, 5000)");
+        }
+
         // Get EFASHE settings for the service type
         EfasheSettingsResponse settingsResponse = efasheSettingsService.getSettingsByServiceType(request.getServiceType());
-
-        BigDecimal amount = request.getAmount();
         
         // Normalize payer phone (for MoPay debit)
         String normalizedPayerPhone = normalizePhoneTo12Digits(request.getPhone());

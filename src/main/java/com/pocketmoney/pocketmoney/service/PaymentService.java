@@ -2490,9 +2490,10 @@ public class PaymentService {
         queryBuilder.append("LEFT JOIN FETCH t.receiver r ");
         queryBuilder.append("WHERE t.receiver.id = :receiverId ");
         
-        // Add payment category filter if provided
+        // Add payment category filter if provided (case-insensitive)
+        // Note: This will exclude transactions with null payment categories
         if (paymentCategory != null && !paymentCategory.trim().isEmpty()) {
-            queryBuilder.append("AND pc.name = :paymentCategory ");
+            queryBuilder.append("AND pc IS NOT NULL AND LOWER(pc.name) = LOWER(:paymentCategory) ");
         }
         
         // Add transaction type filter if provided
@@ -2560,9 +2561,10 @@ public class PaymentService {
         countQueryBuilder.append("LEFT JOIN t.user u ");
         countQueryBuilder.append("WHERE t.receiver.id = :receiverId ");
         
-        // Add payment category filter if provided
+        // Add payment category filter if provided (case-insensitive)
+        // Note: This will exclude transactions with null payment categories
         if (paymentCategory != null && !paymentCategory.trim().isEmpty()) {
-            countQueryBuilder.append("AND pc.name = :paymentCategory ");
+            countQueryBuilder.append("AND pc IS NOT NULL AND LOWER(pc.name) = LOWER(:paymentCategory) ");
         }
         
         // Add transaction type filter if provided
@@ -2633,9 +2635,10 @@ public class PaymentService {
         statsQueryBuilder.append("LEFT JOIN t.paymentCategory pc ");
         statsQueryBuilder.append("WHERE t.receiver.id = :receiverId ");
         
-        // Add payment category filter if provided
+        // Add payment category filter if provided (case-insensitive)
+        // Note: This will exclude transactions with null payment categories
         if (paymentCategory != null && !paymentCategory.trim().isEmpty()) {
-            statsQueryBuilder.append("AND pc.name = :paymentCategory ");
+            statsQueryBuilder.append("AND pc IS NOT NULL AND LOWER(pc.name) = LOWER(:paymentCategory) ");
         }
         
         // Add transaction type filter if provided
