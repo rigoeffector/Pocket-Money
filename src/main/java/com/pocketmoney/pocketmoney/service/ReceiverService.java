@@ -190,8 +190,11 @@ public class ReceiverService {
         receiver.setStatus(request.getStatus() != null ? request.getStatus() : ReceiverStatus.NOT_ACTIVE);
         receiver.setEmail(email);
         receiver.setAddress(request.getAddress());
-        receiver.setCountry(request.getCountry());
-        receiver.setCountryCode(request.getCountryCode());
+        // Set default country and country code if not provided
+        receiver.setCountry(request.getCountry() != null && !request.getCountry().trim().isEmpty() 
+            ? request.getCountry().trim() : "Rwanda");
+        receiver.setCountryCode(request.getCountryCode() != null && !request.getCountryCode().trim().isEmpty() 
+            ? request.getCountryCode().trim() : "+250");
         receiver.setDescription(request.getDescription());
         receiver.setIsFlexible(request.getIsFlexible() != null ? request.getIsFlexible() : false);
 
@@ -1987,6 +1990,11 @@ public class ReceiverService {
         submerchant.setStatus(request.getStatus() != null ? request.getStatus() : ReceiverStatus.NOT_ACTIVE);
         submerchant.setEmail(email);
         submerchant.setAddress(request.getAddress());
+        // Set default country and country code if not provided
+        submerchant.setCountry(request.getCountry() != null && !request.getCountry().trim().isEmpty() 
+            ? request.getCountry().trim() : "Rwanda");
+        submerchant.setCountryCode(request.getCountryCode() != null && !request.getCountryCode().trim().isEmpty() 
+            ? request.getCountryCode().trim() : "+250");
         submerchant.setDescription(request.getDescription());
         
         // Set parent receiver (link as submerchant) - use the already loaded mainReceiver

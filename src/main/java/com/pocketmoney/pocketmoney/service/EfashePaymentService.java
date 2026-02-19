@@ -142,6 +142,94 @@ public class EfashePaymentService {
             || Boolean.TRUE.equals(moPayResponse.getSuccess());
     }
 
+    /**
+     * Extract user-friendly error message from MoPay response
+     * Removes technical details like transaction IDs, status codes, etc.
+     */
+    private String getUserFriendlyErrorMessage(MoPayResponse moPayResponse) {
+        if (moPayResponse == null) {
+            return "Payment service is temporarily unavailable. Please try again later.";
+        }
+        
+        // Check if there's a user-friendly message
+        String message = moPayResponse.getErrorMessage() != null ? moPayResponse.getErrorMessage() : moPayResponse.getMessage();
+        
+        if (message != null && !message.trim().isEmpty()) {
+            // Remove technical details and make it user-friendly
+            String friendlyMessage = message.trim();
+            
+            // Common error message mappings
+            if (friendlyMessage.contains("Total Transfer amount not match with paid amount")) {
+                return "Payment amount mismatch. Please contact support.";
+            }
+            if (friendlyMessage.contains("Insufficient funds") || friendlyMessage.contains("insufficient")) {
+                return "Insufficient funds. Please check your account balance.";
+            }
+            if (friendlyMessage.contains("Invalid phone") || friendlyMessage.contains("invalid phone")) {
+                return "Invalid phone number. Please check and try again.";
+            }
+            if (friendlyMessage.contains("Transaction failed") || friendlyMessage.contains("failed")) {
+                return "Payment could not be processed. Please try again.";
+            }
+            if (friendlyMessage.contains("timeout") || friendlyMessage.contains("Timeout")) {
+                return "Payment request timed out. Please try again.";
+            }
+            
+            // Return the message as-is if it seems user-friendly, otherwise return generic message
+            if (friendlyMessage.length() < 200 && !friendlyMessage.contains("transactionId") 
+                && !friendlyMessage.contains("Status:") && !friendlyMessage.contains("status:")) {
+                return friendlyMessage;
+            }
+        }
+        
+        // Default user-friendly message
+        return "Payment could not be processed at this time. Please try again later or contact support.";
+    }
+
+    /**
+     * Extract user-friendly error message from MoPay ECW response
+     * Removes technical details like transaction IDs, status codes, etc.
+     */
+    private String getUserFriendlyErrorMessage(MopayECWPaymentResponse mopayResponse) {
+        if (mopayResponse == null) {
+            return "Payment service is temporarily unavailable. Please try again later.";
+        }
+        
+        // Check if there's a user-friendly message
+        String message = mopayResponse.getErrorMessage() != null ? mopayResponse.getErrorMessage() : mopayResponse.getMessage();
+        
+        if (message != null && !message.trim().isEmpty()) {
+            // Remove technical details and make it user-friendly
+            String friendlyMessage = message.trim();
+            
+            // Common error message mappings
+            if (friendlyMessage.contains("Total Transfer amount not match with paid amount")) {
+                return "Payment amount mismatch. Please contact support.";
+            }
+            if (friendlyMessage.contains("Insufficient funds") || friendlyMessage.contains("insufficient")) {
+                return "Insufficient funds. Please check your account balance.";
+            }
+            if (friendlyMessage.contains("Invalid phone") || friendlyMessage.contains("invalid phone")) {
+                return "Invalid phone number. Please check and try again.";
+            }
+            if (friendlyMessage.contains("Transaction failed") || friendlyMessage.contains("failed")) {
+                return "Payment could not be processed. Please try again.";
+            }
+            if (friendlyMessage.contains("timeout") || friendlyMessage.contains("Timeout")) {
+                return "Payment request timed out. Please try again.";
+            }
+            
+            // Return the message as-is if it seems user-friendly, otherwise return generic message
+            if (friendlyMessage.length() < 200 && !friendlyMessage.contains("transactionId") 
+                && !friendlyMessage.contains("Status:") && !friendlyMessage.contains("status:")) {
+                return friendlyMessage;
+            }
+        }
+        
+        // Default user-friendly message
+        return "Payment could not be processed at this time. Please try again later or contact support.";
+    }
+
     public EfasheInitiateResponse initiatePayment(EfasheInitiateRequest request) {
         logger.info("Initiating EFASHE payment - Service: {}, Amount: {}, Phone: {}", 
             request.getServiceType(), request.getAmount(), request.getPhone());
@@ -795,11 +883,27 @@ public class EfashePaymentService {
             mopayOpenApiRequest.setTransfers(transfers);
 
             MoPayResponse moPayResponse = mopayOpenApiService.initiatePayment(mopayOpenApiRequest);
-            String mopayTransactionId = moPayResponse != null && moPayResponse.getTransactionId() != null 
-                ? moPayResponse.getTransactionId() : null;
+            
+            // Check for errors first
+            if (moPayResponse == null) {
+                throw new RuntimeException("Payment service is temporarily unavailable. Please try again later.");
+            }
+            
+            // Check if MoPay returned an error status
+            if (moPayResponse.getStatus() != null && moPayResponse.getStatus() >= 400) {
+                String userFriendlyError = getUserFriendlyErrorMessage(moPayResponse);
+                logger.error("❌ Mopay payment initiation failed - Status: {}, Message: {}", 
+                    moPayResponse.getStatus(), moPayResponse.getMessage());
+                throw new RuntimeException(userFriendlyError);
+            }
+            
+            String mopayTransactionId = moPayResponse.getTransactionId();
 
             if (mopayTransactionId == null || mopayTransactionId.isEmpty()) {
-                throw new RuntimeException("MoPay did not return a transaction ID. Payment initiation may have failed.");
+                String userFriendlyError = getUserFriendlyErrorMessage(moPayResponse);
+                logger.error("❌ Mopay did not return a transaction ID. Response status: {}, Success: {}, Message: {}", 
+                    moPayResponse.getStatus(), moPayResponse.getSuccess(), moPayResponse.getMessage());
+                throw new RuntimeException(userFriendlyError);
             }
 
             transaction.setTransactionId(mopayTransactionId);
@@ -906,15 +1010,14 @@ public class EfashePaymentService {
         MopayECWPaymentResponse mopayResponse = mopayPaymentService.initiatePayment(mopayECWRequest);
 
         if (mopayResponse == null) {
-            throw new RuntimeException("Mopay returned null response. Payment initiation failed.");
+            throw new RuntimeException("Payment service is temporarily unavailable. Please try again later.");
         }
 
         if (mopayResponse.getStatus() != null && mopayResponse.getStatus() >= 400) {
-            String errorMsg = mopayResponse.getMessage() != null ? mopayResponse.getMessage() : 
-                "Mopay returned error status: " + mopayResponse.getStatus();
+            String userFriendlyError = getUserFriendlyErrorMessage(mopayResponse);
             logger.error("❌ Mopay payment initiation failed - Status: {}, Message: {}", 
-                mopayResponse.getStatus(), errorMsg);
-            throw new RuntimeException("Mopay payment initiation failed: " + errorMsg);
+                mopayResponse.getStatus(), mopayResponse.getMessage());
+            throw new RuntimeException(userFriendlyError);
         }
 
         String mopayTransactionId = mopayResponse.getTransactionId();
@@ -928,10 +1031,10 @@ public class EfashePaymentService {
         }
 
         if (mopayTransactionId == null || mopayTransactionId.isEmpty()) {
+            String userFriendlyError = getUserFriendlyErrorMessage(mopayResponse);
             logger.error("❌ Mopay did not return a transaction ID. Response status: {}, Success: {}, Message: {}", 
                 mopayResponse.getStatus(), mopayResponse.getSuccess(), mopayResponse.getMessage());
-            throw new RuntimeException("Mopay did not return a transaction ID. Payment initiation may have failed. Status: " + 
-                mopayResponse.getStatus() + ", Message: " + mopayResponse.getMessage());
+            throw new RuntimeException(userFriendlyError);
         }
 
         transaction.setTransactionId(mopayTransactionId);

@@ -58,10 +58,10 @@ public class Receiver {
     private String address;
 
     @Column(name = "country")
-    private String country;
+    private String country = "Rwanda";
 
     @Column(name = "country_code")
-    private String countryCode;
+    private String countryCode = "+250";
 
     @Column(name = "description")
     private String description;

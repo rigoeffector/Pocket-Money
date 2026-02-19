@@ -161,8 +161,8 @@ public class EfasheController {
      *   - search: Optional search term to search by phone number, customer name, or transaction ID
      *            - Searches in: customerPhone, customerAccountName, transactionId
      *            - Case-insensitive partial match
-     *   - page: Page number (default: 0)
-     *   - size: Page size (default: 20)
+     *   - page: Page number (default: 0, must be >= 0)
+     *   - size: Page size (default: 20, must be between 1 and 200)
      *   - fromDate: Optional start date filter (ISO 8601 format)
      *   - toDate: Optional end date filter (ISO 8601 format)
      * 
@@ -187,6 +187,21 @@ public class EfasheController {
             @RequestParam(value = "toDate", required = false) 
             @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime toDate) {
         try {
+            // Validate pagination parameters
+            if (page < 0) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                        .body(ApiResponse.error("Page number must be 0 or greater"));
+            }
+            if (size < 1) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                        .body(ApiResponse.error("Page size must be at least 1"));
+            }
+            // Limit maximum page size to prevent performance issues
+            int maxPageSize = 200;
+            if (size > maxPageSize) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                        .body(ApiResponse.error("Page size cannot exceed " + maxPageSize + ". Please use a smaller page size."));
+            }
             // Check if serviceType is PAY_CUSTOMER (special case for ADMIN only)
             if (serviceTypeParam != null && "PAY_CUSTOMER".equalsIgnoreCase(serviceTypeParam.trim())) {
                 // Verify user is ADMIN
@@ -489,8 +504,8 @@ public class EfasheController {
      *   - status: Optional filter by status (PENDING, SUCCESS, FAILED)
      *   - fromDate: Optional start date filter (ISO 8601 format)
      *   - toDate: Optional end date filter (ISO 8601 format)
-     *   - page: Page number (default: 0)
-     *   - size: Page size (default: 20)
+     *   - page: Page number (default: 0, must be >= 0)
+     *   - size: Page size (default: 20, must be between 1 and 200)
      * 
      * Examples:
      *   GET /api/efashe/refund-history
@@ -509,7 +524,23 @@ public class EfasheController {
             @RequestParam(value = "page", defaultValue = "0") int page,
             @RequestParam(value = "size", defaultValue = "20") int size) {
         try {
-            PaginatedResponse<EfasheRefundHistoryResponse> response = 
+            // Validate pagination parameters
+            if (page < 0) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                        .body(ApiResponse.error("Page number must be 0 or greater"));
+            }
+            if (size < 1) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                        .body(ApiResponse.error("Page size must be at least 1"));
+            }
+            // Limit maximum page size to prevent performance issues
+            int maxPageSize = 200;
+            if (size > maxPageSize) {
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                        .body(ApiResponse.error("Page size cannot exceed " + maxPageSize + ". Please use a smaller page size."));
+            }
+            
+            PaginatedResponse<EfasheRefundHistoryResponse> response =
                 efashePaymentService.getRefundHistory(receiverPhone, status, fromDate, toDate, page, size);
             return ResponseEntity.ok(ApiResponse.success("Refund history retrieved successfully", response));
         } catch (RuntimeException e) {
