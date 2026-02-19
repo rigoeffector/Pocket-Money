@@ -580,7 +580,7 @@ public class EfashePaymentService {
         if (request.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
             throw new RuntimeException("Amount must be positive for airtime purchase");
         }
-        
+
         BigDecimal amount = request.getAmount();
         // Check if amount is a whole number (no decimal places)
         if (amount.scale() > 0 && amount.stripTrailingZeros().scale() > 0) {
@@ -656,32 +656,42 @@ public class EfashePaymentService {
         logger.info("EFASHE validation successful - TrxId: {}, Recipient Account: {}", 
             validateResponse.getTrxId(), customerAccountNumber);
         
-        // Store customer account name if available
+        // Always fetch recipient name from Mopay account holder info for AIRTIME "pay for others"
+        // This ensures we have the most up-to-date name for display to the user
         String customerAccountName = null;
+        logger.info("AIRTIME service (pay for others) - Fetching recipient name from Mopay account holder info for phone: {}", normalizedRecipientPhone);
+        try {
+            com.pocketmoney.pocketmoney.dto.MopayECWAccountHolderResponse accountHolderInfo = mopayPaymentService.getAccountHolderInformation(normalizedRecipientPhone);
+            if (accountHolderInfo != null && accountHolderInfo.getStatus() != null && accountHolderInfo.getStatus() == 200) {
+                String fullName = accountHolderInfo.getFullName();
+                if (fullName != null && !fullName.trim().isEmpty()) {
+                    customerAccountName = fullName.trim();
+                    logger.info("✅ Recipient name retrieved from Mopay account holder info: {}", customerAccountName);
+                } else {
+                    logger.warn("Mopay account holder info returned status 200 but no name available for recipient");
+                    // Fallback to validate response name if available
         if (validateResponse.getCustomerAccountName() != null && !validateResponse.getCustomerAccountName().trim().isEmpty()) {
             customerAccountName = validateResponse.getCustomerAccountName().trim();
-            logger.info("Recipient Account Name from validate: {}", customerAccountName);
-        } else {
-            // For AIRTIME service, try to get recipient name from Mopay account holder info if not available from validate
-            logger.info("AIRTIME service - Recipient name not available from validate, fetching from Mopay account holder info for phone: {}", normalizedRecipientPhone);
-            try {
-                com.pocketmoney.pocketmoney.dto.MopayECWAccountHolderResponse accountHolderInfo = mopayPaymentService.getAccountHolderInformation(normalizedRecipientPhone);
-                if (accountHolderInfo != null && accountHolderInfo.getStatus() != null && accountHolderInfo.getStatus() == 200) {
-                    String fullName = accountHolderInfo.getFullName();
-                    if (fullName != null && !fullName.trim().isEmpty()) {
-                        customerAccountName = fullName.trim();
-                        logger.info("✅ Recipient name retrieved from Mopay account holder info: {}", customerAccountName);
-                    } else {
-                        logger.warn("Mopay account holder info returned status 200 but no name available for recipient");
+                        logger.info("Using recipient name from validate response as fallback: {}", customerAccountName);
                     }
-                } else {
-                    logger.warn("Mopay account holder info returned non-success status: {}", 
-                        accountHolderInfo != null ? accountHolderInfo.getStatus() : "null");
                 }
-            } catch (Exception e) {
-                logger.warn("Failed to get recipient name from Mopay account holder info (non-critical): {}", e.getMessage());
-                // Don't fail the transaction if account holder info fails
+            } else {
+                logger.warn("Mopay account holder info returned non-success status: {}", 
+                    accountHolderInfo != null ? accountHolderInfo.getStatus() : "null");
+                // Fallback to validate response name if available
+                if (validateResponse.getCustomerAccountName() != null && !validateResponse.getCustomerAccountName().trim().isEmpty()) {
+                    customerAccountName = validateResponse.getCustomerAccountName().trim();
+                    logger.info("Using recipient name from validate response as fallback: {}", customerAccountName);
+                }
             }
+        } catch (Exception e) {
+            logger.warn("Failed to get recipient name from Mopay account holder info (non-critical): {}", e.getMessage());
+            // Fallback to validate response name if available
+            if (validateResponse.getCustomerAccountName() != null && !validateResponse.getCustomerAccountName().trim().isEmpty()) {
+                customerAccountName = validateResponse.getCustomerAccountName().trim();
+                logger.info("Using recipient name from validate response as fallback: {}", customerAccountName);
+            }
+            // Don't fail the transaction if account holder info fails
         }
         
         // Determine delivery method from validate response
@@ -3486,49 +3496,85 @@ public class EfashePaymentService {
         }
         
         // Add comprehensive search filter if provided
-        // Searches in: phone, account number, account name, transaction IDs, token, amount, service type, status
+        // Simplified search: only search fields that exist in EfasheTransaction table
         if (search != null && !search.trim().isEmpty()) {
             String searchTerm = search.trim();
+            String lowerSearchTerm = searchTerm.toLowerCase();
             queryBuilder.append("AND (");
             
-            // Phone number search (with normalized version)
-            queryBuilder.append("LOWER(t.customerPhone) LIKE :searchTerm ");
+            // Build conditions list to avoid starting with OR
+            java.util.List<String> conditions = new java.util.ArrayList<>();
+            
+            // 1. Exact matches first (most efficient with indexes)
+            // PRIORITIZE: Transaction IDs first (unique indexes, fastest lookup)
+            conditions.add("t.transactionId = :searchTermExact");
+            conditions.add("t.mopayTransactionId = :searchTermExact");
+            conditions.add("t.trxId = :searchTermExact");
+            
+            // Normalized phone exact match (if available)
             if (normalizedSearchPhone != null) {
-                queryBuilder.append("OR t.customerPhone = :normalizedSearchPhone ");
+                conditions.add("t.customerPhone = :normalizedSearchPhone");
             }
             
-            // Account number search
-            queryBuilder.append("OR LOWER(t.customerAccountNumber) LIKE :searchTerm ");
+            // Account number exact match
+            conditions.add("t.customerAccountNumber = :searchTermExact");
             
-            // Account name search
-            queryBuilder.append("OR LOWER(COALESCE(t.customerAccountName, '')) LIKE :searchTerm ");
+            // Token exact match
+            conditions.add("t.token = :searchTermExact");
             
-            // Transaction IDs search
-            queryBuilder.append("OR LOWER(t.transactionId) LIKE :searchTerm ");
-            queryBuilder.append("OR LOWER(COALESCE(t.mopayTransactionId, '')) LIKE :searchTerm ");
-            queryBuilder.append("OR LOWER(COALESCE(t.trxId, '')) LIKE :searchTerm ");
+            // 2. Case-insensitive LIKE searches (prioritize transaction IDs for partial matches)
+            conditions.add("LOWER(t.transactionId) LIKE :searchTermLower");
+            conditions.add("(t.mopayTransactionId IS NOT NULL AND LOWER(t.mopayTransactionId) LIKE :searchTermLower)");
+            conditions.add("(t.trxId IS NOT NULL AND LOWER(t.trxId) LIKE :searchTermLower)");
+            conditions.add("LOWER(t.customerPhone) LIKE :searchTermLower");
+            conditions.add("LOWER(t.customerAccountNumber) LIKE :searchTermLower");
+            conditions.add("(t.customerAccountName IS NOT NULL AND LOWER(t.customerAccountName) LIKE :searchTermLower)");
+            conditions.add("(t.token IS NOT NULL AND LOWER(t.token) LIKE :searchTermLower)");
+            conditions.add("(t.message IS NOT NULL AND LOWER(t.message) LIKE :searchTermLower)");
+            conditions.add("(t.errorMessage IS NOT NULL AND LOWER(t.errorMessage) LIKE :searchTermLower)");
             
-            // Token search (for electricity tokens)
-            queryBuilder.append("OR LOWER(COALESCE(t.token, '')) LIKE :searchTerm ");
-            
-            // Amount search - try to match as string representation
-            // Also try exact numeric match if search term is a number
-            queryBuilder.append("OR CAST(t.amount AS string) LIKE :searchTerm ");
-            // Try exact amount match if search term is numeric
+            // 3. Numeric amount search
             try {
-                BigDecimal searchAmount = new BigDecimal(searchTerm);
-                queryBuilder.append("OR t.amount = :searchAmount ");
+                BigDecimal searchAmountValue = new BigDecimal(searchTerm);
+                conditions.add("t.amount = :searchAmountExact");
             } catch (NumberFormatException e) {
-                // Not a number, skip exact match
+                // Not a valid number, skip exact amount match
             }
             
-            // Service type search (convert enum to string)
-            queryBuilder.append("OR LOWER(CAST(t.serviceType AS string)) LIKE :searchTerm ");
+            // 4. Service type search - exact enum match
+            String upperSearchTerm = searchTerm.toUpperCase();
+            StringBuilder serviceTypeConditions = new StringBuilder();
+            int serviceTypeMatchCount = 0;
+            for (EfasheServiceType st : EfasheServiceType.values()) {
+                if (st.name().equals(upperSearchTerm) || st.name().contains(upperSearchTerm) || upperSearchTerm.contains(st.name())) {
+                    if (serviceTypeMatchCount > 0) {
+                        serviceTypeConditions.append(" OR ");
+                    }
+                    serviceTypeConditions.append("t.serviceType = :serviceTypeSearch").append(st.ordinal());
+                    serviceTypeMatchCount++;
+                }
+            }
+            if (serviceTypeMatchCount > 0) {
+                conditions.add("(" + serviceTypeConditions.toString() + ")");
+            }
             
-            // Status search
-            queryBuilder.append("OR LOWER(COALESCE(t.mopayStatus, '')) LIKE :searchTerm ");
-            queryBuilder.append("OR LOWER(COALESCE(t.efasheStatus, '')) LIKE :searchTerm ");
+            // 5. Status search
+            conditions.add("(t.mopayStatus IS NOT NULL AND LOWER(t.mopayStatus) LIKE :searchTermLower)");
+            conditions.add("(t.efasheStatus IS NOT NULL AND LOWER(t.efasheStatus) LIKE :searchTermLower)");
             
+            // Join all conditions with OR - ensure we have at least one condition
+            // Filter out any empty conditions (defensive programming)
+            conditions.removeIf(String::isEmpty);
+            
+            if (!conditions.isEmpty()) {
+                // Join with OR - this will produce: condition1 OR condition2 OR ...
+                String joinedConditions = String.join(" OR ", conditions);
+                queryBuilder.append(joinedConditions);
+            } else {
+                // Fallback: if no conditions, match nothing (should not happen)
+                logger.warn("⚠️ Search conditions list is empty for search term: {}", searchTerm);
+                queryBuilder.append("1=0");
+            }
             queryBuilder.append(") ");
         }
         
@@ -3556,8 +3602,13 @@ public class EfashePaymentService {
         
         queryBuilder.append("ORDER BY t.createdAt DESC");
         
-        // Create query
+        // Create query with pagination limits for performance
         Query query = entityManager.createQuery(queryBuilder.toString(), EfasheTransaction.class);
+        
+        // Set pagination early - limit max results to prevent huge queries and improve performance
+        // This ensures database only fetches the required page
+        query.setFirstResult(page * size);
+        query.setMaxResults(Math.min(size, 200)); // Cap at 200 to prevent performance issues
         
         // Set parameters only if they are not null
         if (serviceType != null) {
@@ -3566,12 +3617,18 @@ public class EfashePaymentService {
         if (normalizedPhone != null && !normalizedPhone.trim().isEmpty() && (search == null || search.trim().isEmpty())) {
             query.setParameter("customerPhone", normalizedPhone);
         }
-        // Prepare search term for both queries
+        // Prepare search term for both queries - optimized parameter setting
         String searchTerm = null;
         BigDecimal searchAmount = null;
         if (search != null && !search.trim().isEmpty()) {
             searchTerm = search.trim();
-            query.setParameter("searchTerm", "%" + searchTerm.toLowerCase() + "%");
+            String lowerSearchTerm = searchTerm.toLowerCase();
+            
+            // Set exact match parameter (for exact matches)
+            query.setParameter("searchTermExact", searchTerm);
+            
+            // Set LIKE parameter with wildcards (for case-insensitive searches using LOWER() indexes)
+            query.setParameter("searchTermLower", "%" + lowerSearchTerm + "%");
             
             // If search term was normalized to a phone number, also search with normalized version
             if (normalizedSearchPhone != null) {
@@ -3581,9 +3638,17 @@ public class EfashePaymentService {
             // If search term is a valid number, also try exact amount match
             try {
                 searchAmount = new BigDecimal(searchTerm);
-                query.setParameter("searchAmount", searchAmount);
+                query.setParameter("searchAmountExact", searchAmount);
             } catch (NumberFormatException e) {
                 // Not a number, skip exact match
+            }
+            
+            // Set service type search parameters if search term matches any enum value
+            String upperSearchTerm = searchTerm.toUpperCase();
+            for (EfasheServiceType st : EfasheServiceType.values()) {
+                if (st.name().equals(upperSearchTerm) || st.name().contains(upperSearchTerm) || upperSearchTerm.contains(st.name())) {
+                    query.setParameter("serviceTypeSearch" + st.ordinal(), st);
+                }
             }
         }
         if (fromDate != null) {
@@ -3604,42 +3669,77 @@ public class EfashePaymentService {
             countQueryBuilder.append("AND t.customerPhone = :customerPhone ");
         }
         if (search != null && !search.trim().isEmpty() && searchTerm != null) {
+            String lowerSearchTerm = searchTerm.toLowerCase();
             countQueryBuilder.append("AND (");
             
-            // Phone number search (with normalized version)
-            countQueryBuilder.append("LOWER(t.customerPhone) LIKE :searchTerm ");
+            // Build conditions list to avoid starting with OR
+            java.util.List<String> countConditions = new java.util.ArrayList<>();
+            
+            // 1. Exact matches first (prioritize transaction IDs)
+            countConditions.add("t.transactionId = :searchTermExact");
+            countConditions.add("t.mopayTransactionId = :searchTermExact");
+            countConditions.add("t.trxId = :searchTermExact");
+            
             if (normalizedSearchPhone != null) {
-                countQueryBuilder.append("OR t.customerPhone = :normalizedSearchPhone ");
+                countConditions.add("t.customerPhone = :normalizedSearchPhone");
             }
             
-            // Account number search
-            countQueryBuilder.append("OR LOWER(t.customerAccountNumber) LIKE :searchTerm ");
+            countConditions.add("t.customerAccountNumber = :searchTermExact");
+            countConditions.add("t.token = :searchTermExact");
             
-            // Account name search
-            countQueryBuilder.append("OR LOWER(COALESCE(t.customerAccountName, '')) LIKE :searchTerm ");
+            // 2. Case-insensitive LIKE searches (prioritize transaction IDs)
+            countConditions.add("LOWER(t.transactionId) LIKE :searchTermLower");
+            countConditions.add("(t.mopayTransactionId IS NOT NULL AND LOWER(t.mopayTransactionId) LIKE :searchTermLower)");
+            countConditions.add("(t.trxId IS NOT NULL AND LOWER(t.trxId) LIKE :searchTermLower)");
+            countConditions.add("LOWER(t.customerPhone) LIKE :searchTermLower");
+            countConditions.add("LOWER(t.customerAccountNumber) LIKE :searchTermLower");
+            countConditions.add("(t.customerAccountName IS NOT NULL AND LOWER(t.customerAccountName) LIKE :searchTermLower)");
+            countConditions.add("(t.token IS NOT NULL AND LOWER(t.token) LIKE :searchTermLower)");
+            countConditions.add("(t.message IS NOT NULL AND LOWER(t.message) LIKE :searchTermLower)");
+            countConditions.add("(t.errorMessage IS NOT NULL AND LOWER(t.errorMessage) LIKE :searchTermLower)");
             
-            // Transaction IDs search
-            countQueryBuilder.append("OR LOWER(t.transactionId) LIKE :searchTerm ");
-            countQueryBuilder.append("OR LOWER(COALESCE(t.mopayTransactionId, '')) LIKE :searchTerm ");
-            countQueryBuilder.append("OR LOWER(COALESCE(t.trxId, '')) LIKE :searchTerm ");
-            
-            // Token search (for electricity tokens)
-            countQueryBuilder.append("OR LOWER(COALESCE(t.token, '')) LIKE :searchTerm ");
-            
-            // Amount search - try to match as string representation
-            countQueryBuilder.append("OR CAST(t.amount AS string) LIKE :searchTerm ");
-            // Try exact amount match if search term is numeric
-            if (searchAmount != null) {
-                countQueryBuilder.append("OR t.amount = :searchAmount ");
+            // 3. Numeric amount search
+            try {
+                BigDecimal searchAmountValue = new BigDecimal(searchTerm);
+                countConditions.add("t.amount = :searchAmountExact");
+            } catch (NumberFormatException e) {
+                // Not a valid number, skip exact amount match
             }
             
-            // Service type search (convert enum to string)
-            countQueryBuilder.append("OR LOWER(CAST(t.serviceType AS string)) LIKE :searchTerm ");
+            // 4. Service type search
+            String upperSearchTerm = searchTerm.toUpperCase();
+            StringBuilder serviceTypeConditions = new StringBuilder();
+            int serviceTypeMatchCount = 0;
+            for (EfasheServiceType st : EfasheServiceType.values()) {
+                if (st.name().equals(upperSearchTerm) || st.name().contains(upperSearchTerm) || upperSearchTerm.contains(st.name())) {
+                    if (serviceTypeMatchCount > 0) {
+                        serviceTypeConditions.append(" OR ");
+                    }
+                    serviceTypeConditions.append("t.serviceType = :serviceTypeSearch").append(st.ordinal());
+                    serviceTypeMatchCount++;
+                }
+            }
+            if (serviceTypeMatchCount > 0) {
+                countConditions.add("(" + serviceTypeConditions.toString() + ")");
+            }
             
-            // Status search
-            countQueryBuilder.append("OR LOWER(COALESCE(t.mopayStatus, '')) LIKE :searchTerm ");
-            countQueryBuilder.append("OR LOWER(COALESCE(t.efasheStatus, '')) LIKE :searchTerm ");
+            // 5. Status search
+            countConditions.add("(t.mopayStatus IS NOT NULL AND LOWER(t.mopayStatus) LIKE :searchTermLower)");
+            countConditions.add("(t.efasheStatus IS NOT NULL AND LOWER(t.efasheStatus) LIKE :searchTermLower)");
             
+            // Join all conditions with OR - ensure we have at least one condition
+            // Filter out any empty conditions (defensive programming)
+            countConditions.removeIf(String::isEmpty);
+            
+            if (!countConditions.isEmpty()) {
+                // Join with OR - this will produce: condition1 OR condition2 OR ...
+                String joinedConditions = String.join(" OR ", countConditions);
+                countQueryBuilder.append(joinedConditions);
+            } else {
+                // Fallback: if no conditions, match nothing (should not happen)
+                logger.warn("⚠️ Count search conditions list is empty for search term: {}", searchTerm);
+                countQueryBuilder.append("1=0");
+            }
             countQueryBuilder.append(") ");
         }
         if (fromDate != null) {
@@ -3667,7 +3767,13 @@ public class EfashePaymentService {
             countQuery.setParameter("customerPhone", normalizedPhone);
         }
         if (search != null && !search.trim().isEmpty() && searchTerm != null) {
-            countQuery.setParameter("searchTerm", "%" + searchTerm.toLowerCase() + "%");
+            String lowerSearchTerm = searchTerm.toLowerCase();
+            
+            // Set exact match parameter (for exact matches)
+            countQuery.setParameter("searchTermExact", searchTerm);
+            
+            // Set LIKE parameter with wildcards (for case-insensitive searches using LOWER() indexes)
+            countQuery.setParameter("searchTermLower", "%" + lowerSearchTerm + "%");
             
             // If search term is a phone number, also search with normalized version
             if (normalizedSearchPhone != null) {
@@ -3676,7 +3782,15 @@ public class EfashePaymentService {
             
             // If search term is a valid number, also try exact amount match
             if (searchAmount != null) {
-                countQuery.setParameter("searchAmount", searchAmount);
+                countQuery.setParameter("searchAmountExact", searchAmount);
+            }
+            
+            // Set service type search parameters if search term matches any enum value
+            String upperSearchTerm = searchTerm.toUpperCase();
+            for (EfasheServiceType st : EfasheServiceType.values()) {
+                if (st.name().equals(upperSearchTerm) || st.name().contains(upperSearchTerm) || upperSearchTerm.contains(st.name())) {
+                    countQuery.setParameter("serviceTypeSearch" + st.ordinal(), st);
+                }
             }
         }
         if (fromDate != null) {
@@ -3689,11 +3803,7 @@ public class EfashePaymentService {
         // Get total count
         long totalElements = (Long) countQuery.getSingleResult();
         
-        // Apply pagination
-        int offset = page * size;
-        query.setFirstResult(offset);
-        query.setMaxResults(size);
-        
+        // Pagination is already set above, no need to set again
         @SuppressWarnings("unchecked")
         List<EfasheTransaction> transactions = (List<EfasheTransaction>) query.getResultList();
         

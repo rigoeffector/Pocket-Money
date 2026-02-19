@@ -303,12 +303,15 @@ public class MopayPaymentService {
 
     /**
      * Get account holder information for a phone number
-     * GET api/v1/momo/accountholder/information/{phone}
+     * Uses /information endpoint which returns name (firstname, lastname)
+     * Note: /identification endpoint only returns NID, not names
+     * GET api/v1/momo/accountholder/information/{phone} - returns name
      * 
      * @param phone Phone number (e.g., "250794230137")
      * @return MopayECWAccountHolderResponse with customer information
      */
     public MopayECWAccountHolderResponse getAccountHolderInformation(String phone) {
+        // Use /information endpoint (returns name information: firstname, lastname)
         String url = mopayPaymentApiUrl + "/api/v1/momo/accountholder/information/" + phone;
         
         logger.info("Getting MopayECW account holder information - URL: {}, Phone: {}", url, phone);
@@ -321,20 +324,34 @@ public class MopayPaymentService {
         HttpEntity<String> entity = new HttpEntity<>(headers);
 
         try {
-            ResponseEntity<MopayECWAccountHolderResponse> response = restTemplate.exchange(
+            // First get raw response to log what we actually receive
+            ResponseEntity<String> rawResponse = restTemplate.exchange(
                     url,
                     HttpMethod.GET,
                     entity,
-                    MopayECWAccountHolderResponse.class
+                    String.class
             );
             
-            MopayECWAccountHolderResponse responseBody = response.getBody();
-            int httpStatusCode = response.getStatusCode().value();
+            int httpStatusCode = rawResponse.getStatusCode().value();
+            String rawResponseBody = rawResponse.getBody();
             logger.info("MopayECW account holder info HTTP response: {}", httpStatusCode);
-            logger.debug("MopayECW account holder info response body: {}", responseBody);
+            logger.info("MopayECW account holder info RAW response body: {}", rawResponseBody);
             
-            if (responseBody == null) {
-                logger.warn("MopayECW account holder info returned null response body");
+            if (rawResponseBody == null || rawResponseBody.trim().isEmpty()) {
+                logger.warn("MopayECW account holder info returned null or empty response body");
+                MopayECWAccountHolderResponse errorResponse = new MopayECWAccountHolderResponse();
+                errorResponse.setStatus(httpStatusCode);
+                return errorResponse;
+            }
+            
+            // Parse JSON response
+            ObjectMapper objectMapper = new ObjectMapper();
+            MopayECWAccountHolderResponse responseBody;
+            try {
+                responseBody = objectMapper.readValue(rawResponseBody, MopayECWAccountHolderResponse.class);
+            } catch (Exception e) {
+                logger.error("Failed to parse MopayECW account holder response JSON: {}", e.getMessage());
+                logger.error("Raw response was: {}", rawResponseBody);
                 MopayECWAccountHolderResponse errorResponse = new MopayECWAccountHolderResponse();
                 errorResponse.setStatus(httpStatusCode);
                 return errorResponse;
@@ -345,7 +362,10 @@ public class MopayPaymentService {
                 responseBody.setStatus(httpStatusCode);
             }
             
-            logger.info("MopayECW account holder info - Name: {}, Status: {}", responseBody.getFullName(), responseBody.getStatus());
+            // Log detailed information about the response
+            logger.info("MopayECW account holder info parsed - Status: {}, Firstname: '{}', Lastname: '{}', FullName: '{}'", 
+                responseBody.getStatus(), responseBody.getFirstname(), responseBody.getLastname(), responseBody.getFullName());
+            
             return responseBody;
         } catch (HttpClientErrorException e) {
             int statusCode = e.getStatusCode().value();

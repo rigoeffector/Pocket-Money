@@ -8,6 +8,8 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -90,6 +92,9 @@ public class PaymentService {
 
     @Value("${payment.provider:mopay_open_api}")
     private String paymentProvider;
+    
+    @Value("${app.base-url:https://api.pochi.info}")
+    private String baseUrl;
 
     private enum PaymentProvider {
         MOPAY_OPEN_API,
@@ -3179,6 +3184,27 @@ public class PaymentService {
             response.setCommissionSettings(commissionInfoList);
         }
         
+        // Load transfer recipients from database if available (for PAY_CUSTOMER transactions)
+        if (transaction.getTransferRecipients() != null && !transaction.getTransferRecipients().trim().isEmpty()) {
+            try {
+                ObjectMapper objectMapper = new ObjectMapper();
+                List<PaymentResponse.TransferRecipientInfo> recipients = objectMapper.readValue(
+                    transaction.getTransferRecipients(),
+                    objectMapper.getTypeFactory().constructCollectionType(List.class, PaymentResponse.TransferRecipientInfo.class)
+                );
+                response.setTransferRecipients(recipients);
+                logger.debug("Loaded {} transfer recipients from database for transaction {}", recipients.size(), transaction.getId());
+            } catch (Exception e) {
+                logger.warn("Failed to deserialize transfer recipients from database for transaction {}: {}", 
+                    transaction.getId(), e.getMessage());
+                // Set empty list if deserialization fails
+                response.setTransferRecipients(new java.util.ArrayList<>());
+            }
+        } else {
+            // Set empty list if no transfer recipients stored
+            response.setTransferRecipients(new java.util.ArrayList<>());
+        }
+        
         // Add payment method information
         // MOMO payments: message contains "MOPAY_ID:" (MoPay transaction ID from MoPay API), phoneNumber is the payer's phone
         // NFC payments: message does NOT contain "MOPAY_ID:", phoneNumber is the receiver's phone
@@ -3900,8 +3926,114 @@ public class PaymentService {
     }
 
     /**
+     * Validate pay customer request and get recipient names
+     * This method validates the request and fetches account holder names for all recipients
+     * without initiating payment. Use this to show names to user for confirmation.
+     * 
+     * @param request PayCustomerRequest with transfer details
+     * @return PayCustomerValidateResponse with recipient names
+     */
+    public com.pocketmoney.pocketmoney.dto.PayCustomerValidateResponse validatePayCustomer(PayCustomerRequest request) {
+        logger.info("Validating customer payment request - Amount: {}, Transfers: {}", 
+            request.getAmount(), request.getTransfers() != null ? request.getTransfers().size() : 0);
+
+        // Validate transfers
+        if (request.getTransfers() == null || request.getTransfers().isEmpty()) {
+            throw new RuntimeException("At least one transfer is required");
+        }
+
+        // Get payer phone from either account_no or phone field
+        String payerPhone = request.getPayerPhoneNumber();
+        if (payerPhone == null || payerPhone.trim().isEmpty()) {
+            throw new RuntimeException("Payer phone number is required (provide either 'account_no' or 'phone' field)");
+        }
+        
+        // Normalize payer phone
+        String normalizedPayerPhone = normalizePhoneTo12Digits(payerPhone);
+        logger.info("Payer phone normalization - Original: '{}', Normalized: '{}'", payerPhone, normalizedPayerPhone);
+
+        // Calculate total amount
+        BigDecimal totalAmount = request.getTransfers().stream()
+            .map(PayCustomerRequest.Transfer::getAmount)
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        // Get account holder information for each transfer recipient
+        List<com.pocketmoney.pocketmoney.dto.PayCustomerValidateResponse.RecipientInfo> recipients = new java.util.ArrayList<>();
+        logger.info("=== Getting account holder information for transfer recipients ===");
+        
+        for (int i = 0; i < request.getTransfers().size(); i++) {
+            PayCustomerRequest.Transfer transfer = request.getTransfers().get(i);
+            
+            // Get phone number from either account_no or phone field
+            String recipientPhone = transfer.getPhoneNumber();
+            if (recipientPhone == null || recipientPhone.trim().isEmpty()) {
+                throw new RuntimeException("Transfer #" + (i + 1) + " missing phone number (account_no or phone field required)");
+            }
+            
+            // Normalize phone number
+            if (recipientPhone.length() != 12) {
+                try {
+                    recipientPhone = normalizePhoneTo12Digits(recipientPhone);
+                } catch (Exception e) {
+                    throw new RuntimeException("Invalid receiver phone number: " + recipientPhone + ". Error: " + e.getMessage());
+                }
+            }
+            
+            // Initialize recipient info
+            com.pocketmoney.pocketmoney.dto.PayCustomerValidateResponse.RecipientInfo recipientInfo = 
+                new com.pocketmoney.pocketmoney.dto.PayCustomerValidateResponse.RecipientInfo();
+            recipientInfo.setPhone(recipientPhone);
+            recipientInfo.setAmount(transfer.getAmount());
+            recipientInfo.setName(null); // Default to null
+            recipientInfo.setNameAvailable(false);
+            recipientInfo.setErrorMessage(null);
+            
+            // Get account holder information
+            try {
+                MopayECWAccountHolderResponse accountHolderInfo = mopayPaymentService.getAccountHolderInformation(recipientPhone);
+                if (accountHolderInfo != null && accountHolderInfo.getStatus() != null && accountHolderInfo.getStatus() == 200) {
+                    String fullName = accountHolderInfo.getFullName();
+                    if (fullName != null && !fullName.trim().isEmpty()) {
+                        recipientInfo.setName(fullName);
+                        recipientInfo.setNameAvailable(true);
+                        logger.info("✅ Recipient #{} - Phone: {}, Name: {}", i + 1, recipientPhone, fullName);
+                    } else {
+                        recipientInfo.setErrorMessage("Account holder info returned status 200 but no name available");
+                        logger.warn("⚠️ Recipient #{} - Phone: {}, Account holder info returned status 200 but no name available", i + 1, recipientPhone);
+                    }
+                } else {
+                    String errorMsg = "Account holder info returned non-success status: " + 
+                        (accountHolderInfo != null ? accountHolderInfo.getStatus() : "null");
+                    recipientInfo.setErrorMessage(errorMsg);
+                    logger.warn("⚠️ Recipient #{} - Phone: {}, {}", i + 1, recipientPhone, errorMsg);
+                }
+            } catch (Exception e) {
+                String errorMsg = "Failed to get account holder information: " + e.getMessage();
+                recipientInfo.setErrorMessage(errorMsg);
+                logger.warn("⚠️ Failed to get account holder information for recipient #{} (phone: {}) - Error: {}", 
+                    i + 1, recipientPhone, e.getMessage());
+            }
+            
+            recipients.add(recipientInfo);
+        }
+
+        // Build response
+        com.pocketmoney.pocketmoney.dto.PayCustomerValidateResponse response = 
+            new com.pocketmoney.pocketmoney.dto.PayCustomerValidateResponse();
+        response.setPayerPhone(normalizedPayerPhone);
+        response.setTotalAmount(totalAmount);
+        response.setRecipients(recipients);
+        
+        logger.info("✅ Validation complete - Payer: {}, Total Amount: {}, Recipients: {}", 
+            normalizedPayerPhone, totalAmount, recipients.size());
+        
+        return response;
+    }
+
+    /**
      * Pay customer - initiate payment to a customer using MoPay
      * This is different from paying for services - this is paying a customer directly
+     * Call validatePayCustomer first to get recipient names for user confirmation
      */
     public PaymentResponse payCustomer(PayCustomerRequest request) {
         logger.info("Initiating customer payment - Amount: {}, Phone: {}, Transfers: {}", 
@@ -3959,9 +4091,15 @@ public class PaymentService {
             throw new RuntimeException("PAY_CUSTOMER category is not active");
         }
 
+        // Get payer phone from either account_no or phone field
+        String payerPhone = request.getPayerPhoneNumber();
+        if (payerPhone == null || payerPhone.trim().isEmpty()) {
+            throw new RuntimeException("Payer phone number is required (provide either 'account_no' or 'phone' field)");
+        }
+        
         // Normalize payer phone (DEBIT)
-        String normalizedPayerPhone = normalizePhoneTo12Digits(request.getPhone());
-        logger.info("Payer phone normalization - Original: '{}', Normalized: '{}'", request.getPhone(), normalizedPayerPhone);
+        String normalizedPayerPhone = normalizePhoneTo12Digits(payerPhone);
+        logger.info("Payer phone normalization - Original: '{}', Normalized: '{}'", payerPhone, normalizedPayerPhone);
 
         // Validate transfers
         if (request.getTransfers() == null || request.getTransfers().isEmpty()) {
@@ -3972,19 +4110,32 @@ public class PaymentService {
         logger.info("PAY_CUSTOMER: Using BIZAO (ECW) payment endpoint");
 
         // Get account holder information for each transfer recipient BEFORE payment
+        // Store recipient names to return in response
+        List<PaymentResponse.TransferRecipientInfo> transferRecipients = new java.util.ArrayList<>();
         logger.info("=== Getting account holder information for transfer recipients ===");
         for (int i = 0; i < request.getTransfers().size(); i++) {
             PayCustomerRequest.Transfer transfer = request.getTransfers().get(i);
-            String recipientPhone = String.valueOf(transfer.getPhone());
+            
+            // Get phone number from either account_no or phone field
+            String recipientPhone = transfer.getPhoneNumber();
+            if (recipientPhone == null || recipientPhone.trim().isEmpty()) {
+                throw new RuntimeException("Transfer #" + (i + 1) + " missing phone number (account_no or phone field required)");
+            }
             
             // Normalize phone number
             if (recipientPhone.length() != 12) {
                 try {
                     recipientPhone = normalizePhoneTo12Digits(recipientPhone);
                 } catch (Exception e) {
-                    throw new RuntimeException("Invalid receiver phone number: " + transfer.getPhone() + ". Error: " + e.getMessage());
+                    throw new RuntimeException("Invalid receiver phone number: " + recipientPhone + ". Error: " + e.getMessage());
                 }
             }
+            
+            // Initialize recipient info
+            PaymentResponse.TransferRecipientInfo recipientInfo = new PaymentResponse.TransferRecipientInfo();
+            recipientInfo.setPhone(recipientPhone);
+            recipientInfo.setAmount(transfer.getAmount());
+            recipientInfo.setName(null); // Default to null if name cannot be retrieved
             
             // Get account holder information
             try {
@@ -3992,6 +4143,7 @@ public class PaymentService {
                 if (accountHolderInfo != null && accountHolderInfo.getStatus() != null && accountHolderInfo.getStatus() == 200) {
                     String fullName = accountHolderInfo.getFullName();
                     if (fullName != null && !fullName.trim().isEmpty()) {
+                        recipientInfo.setName(fullName);
                         logger.info("✅ Recipient #{} - Phone: {}, Name: {}", i + 1, recipientPhone, fullName);
                     } else {
                         logger.warn("⚠️ Recipient #{} - Phone: {}, Account holder info returned status 200 but no name available", i + 1, recipientPhone);
@@ -4005,47 +4157,67 @@ public class PaymentService {
                     i + 1, recipientPhone, e.getMessage());
                 // Don't fail the payment if account holder info fails - just log warning
             }
+            
+            transferRecipients.add(recipientInfo);
         }
 
         String message = request.getMessage() != null ? request.getMessage() : "Customer payment from " + receiver.getCompanyName();
-        String requestTransactionId = request.getTransaction_id();
+        String requestTransactionId = request.getTransactionId();
         
         if (requestTransactionId == null || requestTransactionId.trim().isEmpty()) {
             requestTransactionId = generateTransactionId();
         }
 
+        // Build callback URL if not provided
+        String callbackUrl = request.getCallback_url();
+        if (callbackUrl == null || callbackUrl.trim().isEmpty()) {
+            // Generate default callback URL - same as used for other payment services
+            // The callback endpoint is at /api/v1/payments/callback
+            callbackUrl = baseUrl + "/api/v1/payments/callback";
+            logger.info("No callback URL provided, using default: {}", callbackUrl);
+        }
+        
         // Build BIZAO (ECW) payment request
         MopayECWPaymentInitiateRequest mopayECWRequest = new MopayECWPaymentInitiateRequest();
         mopayECWRequest.setTransactionId(requestTransactionId);
         mopayECWRequest.setAccount_no(normalizedPayerPhone);
-        mopayECWRequest.setTitle("payment");
-        mopayECWRequest.setDetails("payment");
-        mopayECWRequest.setPayment_type("momo");
+        mopayECWRequest.setTitle(request.getTitle() != null ? request.getTitle() : "payment");
+        mopayECWRequest.setDetails(request.getDetails() != null ? request.getDetails() : "payment");
+        mopayECWRequest.setPayment_type(request.getPayment_type() != null ? request.getPayment_type() : "momo");
         mopayECWRequest.setAmount(request.getAmount());
         mopayECWRequest.setCurrency(request.getCurrency() != null ? request.getCurrency() : "RWF");
         mopayECWRequest.setMessage(message != null ? message : "payment");
+        mopayECWRequest.setCallback_url(callbackUrl); // Set callback URL for webhook notifications
+        logger.info("Setting callback URL for PAY_CUSTOMER payment: {}", callbackUrl);
 
         List<MopayECWPaymentInitiateRequest.Transfer> transfers = new java.util.ArrayList<>();
         for (int i = 0; i < request.getTransfers().size(); i++) {
             PayCustomerRequest.Transfer transfer = request.getTransfers().get(i);
             MopayECWPaymentInitiateRequest.Transfer mopayTransfer = new MopayECWPaymentInitiateRequest.Transfer();
-            String transferTransactionId = transfer.getTransaction_id();
+            
+            // Get transaction ID from either field
+            String transferTransactionId = transfer.getTransactionId();
             if (transferTransactionId == null || transferTransactionId.trim().isEmpty()) {
                 transferTransactionId = requestTransactionId + "-" + (i + 1);
             }
             mopayTransfer.setTransactionId(transferTransactionId);
             mopayTransfer.setAmount(transfer.getAmount());
-            String normalizedReceiverPhone = String.valueOf(transfer.getPhone());
+            
+            // Get phone number from either account_no or phone field
+            String normalizedReceiverPhone = transfer.getPhoneNumber();
+            if (normalizedReceiverPhone == null || normalizedReceiverPhone.trim().isEmpty()) {
+                throw new RuntimeException("Transfer #" + (i + 1) + " missing phone number (account_no or phone field required)");
+            }
             if (normalizedReceiverPhone.length() != 12) {
                 try {
                     normalizedReceiverPhone = normalizePhoneTo12Digits(normalizedReceiverPhone);
                 } catch (Exception e) {
-                    throw new RuntimeException("Invalid receiver phone number: " + transfer.getPhone() + ". Error: " + e.getMessage());
+                    throw new RuntimeException("Invalid receiver phone number: " + normalizedReceiverPhone + ". Error: " + e.getMessage());
                 }
             }
             mopayTransfer.setAccount_no(normalizedReceiverPhone);
-            mopayTransfer.setPayment_type("momo");
-            mopayTransfer.setCurrency(request.getCurrency() != null ? request.getCurrency() : "RWF");
+            mopayTransfer.setPayment_type(transfer.getPayment_type() != null ? transfer.getPayment_type() : "momo");
+            mopayTransfer.setCurrency(transfer.getCurrency() != null ? transfer.getCurrency() : (request.getCurrency() != null ? request.getCurrency() : "RWF"));
             mopayTransfer.setMessage(transfer.getMessage() != null ? transfer.getMessage() : "payment from Dynaroo");
             transfers.add(mopayTransfer);
         }
@@ -4067,6 +4239,17 @@ public class PaymentService {
         transaction.setAmount(request.getAmount());
         transaction.setPhoneNumber(normalizedPayerPhone);
         transaction.setMessage(message);
+
+        // Save transfer recipients as JSON (names, phones, amounts)
+        try {
+            ObjectMapper objectMapper = new ObjectMapper();
+            String transferRecipientsJson = objectMapper.writeValueAsString(transferRecipients);
+            transaction.setTransferRecipients(transferRecipientsJson);
+            logger.info("✅ Saved transfer recipients to transaction: {} recipients", transferRecipients.size());
+        } catch (Exception e) {
+            logger.error("Failed to serialize transfer recipients to JSON: {}", e.getMessage());
+            // Don't fail the transaction if JSON serialization fails
+        }
 
         // Generate transaction ID
         String transactionId = generateTransactionId();
@@ -4097,7 +4280,20 @@ public class PaymentService {
         logger.info("Customer payment transaction created - ID: {}, Status: {}, MoPay ID: {}", 
             savedTransaction.getId(), savedTransaction.getStatus(), mopayTransactionId);
 
-        return mapToPaymentResponse(savedTransaction);
+        // Map to response and include transfer recipients with names
+        PaymentResponse response = mapToPaymentResponse(savedTransaction);
+        // Ensure transferRecipients is always set (even if empty) so it appears in JSON response
+        if (transferRecipients == null) {
+            transferRecipients = new java.util.ArrayList<>();
+        }
+        response.setTransferRecipients(transferRecipients);
+        logger.info("✅ Payment response includes {} transfer recipients with names", transferRecipients.size());
+        for (int i = 0; i < transferRecipients.size(); i++) {
+            PaymentResponse.TransferRecipientInfo recipient = transferRecipients.get(i);
+            logger.info("  Recipient #{}: Phone={}, Name={}, Amount={}", 
+                i + 1, recipient.getPhone(), recipient.getName(), recipient.getAmount());
+        }
+        return response;
     }
 }
 

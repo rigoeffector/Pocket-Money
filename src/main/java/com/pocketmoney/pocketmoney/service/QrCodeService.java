@@ -196,7 +196,7 @@ public class QrCodeService {
         
         // Create a larger image to accommodate QR code + text
         int padding = 20;
-        int textHeight = 40;
+        int textHeight = 50; // Increased to accommodate "MOMO CODE: " label
         int totalWidth = qrWidth;
         int totalHeight = qrHeight + textHeight + padding;
         
@@ -210,15 +210,16 @@ public class QrCodeService {
         // Draw QR code at the top
         g2d.drawImage(qrImage, 0, 0, null);
         
-        // Draw MomoCode text below QR code
+        // Draw MomoCode text below QR code with label "MOMO CODE: "
         g2d.setColor(Color.BLACK);
         g2d.setFont(new Font("Arial", Font.BOLD, 18));
         FontMetrics fm = g2d.getFontMetrics();
-        int textWidth = fm.stringWidth(momoCode);
+        String momoCodeText = "MOMO CODE: " + momoCode;
+        int textWidth = fm.stringWidth(momoCodeText);
         int xPosition = (totalWidth - textWidth) / 2;
         int yPosition = qrHeight + padding + fm.getAscent();
         
-        g2d.drawString(momoCode, xPosition, yPosition);
+        g2d.drawString(momoCodeText, xPosition, yPosition);
         
         g2d.dispose();
         return compositeImage;

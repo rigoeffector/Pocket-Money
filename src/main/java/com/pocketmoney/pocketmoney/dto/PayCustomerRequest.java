@@ -1,7 +1,6 @@
 package com.pocketmoney.pocketmoney.dto;
 
 import jakarta.validation.constraints.DecimalMin;
-import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import lombok.Data;
 
@@ -21,10 +20,42 @@ public class PayCustomerRequest {
     
     private String currency = "RWF";
     
-    @NotBlank(message = "Phone number is required")
-    private String phone; // DEBIT - phone as string
+    private String phone; // DEBIT - phone as string (legacy field)
+    
+    @JsonProperty("account_no")
+    private String account_no; // DEBIT - phone as string (preferred field)
+    
+    @JsonProperty("payment_type")
+    private String payment_type; // Optional, defaults to "momo"
+    
+    private String title; // Optional, defaults to "payment"
+    
+    private String details; // Optional, defaults to "payment"
+    
+    @JsonProperty("transactionId")
+    private String transactionId; // Alternative to transaction_id
     
     private String payment_mode = "MOBILE";
+    
+    // Helper method to get payer phone number from either field
+    public String getPayerPhoneNumber() {
+        if (account_no != null && !account_no.trim().isEmpty()) {
+            return account_no.trim();
+        } else if (phone != null && !phone.trim().isEmpty()) {
+            return phone.trim();
+        }
+        return null;
+    }
+    
+    // Helper method to get transaction ID from either field
+    public String getTransactionId() {
+        if (transactionId != null && !transactionId.trim().isEmpty()) {
+            return transactionId;
+        } else if (transaction_id != null && !transaction_id.trim().isEmpty()) {
+            return transaction_id;
+        }
+        return null;
+    }
     
     private String message;
     
@@ -43,13 +74,43 @@ public class PayCustomerRequest {
         @JsonProperty("transaction_id")
         private String transaction_id; // Optional
         
+        @JsonProperty("transactionId")
+        private String transactionId; // Alternative field name
+        
         @NotNull(message = "Transfer amount is required")
         @DecimalMin(value = "0.01", message = "Transfer amount must be greater than 0")
         private BigDecimal amount;
         
-        @NotNull(message = "Receiver phone number is required")
-        private Long phone; // RECEIVER - phone as number
+        private Long phone; // RECEIVER - phone as number (legacy field)
+        
+        @JsonProperty("account_no")
+        private String account_no; // RECEIVER - phone as string (preferred field)
+        
+        @JsonProperty("payment_type")
+        private String payment_type; // Optional
+        
+        private String currency; // Optional
         
         private String message;
+        
+        // Helper method to get phone number from either field
+        public String getPhoneNumber() {
+            if (account_no != null && !account_no.trim().isEmpty()) {
+                return account_no.trim();
+            } else if (phone != null) {
+                return String.valueOf(phone);
+            }
+            return null;
+        }
+        
+        // Helper method to get transaction ID from either field
+        public String getTransactionId() {
+            if (transactionId != null && !transactionId.trim().isEmpty()) {
+                return transactionId;
+            } else if (transaction_id != null && !transaction_id.trim().isEmpty()) {
+                return transaction_id;
+            }
+            return null;
+        }
     }
 }

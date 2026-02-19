@@ -28,6 +28,7 @@ import com.pocketmoney.pocketmoney.dto.MerchantTopUpRequest;
 import com.pocketmoney.pocketmoney.dto.MomoPaymentRequest;
 import com.pocketmoney.pocketmoney.dto.PaginatedResponse;
 import com.pocketmoney.pocketmoney.dto.PayCustomerRequest;
+import com.pocketmoney.pocketmoney.dto.PayCustomerValidateResponse;
 import com.pocketmoney.pocketmoney.dto.PayLoanRequest;
 import com.pocketmoney.pocketmoney.dto.PaymentRequest;
 import com.pocketmoney.pocketmoney.dto.PaymentResponse;
@@ -119,10 +120,33 @@ public class PaymentController {
     }
 
     /**
+     * Validate pay customer request and get recipient names
+     * POST /api/payments/pay/customer/validate
+     * 
+     * This endpoint validates the payment request and fetches account holder names
+     * for all recipients without initiating payment. Use this to show names to user
+     * for confirmation before proceeding with payment.
+     * Requires authentication (RECEIVER role).
+     */
+    @PostMapping("/pay/customer/validate")
+    public ResponseEntity<ApiResponse<PayCustomerValidateResponse>> validatePayCustomer(
+            @Valid @RequestBody PayCustomerRequest request) {
+        try {
+            PayCustomerValidateResponse response = paymentService.validatePayCustomer(request);
+            return ResponseEntity.ok(ApiResponse.success("Recipient names retrieved successfully", response));
+        } catch (RuntimeException e) {
+            logger.error("Error validating customer payment: ", e);
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    /**
      * Pay customer - initiate payment to a customer using MoPay
      * POST /api/payments/pay/customer
      * 
      * This endpoint allows merchants to pay customers directly (not for services).
+     * After validation, call this endpoint to proceed with the actual payment.
      * Requires authentication (RECEIVER role).
      */
     @PostMapping("/pay/customer")

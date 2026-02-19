@@ -1,5 +1,6 @@
 package com.pocketmoney.pocketmoney.dto;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.pocketmoney.pocketmoney.entity.TransactionStatus;
 import com.pocketmoney.pocketmoney.entity.TransactionType;
 import com.pocketmoney.pocketmoney.entity.TopUpType;
@@ -47,5 +48,18 @@ public class PaymentResponse {
     // Loan information (only for LOAN top-up transactions)
     private UUID loanId; // Loan ID if this is a LOAN transaction
     private LoanInfo loanInfo; // Loan details if this is a LOAN transaction
+    
+    // Transfer recipient information (for PAY_CUSTOMER transactions)
+    @JsonInclude(JsonInclude.Include.ALWAYS) // Always include, even if null or empty
+    private List<TransferRecipientInfo> transferRecipients; // List of transfer recipients with their names
+    
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class TransferRecipientInfo {
+        private String phone; // Recipient phone number
+        private String name; // Recipient name from account holder information
+        private BigDecimal amount; // Transfer amount
+    }
 }
 

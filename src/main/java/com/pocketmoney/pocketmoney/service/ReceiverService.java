@@ -387,7 +387,9 @@ public class ReceiverService {
         
         // Update MoMo code if provided
         if (request.getMomoCode() != null) {
-            receiver.setMomoCode(request.getMomoCode().trim());
+            // Allow empty string to clear momoCode, or set the trimmed value
+            String momoCode = request.getMomoCode().trim();
+            receiver.setMomoCode(momoCode.isEmpty() ? null : momoCode);
         }
         
         // Update flexible mode if provided
@@ -2258,6 +2260,13 @@ public class ReceiverService {
             // Normalize phone number: remove non-digit characters
             String normalizedMomoPhone = request.getMomoAccountPhone().replaceAll("[^0-9]", "");
             submerchant.setMomoAccountPhone(normalizedMomoPhone);
+        }
+        
+        // Update MoMo code if provided
+        if (request.getMomoCode() != null) {
+            // Allow empty string to clear momoCode, or set the trimmed value
+            String momoCode = request.getMomoCode().trim();
+            submerchant.setMomoCode(momoCode.isEmpty() ? null : momoCode);
         }
         
         // Note: assignedBalance, discountPercentage, userBonusPercentage are typically managed 

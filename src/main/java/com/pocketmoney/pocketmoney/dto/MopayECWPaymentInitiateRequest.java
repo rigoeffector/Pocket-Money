@@ -23,6 +23,9 @@ public class MopayECWPaymentInitiateRequest {
     private String currency = "RWF";
     private String message;
     
+    @JsonProperty("callback_url")
+    private String callback_url; // Optional callback URL for webhook notifications
+    
     private List<Transfer> transfers;
 
     @Data

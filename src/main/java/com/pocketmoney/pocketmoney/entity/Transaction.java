@@ -83,6 +83,11 @@ public class Transaction {
     @Enumerated(EnumType.STRING)
     private TopUpType topUpType; // Type of top-up: MOMO, CASH, or LOAN (only for TOP_UP transactions)
 
+    // Transfer recipients information (for PAY_CUSTOMER transactions)
+    // Stored as JSON: [{"phone":"250788123456","name":"John Doe","amount":1000}, ...]
+    @Column(name = "transfer_recipients", columnDefinition = "TEXT")
+    private String transferRecipients; // JSON string of transfer recipients with names, phones, and amounts
+
     @Column(nullable = false, updatable = false)
     @CreationTimestamp
     private LocalDateTime createdAt;
