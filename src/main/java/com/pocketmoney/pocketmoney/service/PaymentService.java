@@ -24,6 +24,7 @@ import com.pocketmoney.pocketmoney.dto.LoanInfo;
 import com.pocketmoney.pocketmoney.dto.LoanResponse;
 import com.pocketmoney.pocketmoney.dto.MerchantBalanceInfo;
 import com.pocketmoney.pocketmoney.dto.MerchantTopUpRequest;
+import com.pocketmoney.pocketmoney.dto.MopayECWAccountHolderResponse;
 import com.pocketmoney.pocketmoney.dto.MopayECWPaymentInitiateRequest;
 import com.pocketmoney.pocketmoney.dto.MopayECWPaymentResponse;
 import com.pocketmoney.pocketmoney.dto.MopayOpenApiInitiateRequest;
@@ -3967,100 +3968,95 @@ public class PaymentService {
             throw new RuntimeException("At least one transfer is required");
         }
 
-        PaymentProvider provider = resolvePaymentProvider();
-        logger.info("MOMO payment provider resolved to: {}", provider);
+        // PAY_CUSTOMER always uses BIZAO (ECW) endpoint
+        logger.info("PAY_CUSTOMER: Using BIZAO (ECW) payment endpoint");
 
-        // Create MoPay initiate request
-        MopayOpenApiInitiateRequest moPayRequest = null;
-        MopayECWPaymentInitiateRequest mopayECWRequest = null;
+        // Get account holder information for each transfer recipient BEFORE payment
+        logger.info("=== Getting account holder information for transfer recipients ===");
+        for (int i = 0; i < request.getTransfers().size(); i++) {
+            PayCustomerRequest.Transfer transfer = request.getTransfers().get(i);
+            String recipientPhone = String.valueOf(transfer.getPhone());
+            
+            // Normalize phone number
+            if (recipientPhone.length() != 12) {
+                try {
+                    recipientPhone = normalizePhoneTo12Digits(recipientPhone);
+                } catch (Exception e) {
+                    throw new RuntimeException("Invalid receiver phone number: " + transfer.getPhone() + ". Error: " + e.getMessage());
+                }
+            }
+            
+            // Get account holder information
+            try {
+                MopayECWAccountHolderResponse accountHolderInfo = mopayPaymentService.getAccountHolderInformation(recipientPhone);
+                if (accountHolderInfo != null && accountHolderInfo.getStatus() != null && accountHolderInfo.getStatus() == 200) {
+                    String fullName = accountHolderInfo.getFullName();
+                    if (fullName != null && !fullName.trim().isEmpty()) {
+                        logger.info("✅ Recipient #{} - Phone: {}, Name: {}", i + 1, recipientPhone, fullName);
+                    } else {
+                        logger.warn("⚠️ Recipient #{} - Phone: {}, Account holder info returned status 200 but no name available", i + 1, recipientPhone);
+                    }
+                } else {
+                    logger.warn("⚠️ Recipient #{} - Phone: {}, Account holder info returned non-success status: {}", 
+                        i + 1, recipientPhone, accountHolderInfo != null ? accountHolderInfo.getStatus() : "null");
+                }
+            } catch (Exception e) {
+                logger.warn("⚠️ Failed to get account holder information for recipient #{} (phone: {}) - Error: {}. Continuing with payment...", 
+                    i + 1, recipientPhone, e.getMessage());
+                // Don't fail the payment if account holder info fails - just log warning
+            }
+        }
+
         String message = request.getMessage() != null ? request.getMessage() : "Customer payment from " + receiver.getCompanyName();
-        String paymentMode = request.getPayment_mode() != null ? request.getPayment_mode() : "MOBILE";
         String requestTransactionId = request.getTransaction_id();
-
-        if (provider == PaymentProvider.MOPAY_OPEN_API) {
-            moPayRequest = new MopayOpenApiInitiateRequest();
-            moPayRequest.setTransaction_id(requestTransactionId);
-            moPayRequest.setAmount(request.getAmount());
-            moPayRequest.setCurrency(request.getCurrency() != null ? request.getCurrency() : "RWF");
-            moPayRequest.setPhone(normalizedPayerPhone);
-            moPayRequest.setPayment_mode(paymentMode);
-            moPayRequest.setMessage(message);
-            moPayRequest.setCallback_url(request.getCallback_url());
-
-            // Convert transfers - normalize receiver phones
-            List<MopayOpenApiInitiateRequest.Transfer> transfers = request.getTransfers().stream()
-                .map(transfer -> {
-                    MopayOpenApiInitiateRequest.Transfer moPayTransfer = new MopayOpenApiInitiateRequest.Transfer();
-                    moPayTransfer.setTransaction_id(transfer.getTransaction_id());
-                    moPayTransfer.setAmount(transfer.getAmount());
-                    // Transfer phone is already Long, but we should validate it's 12 digits
-                    String normalizedReceiverPhone = String.valueOf(transfer.getPhone());
-                    if (normalizedReceiverPhone.length() != 12) {
-                        // Try to normalize if it's not 12 digits
-                        try {
-                            normalizedReceiverPhone = normalizePhoneTo12Digits(normalizedReceiverPhone);
-                        } catch (Exception e) {
-                            throw new RuntimeException("Invalid receiver phone number: " + transfer.getPhone() + ". Error: " + e.getMessage());
-                        }
-                    }
-                    moPayTransfer.setPhone(Long.parseLong(normalizedReceiverPhone));
-                    moPayTransfer.setMessage(transfer.getMessage() != null ? transfer.getMessage() : "Payment from " + receiver.getCompanyName());
-                    return moPayTransfer;
-                })
-                .collect(Collectors.toList());
-
-            moPayRequest.setTransfers(transfers);
-        } else {
-            if (requestTransactionId == null || requestTransactionId.trim().isEmpty()) {
-                requestTransactionId = generateTransactionId();
-            }
-
-            mopayECWRequest = new MopayECWPaymentInitiateRequest();
-            mopayECWRequest.setTransactionId(requestTransactionId);
-            mopayECWRequest.setAccount_no(normalizedPayerPhone);
-            mopayECWRequest.setTitle(message);
-            mopayECWRequest.setDetails(message);
-            mopayECWRequest.setPayment_type("momo");
-            mopayECWRequest.setAmount(request.getAmount());
-            mopayECWRequest.setCurrency(request.getCurrency() != null ? request.getCurrency() : "RWF");
-            mopayECWRequest.setMessage(message);
-
-            List<MopayECWPaymentInitiateRequest.Transfer> transfers = new java.util.ArrayList<>();
-            for (int i = 0; i < request.getTransfers().size(); i++) {
-                PayCustomerRequest.Transfer transfer = request.getTransfers().get(i);
-                MopayECWPaymentInitiateRequest.Transfer mopayTransfer = new MopayECWPaymentInitiateRequest.Transfer();
-                String transferTransactionId = transfer.getTransaction_id();
-                if (transferTransactionId == null || transferTransactionId.trim().isEmpty()) {
-                    transferTransactionId = requestTransactionId + "-" + (i + 1);
-                }
-                mopayTransfer.setTransactionId(transferTransactionId);
-                mopayTransfer.setAmount(transfer.getAmount());
-                String normalizedReceiverPhone = String.valueOf(transfer.getPhone());
-                if (normalizedReceiverPhone.length() != 12) {
-                    try {
-                        normalizedReceiverPhone = normalizePhoneTo12Digits(normalizedReceiverPhone);
-                    } catch (Exception e) {
-                        throw new RuntimeException("Invalid receiver phone number: " + transfer.getPhone() + ". Error: " + e.getMessage());
-                    }
-                }
-                mopayTransfer.setAccount_no(normalizedReceiverPhone);
-                mopayTransfer.setPayment_type("momo");
-                mopayTransfer.setCurrency(request.getCurrency() != null ? request.getCurrency() : "RWF");
-                mopayTransfer.setMessage(transfer.getMessage() != null ? transfer.getMessage() : "Payment from " + receiver.getCompanyName());
-                transfers.add(mopayTransfer);
-            }
-
-            mopayECWRequest.setTransfers(transfers);
+        
+        if (requestTransactionId == null || requestTransactionId.trim().isEmpty()) {
+            requestTransactionId = generateTransactionId();
         }
 
-        // Initiate payment with MoPay
-        MoPayResponse moPayResponse;
-        if (provider == PaymentProvider.MOPAY_OPEN_API) {
-            moPayResponse = moPayService.initiatePayment(moPayRequest);
-        } else {
-            MopayECWPaymentResponse mopayResponse = mopayPaymentService.initiatePayment(mopayECWRequest);
-            moPayResponse = toMoPayResponse(mopayResponse);
+        // Build BIZAO (ECW) payment request
+        MopayECWPaymentInitiateRequest mopayECWRequest = new MopayECWPaymentInitiateRequest();
+        mopayECWRequest.setTransactionId(requestTransactionId);
+        mopayECWRequest.setAccount_no(normalizedPayerPhone);
+        mopayECWRequest.setTitle("payment");
+        mopayECWRequest.setDetails("payment");
+        mopayECWRequest.setPayment_type("momo");
+        mopayECWRequest.setAmount(request.getAmount());
+        mopayECWRequest.setCurrency(request.getCurrency() != null ? request.getCurrency() : "RWF");
+        mopayECWRequest.setMessage(message != null ? message : "payment");
+
+        List<MopayECWPaymentInitiateRequest.Transfer> transfers = new java.util.ArrayList<>();
+        for (int i = 0; i < request.getTransfers().size(); i++) {
+            PayCustomerRequest.Transfer transfer = request.getTransfers().get(i);
+            MopayECWPaymentInitiateRequest.Transfer mopayTransfer = new MopayECWPaymentInitiateRequest.Transfer();
+            String transferTransactionId = transfer.getTransaction_id();
+            if (transferTransactionId == null || transferTransactionId.trim().isEmpty()) {
+                transferTransactionId = requestTransactionId + "-" + (i + 1);
+            }
+            mopayTransfer.setTransactionId(transferTransactionId);
+            mopayTransfer.setAmount(transfer.getAmount());
+            String normalizedReceiverPhone = String.valueOf(transfer.getPhone());
+            if (normalizedReceiverPhone.length() != 12) {
+                try {
+                    normalizedReceiverPhone = normalizePhoneTo12Digits(normalizedReceiverPhone);
+                } catch (Exception e) {
+                    throw new RuntimeException("Invalid receiver phone number: " + transfer.getPhone() + ". Error: " + e.getMessage());
+                }
+            }
+            mopayTransfer.setAccount_no(normalizedReceiverPhone);
+            mopayTransfer.setPayment_type("momo");
+            mopayTransfer.setCurrency(request.getCurrency() != null ? request.getCurrency() : "RWF");
+            mopayTransfer.setMessage(transfer.getMessage() != null ? transfer.getMessage() : "payment from Dynaroo");
+            transfers.add(mopayTransfer);
         }
+
+        mopayECWRequest.setTransfers(transfers);
+
+        // Initiate payment with BIZAO (ECW)
+        logger.info("Initiating BIZAO payment - Transaction ID: {}, Amount: {}, Payer: {}", 
+            requestTransactionId, request.getAmount(), normalizedPayerPhone);
+        MopayECWPaymentResponse mopayResponse = mopayPaymentService.initiatePayment(mopayECWRequest);
+        MoPayResponse moPayResponse = toMoPayResponse(mopayResponse);
 
         // Create transaction record
         Transaction transaction = new Transaction();
@@ -4076,12 +4072,12 @@ public class PaymentService {
         String transactionId = generateTransactionId();
         transaction.setMopayTransactionId(transactionId);
 
-        // Check MoPay response
+        // Check BIZAO (ECW) response
         String mopayTransactionId = moPayResponse != null ? moPayResponse.getTransactionId() : null;
-        if (mopayTransactionId == null && provider == PaymentProvider.MOPAY && isPaymentSuccessful(moPayResponse, provider)) {
+        if (mopayTransactionId == null && isPaymentSuccessful(moPayResponse, PaymentProvider.MOPAY)) {
             mopayTransactionId = transactionId;
         }
-        if (isPaymentSuccessful(moPayResponse, provider) && mopayTransactionId != null) {
+        if (isPaymentSuccessful(moPayResponse, PaymentProvider.MOPAY) && mopayTransactionId != null) {
             // Successfully initiated
             String existingMessage = transaction.getMessage() != null ? transaction.getMessage() : "";
             transaction.setMessage(existingMessage + " | MOPAY_ID:" + mopayTransactionId);

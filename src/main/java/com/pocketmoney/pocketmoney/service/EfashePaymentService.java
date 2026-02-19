@@ -661,6 +661,27 @@ public class EfashePaymentService {
         if (validateResponse.getCustomerAccountName() != null && !validateResponse.getCustomerAccountName().trim().isEmpty()) {
             customerAccountName = validateResponse.getCustomerAccountName().trim();
             logger.info("Recipient Account Name from validate: {}", customerAccountName);
+        } else {
+            // For AIRTIME service, try to get recipient name from Mopay account holder info if not available from validate
+            logger.info("AIRTIME service - Recipient name not available from validate, fetching from Mopay account holder info for phone: {}", normalizedRecipientPhone);
+            try {
+                com.pocketmoney.pocketmoney.dto.MopayECWAccountHolderResponse accountHolderInfo = mopayPaymentService.getAccountHolderInformation(normalizedRecipientPhone);
+                if (accountHolderInfo != null && accountHolderInfo.getStatus() != null && accountHolderInfo.getStatus() == 200) {
+                    String fullName = accountHolderInfo.getFullName();
+                    if (fullName != null && !fullName.trim().isEmpty()) {
+                        customerAccountName = fullName.trim();
+                        logger.info("✅ Recipient name retrieved from Mopay account holder info: {}", customerAccountName);
+                    } else {
+                        logger.warn("Mopay account holder info returned status 200 but no name available for recipient");
+                    }
+                } else {
+                    logger.warn("Mopay account holder info returned non-success status: {}", 
+                        accountHolderInfo != null ? accountHolderInfo.getStatus() : "null");
+                }
+            } catch (Exception e) {
+                logger.warn("Failed to get recipient name from Mopay account holder info (non-critical): {}", e.getMessage());
+                // Don't fail the transaction if account holder info fails
+            }
         }
         
         // Determine delivery method from validate response
