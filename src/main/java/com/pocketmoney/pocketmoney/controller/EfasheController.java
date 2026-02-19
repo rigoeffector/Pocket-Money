@@ -158,9 +158,14 @@ public class EfasheController {
      *   - phone: Optional filter by customer phone number (accepts any format, will be normalized)
      *            - For ADMIN/RECEIVER: optional filter
      *            - For USER: ignored, automatically uses their own phone number
-     *   - search: Optional search term to search by phone number, customer name, or transaction ID
-     *            - Searches in: customerPhone, customerAccountName, transactionId
+     *   - search: Optional search term to search across multiple transaction fields
+     *            - Searches in: customerPhone, customerAccountNumber, customerAccountName, 
+     *                          transactionId, mopayTransactionId, trxId, token, amount, 
+     *                          serviceType, mopayStatus, efasheStatus
      *            - Case-insensitive partial match
+     *            - Examples: phone "250788123456", account "0788123456", name "MUHINZI", 
+     *                       amount "1000", token "1234-5678-9012", transaction ID "CMN123", 
+     *                       service type "AIRTIME", status "SUCCESS"
      *   - page: Page number (default: 0, must be >= 0)
      *   - size: Page size (default: 20, must be between 1 and 200)
      *   - fromDate: Optional start date filter (ISO 8601 format)

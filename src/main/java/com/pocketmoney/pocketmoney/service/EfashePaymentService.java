@@ -3464,15 +3464,51 @@ public class EfashePaymentService {
             queryBuilder.append("AND t.customerPhone = :customerPhone ");
         }
         
-        // Add search filter if provided (searches in phone, name, and transaction ID)
+        // Add comprehensive search filter if provided
+        // Searches in: phone, account number, account name, transaction IDs, token, amount, service type, status
         if (search != null && !search.trim().isEmpty()) {
             String searchTerm = search.trim();
-            queryBuilder.append("AND (LOWER(t.customerPhone) LIKE :searchTerm ");
+            queryBuilder.append("AND (");
+            
+            // Phone number search (with normalized version)
+            queryBuilder.append("LOWER(t.customerPhone) LIKE :searchTerm ");
             if (normalizedSearchPhone != null) {
                 queryBuilder.append("OR t.customerPhone = :normalizedSearchPhone ");
             }
-            queryBuilder.append("OR LOWER(t.customerAccountName) LIKE :searchTerm ");
-            queryBuilder.append("OR LOWER(t.transactionId) LIKE :searchTerm) ");
+            
+            // Account number search
+            queryBuilder.append("OR LOWER(t.customerAccountNumber) LIKE :searchTerm ");
+            
+            // Account name search
+            queryBuilder.append("OR LOWER(COALESCE(t.customerAccountName, '')) LIKE :searchTerm ");
+            
+            // Transaction IDs search
+            queryBuilder.append("OR LOWER(t.transactionId) LIKE :searchTerm ");
+            queryBuilder.append("OR LOWER(COALESCE(t.mopayTransactionId, '')) LIKE :searchTerm ");
+            queryBuilder.append("OR LOWER(COALESCE(t.trxId, '')) LIKE :searchTerm ");
+            
+            // Token search (for electricity tokens)
+            queryBuilder.append("OR LOWER(COALESCE(t.token, '')) LIKE :searchTerm ");
+            
+            // Amount search - try to match as string representation
+            // Also try exact numeric match if search term is a number
+            queryBuilder.append("OR CAST(t.amount AS string) LIKE :searchTerm ");
+            // Try exact amount match if search term is numeric
+            try {
+                BigDecimal searchAmount = new BigDecimal(searchTerm);
+                queryBuilder.append("OR t.amount = :searchAmount ");
+            } catch (NumberFormatException e) {
+                // Not a number, skip exact match
+            }
+            
+            // Service type search (convert enum to string)
+            queryBuilder.append("OR LOWER(CAST(t.serviceType AS string)) LIKE :searchTerm ");
+            
+            // Status search
+            queryBuilder.append("OR LOWER(COALESCE(t.mopayStatus, '')) LIKE :searchTerm ");
+            queryBuilder.append("OR LOWER(COALESCE(t.efasheStatus, '')) LIKE :searchTerm ");
+            
+            queryBuilder.append(") ");
         }
         
         // Add date range filters if provided
@@ -3509,13 +3545,24 @@ public class EfashePaymentService {
         if (normalizedPhone != null && !normalizedPhone.trim().isEmpty() && (search == null || search.trim().isEmpty())) {
             query.setParameter("customerPhone", normalizedPhone);
         }
+        // Prepare search term for both queries
+        String searchTerm = null;
+        BigDecimal searchAmount = null;
         if (search != null && !search.trim().isEmpty()) {
-            String searchTerm = search.trim();
+            searchTerm = search.trim();
             query.setParameter("searchTerm", "%" + searchTerm.toLowerCase() + "%");
             
             // If search term was normalized to a phone number, also search with normalized version
             if (normalizedSearchPhone != null) {
                 query.setParameter("normalizedSearchPhone", normalizedSearchPhone);
+            }
+            
+            // If search term is a valid number, also try exact amount match
+            try {
+                searchAmount = new BigDecimal(searchTerm);
+                query.setParameter("searchAmount", searchAmount);
+            } catch (NumberFormatException e) {
+                // Not a number, skip exact match
             }
         }
         if (fromDate != null) {
@@ -3535,13 +3582,44 @@ public class EfashePaymentService {
         if (normalizedPhone != null && !normalizedPhone.trim().isEmpty() && (search == null || search.trim().isEmpty())) {
             countQueryBuilder.append("AND t.customerPhone = :customerPhone ");
         }
-        if (search != null && !search.trim().isEmpty()) {
-            countQueryBuilder.append("AND (LOWER(t.customerPhone) LIKE :searchTerm ");
+        if (search != null && !search.trim().isEmpty() && searchTerm != null) {
+            countQueryBuilder.append("AND (");
+            
+            // Phone number search (with normalized version)
+            countQueryBuilder.append("LOWER(t.customerPhone) LIKE :searchTerm ");
             if (normalizedSearchPhone != null) {
                 countQueryBuilder.append("OR t.customerPhone = :normalizedSearchPhone ");
             }
-            countQueryBuilder.append("OR LOWER(t.customerAccountName) LIKE :searchTerm ");
-            countQueryBuilder.append("OR LOWER(t.transactionId) LIKE :searchTerm) ");
+            
+            // Account number search
+            countQueryBuilder.append("OR LOWER(t.customerAccountNumber) LIKE :searchTerm ");
+            
+            // Account name search
+            countQueryBuilder.append("OR LOWER(COALESCE(t.customerAccountName, '')) LIKE :searchTerm ");
+            
+            // Transaction IDs search
+            countQueryBuilder.append("OR LOWER(t.transactionId) LIKE :searchTerm ");
+            countQueryBuilder.append("OR LOWER(COALESCE(t.mopayTransactionId, '')) LIKE :searchTerm ");
+            countQueryBuilder.append("OR LOWER(COALESCE(t.trxId, '')) LIKE :searchTerm ");
+            
+            // Token search (for electricity tokens)
+            countQueryBuilder.append("OR LOWER(COALESCE(t.token, '')) LIKE :searchTerm ");
+            
+            // Amount search - try to match as string representation
+            countQueryBuilder.append("OR CAST(t.amount AS string) LIKE :searchTerm ");
+            // Try exact amount match if search term is numeric
+            if (searchAmount != null) {
+                countQueryBuilder.append("OR t.amount = :searchAmount ");
+            }
+            
+            // Service type search (convert enum to string)
+            countQueryBuilder.append("OR LOWER(CAST(t.serviceType AS string)) LIKE :searchTerm ");
+            
+            // Status search
+            countQueryBuilder.append("OR LOWER(COALESCE(t.mopayStatus, '')) LIKE :searchTerm ");
+            countQueryBuilder.append("OR LOWER(COALESCE(t.efasheStatus, '')) LIKE :searchTerm ");
+            
+            countQueryBuilder.append(") ");
         }
         if (fromDate != null) {
             countQueryBuilder.append("AND t.createdAt >= :fromDate ");
@@ -3567,13 +3645,17 @@ public class EfashePaymentService {
         if (normalizedPhone != null && !normalizedPhone.trim().isEmpty() && (search == null || search.trim().isEmpty())) {
             countQuery.setParameter("customerPhone", normalizedPhone);
         }
-        if (search != null && !search.trim().isEmpty()) {
-            String searchTerm = search.trim();
+        if (search != null && !search.trim().isEmpty() && searchTerm != null) {
             countQuery.setParameter("searchTerm", "%" + searchTerm.toLowerCase() + "%");
             
             // If search term is a phone number, also search with normalized version
             if (normalizedSearchPhone != null) {
                 countQuery.setParameter("normalizedSearchPhone", normalizedSearchPhone);
+            }
+            
+            // If search term is a valid number, also try exact amount match
+            if (searchAmount != null) {
+                countQuery.setParameter("searchAmount", searchAmount);
             }
         }
         if (fromDate != null) {
