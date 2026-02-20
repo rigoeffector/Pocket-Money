@@ -244,17 +244,17 @@ public class EfashePaymentService {
                 throw new RuntimeException("Amount must be positive for service type: " + request.getServiceType());
             }
             
-            // For AIRTIME service type, amount must be an even number
+            // For AIRTIME service type, amount must end with 0
             if (request.getServiceType() == EfasheServiceType.AIRTIME) {
                 BigDecimal amount = request.getAmount();
                 // Check if amount is a whole number (no decimal places)
                 if (amount.scale() > 0 && amount.stripTrailingZeros().scale() > 0) {
                     throw new RuntimeException("Airtime amount must be a whole number (no decimals)");
                 }
-                // Check if amount is even (remainder when divided by 2 is 0)
-                BigDecimal remainder = amount.remainder(BigDecimal.valueOf(2));
+                // Check if amount ends with 0 (remainder when divided by 10 is 0)
+                BigDecimal remainder = amount.remainder(BigDecimal.valueOf(10));
                 if (remainder.compareTo(BigDecimal.ZERO) != 0) {
-                    throw new RuntimeException("Airtime amount must be an even number. Please enter an even amount (e.g., 1000, 2000, 5000)");
+                    throw new RuntimeException("Airtime amount must end with 0. Please enter an amount ending with 0 (e.g., 100, 200, 120, 110)");
                 }
             }
         }
@@ -573,7 +573,7 @@ public class EfashePaymentService {
             throw new RuntimeException("This endpoint only supports AIRTIME service type");
         }
 
-        // Validate amount for AIRTIME - must be positive and even
+        // Validate amount for AIRTIME - must be positive and end with 0
         if (request.getAmount() == null) {
             throw new RuntimeException("Amount is required for airtime purchase");
         }
@@ -586,10 +586,10 @@ public class EfashePaymentService {
         if (amount.scale() > 0 && amount.stripTrailingZeros().scale() > 0) {
             throw new RuntimeException("Airtime amount must be a whole number (no decimals)");
         }
-        // Check if amount is even (remainder when divided by 2 is 0)
-        BigDecimal remainder = amount.remainder(BigDecimal.valueOf(2));
+        // Check if amount ends with 0 (remainder when divided by 10 is 0)
+        BigDecimal remainder = amount.remainder(BigDecimal.valueOf(10));
         if (remainder.compareTo(BigDecimal.ZERO) != 0) {
-            throw new RuntimeException("Airtime amount must be an even number. Please enter an even amount (e.g., 1000, 2000, 5000)");
+            throw new RuntimeException("Airtime amount must end with 0. Please enter an amount ending with 0 (e.g., 100, 200, 120, 110)");
         }
 
         // Get EFASHE settings for the service type
