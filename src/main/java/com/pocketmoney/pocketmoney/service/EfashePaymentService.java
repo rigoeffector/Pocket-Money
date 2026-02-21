@@ -1071,8 +1071,17 @@ public class EfashePaymentService {
         transaction.setTransactionId(mopayTransactionId);
         transaction.setMopayTransactionId(mopayTransactionId);
 
-        String initialMopayStatus = mopayResponse.getStatus() != null 
-            ? mopayResponse.getStatus().toString() : "PENDING";
+        // Set Mopay status: Only set to PENDING if status is 200, 201, or 202
+        // Otherwise, set to FAILED to allow refunds
+        String initialMopayStatus;
+        Integer statusCode = mopayResponse.getStatus();
+        if (statusCode != null && (statusCode == 200 || statusCode == 201 || statusCode == 202)) {
+            initialMopayStatus = statusCode.toString();
+        } else {
+            // Status is not 200, 201, or 202 - set to FAILED instead of PENDING
+            initialMopayStatus = statusCode != null ? statusCode.toString() : "FAILED";
+            logger.warn("⚠️ Mopay response status is not 200/201/202 (status: {}). Setting Mopay status to FAILED instead of PENDING to allow refunds.", statusCode);
+        }
         transaction.setInitialMopayStatus(initialMopayStatus);
         transaction.setMopayStatus(initialMopayStatus);
         transaction.setCashbackSent(true);
@@ -1555,6 +1564,17 @@ public class EfashePaymentService {
                                     logger.error("ELECTRICITY service - Error calling /electricity/tokens endpoint (execute): ", e);
                                     // Don't fail the transaction if tokens endpoint fails - continue with existing token if available
                                 }
+                                
+                                // For ELECTRICITY service, validate that token was received for cashback
+                                // If no token is available after all attempts, mark as FAILED
+                                if (transaction.getToken() == null || transaction.getToken().trim().isEmpty()) {
+                                    logger.error("❌ ELECTRICITY transaction - No token received after execute. Cannot send cashback. Marking as FAILED.");
+                                    transaction.setEfasheStatus("FAILED");
+                                    transaction.setErrorMessage("No electricity token received. Cannot process cashback. Service may not be delivered.");
+                                    efasheTransactionRepository.save(transaction);
+                                    logger.error("❌ ELECTRICITY transaction FAILED - No token. NOT sending notifications. Throwing error.");
+                                    throw new RuntimeException("ELECTRICITY transaction: No token received after execute. Cannot process cashback. Transaction ID: " + transaction.getTransactionId());
+                                }
                             } else {
                                 transaction.setMessage(executeResponse.getMessage());
                             }
@@ -1564,6 +1584,17 @@ public class EfashePaymentService {
                             // Skip polling - treat as SUCCESS immediately
                             if (executeResponse.getHttpStatusCode() != null && 
                                 (executeResponse.getHttpStatusCode() == 200 || executeResponse.getHttpStatusCode() == 202)) {
+                                // For ELECTRICITY, ensure token exists before setting SUCCESS
+                                if (transaction.getServiceType() == EfasheServiceType.ELECTRICITY) {
+                                    if (transaction.getToken() == null || transaction.getToken().trim().isEmpty()) {
+                                        logger.error("❌ ELECTRICITY transaction - HTTP 200/202 but no token. Marking as FAILED.");
+                                        transaction.setEfasheStatus("FAILED");
+                                        transaction.setErrorMessage("HTTP 200/202 but no electricity token received. Cannot process cashback.");
+                                        efasheTransactionRepository.save(transaction);
+                                        throw new RuntimeException("ELECTRICITY transaction: HTTP 200/202 but no token received. Transaction ID: " + transaction.getTransactionId());
+                                    }
+                                }
+                                
                                 // Only override message if not already set for ELECTRICITY
                                 if (transaction.getServiceType() != EfasheServiceType.ELECTRICITY || transaction.getMessage() == null) {
                                 transaction.setEfasheStatus("SUCCESS");
@@ -4096,6 +4127,32 @@ public class EfashePaymentService {
         }
         
         EfasheTransaction transaction = transactionOpt.get();
+        
+        // Validate refund eligibility: Only allow refund when Mopay is SUCCESS but EFASHE is FAILED
+        String mopayStatus = transaction.getMopayStatus();
+        String efasheStatus = transaction.getEfasheStatus();
+        
+        // Check if Mopay is SUCCESS (status 200, 201, or 202)
+        boolean mopaySuccess = false;
+        if (mopayStatus != null) {
+            try {
+                Integer mopayStatusCode = Integer.parseInt(mopayStatus);
+                mopaySuccess = (mopayStatusCode == 200 || mopayStatusCode == 201 || mopayStatusCode == 202);
+            } catch (NumberFormatException e) {
+                // If status is not a number, check if it's "SUCCESS" string
+                mopaySuccess = "SUCCESS".equalsIgnoreCase(mopayStatus);
+            }
+        }
+        
+        // Check if EFASHE is FAILED
+        boolean efasheFailed = "FAILED".equalsIgnoreCase(efasheStatus);
+        
+        if (!mopaySuccess || !efasheFailed) {
+            throw new RuntimeException("Refund is only allowed when Mopay is SUCCESS (200/201/202) but EFASHE is FAILED. " +
+                "Current status - Mopay: " + mopayStatus + " (SUCCESS: " + mopaySuccess + "), EFASHE: " + efasheStatus + " (FAILED: " + efasheFailed + ")");
+        }
+        
+        logger.info("✅ Refund eligibility validated - Mopay: SUCCESS ({}), EFASHE: FAILED", mopayStatus);
         
         // Validate transaction has amount
         if (transaction.getAmount() == null || transaction.getAmount().compareTo(BigDecimal.ZERO) <= 0) {

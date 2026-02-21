@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"shared-package/utils"
 	"ussd-service/config"
 	"ussd-service/routes"
@@ -12,6 +13,25 @@ import (
 func main() {
 	fmt.Println("Hello - ussd-service: 9000")
 	utils.InitializeViper("config", "yml")
+	
+	// Validate backend URL configuration
+	backendURL := viper.GetString("backend_url")
+	if backendURL == "" {
+		panic("backend_url is not configured in config.yml. Please set backend_url (e.g., http://164.92.89.74:8383)")
+	}
+	
+	// Check for common malformed IP addresses
+	if strings.Contains(backendURL, "164.928974") {
+		panic("ERROR: Malformed backend URL detected: '164.928974' should be '164.92.89.74'. Please fix backend_url in config.yml")
+	}
+	
+	// Validate URL format
+	if !strings.HasPrefix(backendURL, "http://") && !strings.HasPrefix(backendURL, "https://") {
+		panic(fmt.Sprintf("ERROR: Invalid backend_url format: '%s'. Must start with http:// or https://", backendURL))
+	}
+	
+	fmt.Printf("Backend URL configured: %s\n", backendURL)
+	
 	config.InitializeConfig()
 	//load ussd config
 	utils.InitializeViper("ussd_config", "json")
