@@ -629,7 +629,27 @@ func formatAmount(amount float64) string {
 }
 
 func backendUrl() string {
-	return strings.TrimRight(viper.GetString("backend_url"), "/")
+	url := strings.TrimRight(viper.GetString("backend_url"), "/")
+	
+	// Validate URL format to catch common configuration errors
+	if url != "" {
+		// Check for malformed IP addresses (missing dots)
+		if strings.Contains(url, "://") {
+			parts := strings.Split(url, "://")
+			if len(parts) == 2 {
+				hostPart := strings.Split(parts[1], "/")[0]
+				hostPart = strings.Split(hostPart, ":")[0] // Remove port
+				
+				// Check if it looks like an IP but is malformed
+				if strings.Count(hostPart, ".") < 3 && len(hostPart) > 6 {
+					// Might be a malformed IP like "164.928974" instead of "164.92.89.74"
+					utils.LogMessage("error", fmt.Sprintf("⚠️ WARNING: Backend URL host '%s' looks malformed. Expected format: '164.92.89.74' not '164.928974'. Please check backend_url in config.yml", hostPart), "ussd-service")
+				}
+			}
+		}
+	}
+	
+	return url
 }
 
 func shouldUseBackendAuth() bool {
@@ -690,13 +710,19 @@ func getBackendAuthHeader() (string, error) {
 
 func doBackendPost(path string, payload interface{}, authHeader string) (apiResponse, int, error) {
 	url := backendUrl() + path
+	
+	// Validate backend URL format
+	if url == "" || (!strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://")) {
+		return apiResponse{}, 0, fmt.Errorf("invalid backend URL configuration: %s. Please check backend_url in config.yml", url)
+	}
+	
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return apiResponse{}, 0, err
+		return apiResponse{}, 0, fmt.Errorf("failed to marshal request body: %w", err)
 	}
 	request, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return apiResponse{}, 0, err
+		return apiResponse{}, 0, fmt.Errorf("failed to create HTTP request to %s: %w", url, err)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	if authHeader != "" {
@@ -705,12 +731,22 @@ func doBackendPost(path string, payload interface{}, authHeader string) (apiResp
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(request)
 	if err != nil {
-		return apiResponse{}, 0, err
+		// Provide more helpful error message for connection errors
+		if strings.Contains(err.Error(), "connection refused") {
+			return apiResponse{}, 0, fmt.Errorf("connection refused to backend URL: %s. Please check: 1) Backend service is running, 2) Backend URL is correct in config.yml, 3) Network/firewall allows connection. Error: %w", url, err)
+		}
+		if strings.Contains(err.Error(), "no such host") || strings.Contains(err.Error(), "cannot resolve") {
+			return apiResponse{}, 0, fmt.Errorf("cannot resolve backend host: %s. Please check backend_url in config.yml is correct. Error: %w", url, err)
+		}
+		if strings.Contains(err.Error(), "timeout") {
+			return apiResponse{}, 0, fmt.Errorf("timeout connecting to backend URL: %s. Backend may be slow or unreachable. Error: %w", url, err)
+		}
+		return apiResponse{}, 0, fmt.Errorf("failed to connect to backend URL %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return apiResponse{}, resp.StatusCode, err
+		return apiResponse{}, resp.StatusCode, fmt.Errorf("failed to read response body from %s: %w", url, err)
 	}
 	apiResp := apiResponse{}
 	if len(data) > 0 {
