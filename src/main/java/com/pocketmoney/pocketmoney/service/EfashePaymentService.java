@@ -42,6 +42,7 @@ public class EfashePaymentService {
     private static final Logger logger = LoggerFactory.getLogger(EfashePaymentService.class);
 
     private final EfasheSettingsService efasheSettingsService;
+    private final RraRangeSettingService rraRangeSettingService;
     private final MopayOpenApiService mopayOpenApiService;
     private final MopayPaymentService mopayPaymentService;
     private final EfasheApiService efasheApiService;
@@ -65,6 +66,7 @@ public class EfashePaymentService {
     }
 
     public EfashePaymentService(EfasheSettingsService efasheSettingsService, 
+                                 RraRangeSettingService rraRangeSettingService,
                                  MopayOpenApiService mopayOpenApiService,
                                  MopayPaymentService mopayPaymentService,
                                  EfasheApiService efasheApiService,
@@ -76,6 +78,7 @@ public class EfashePaymentService {
                                  EntityManager entityManager,
                                  PaymentService paymentService) {
         this.efasheSettingsService = efasheSettingsService;
+        this.rraRangeSettingService = rraRangeSettingService;
         this.mopayOpenApiService = mopayOpenApiService;
         this.mopayPaymentService = mopayPaymentService;
         this.efasheApiService = efasheApiService;
@@ -437,14 +440,17 @@ public class EfashePaymentService {
         
         if (amount != null) {
             if (request.getServiceType() == EfasheServiceType.RRA) {
-                // RRA: Use fixed charge based on amount (customer pays amount + charge, charge goes to besoft)
-                BigDecimal rraCharge = getRraCharge(amount);
-                customerCashbackAmount = BigDecimal.ZERO;
+                // RRA: Use range-based percentage system (customer receives percentage as cashback)
+                BigDecimal rraPercentage = rraRangeSettingService.getApplicablePercentage(amount);
+                customerCashbackAmount = amount.multiply(rraPercentage)
+                    .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP)
+                    .setScale(0, RoundingMode.HALF_UP);
                 agentCommissionAmount = BigDecimal.ZERO;
-                besoftShareAmount = rraCharge;
-                fullAmountPhoneReceives = amount; // Full amount phone pays RRA
-                logger.info("RRA amount breakdown - RRA Amount: {}, Charge: {}, Total to debit: {}",
-                    amount, rraCharge, amount.add(rraCharge));
+                besoftShareAmount = BigDecimal.ZERO; // No besoft share for RRA with range-based system
+                fullAmountPhoneReceives = amount.subtract(customerCashbackAmount)
+                    .setScale(0, RoundingMode.HALF_UP);
+                logger.info("RRA amount breakdown - RRA Amount: {}, Percentage: {}%, Customer Cashback: {}, Full Amount Phone Receives: {}",
+                    amount, rraPercentage, customerCashbackAmount, fullAmountPhoneReceives);
             } else {
                 // Other services: Calculate amounts based on percentages
                 BigDecimal agentCommissionPercent = settingsResponse.getAgentCommissionPercentage();
@@ -850,16 +856,10 @@ public class EfashePaymentService {
         String normalizedFullAmountPhone = normalizePhoneTo12Digits(transaction.getFullAmountPhone());
         String normalizedCashbackPhone = normalizePhoneTo12Digits(transaction.getCashbackPhone());
 
-        // For RRA: total to debit = amount (RRA payment) + charge (besoftShareAmount)
+        // For RRA: total to debit = amount (no additional charge with range-based system)
         // For other services: total to debit = amount
         BigDecimal totalMoPayAmount = amount;
-        if (transaction.getServiceType() == EfasheServiceType.RRA 
-                && transaction.getBesoftShareAmount() != null 
-                && transaction.getBesoftShareAmount().compareTo(BigDecimal.ZERO) > 0) {
-            totalMoPayAmount = amount.add(transaction.getBesoftShareAmount());
-            logger.info("RRA payment - Total to debit: {} (RRA amount: {} + charge: {})", 
-                totalMoPayAmount, amount, transaction.getBesoftShareAmount());
-        }
+        logger.info("RRA payment - Total to debit: {} (RRA amount)", totalMoPayAmount);
 
         // Transfer 1: Full Amount Phone Number
         // For RRA: fullAmountPhone receives amount (to pay RRA). For others: amount - cashback - besoftShare
@@ -2415,26 +2415,19 @@ public class EfashePaymentService {
     }
 
     /**
-     * Calculate RRA charge based on payment amount (FRW).
-     * Pricing table:
-     * 1-1,000: 160 | 1,001-10,000: 300 | 10,001-40,000: 500 | 40,001-75,000: 1,000
-     * 75,001-150,000: 1,500 | 150,001-500,000: 2,000 | 500,001-1,000,000: 3,000
-     * 1,000,001-5,000,000: 5,000 | 5,000,001+: 10,000
+    /**
+     * Calculate RRA percentage based on payment amount using range-based settings.
+     * This method is deprecated in favor of RraRangeSettingService.getApplicablePercentage().
+     * Kept for backward compatibility but should not be used for new RRA transactions.
+     * 
+     * @deprecated Use RraRangeSettingService.getApplicablePercentage() instead
      */
+    @Deprecated
     private BigDecimal getRraCharge(BigDecimal amount) {
-        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
-            return BigDecimal.ZERO;
-        }
-        long amountLong = amount.longValue();
-        if (amountLong <= 1000) return BigDecimal.valueOf(160);
-        if (amountLong <= 10000) return BigDecimal.valueOf(300);
-        if (amountLong <= 40000) return BigDecimal.valueOf(500);
-        if (amountLong <= 75000) return BigDecimal.valueOf(1000);
-        if (amountLong <= 150000) return BigDecimal.valueOf(1500);
-        if (amountLong <= 500000) return BigDecimal.valueOf(2000);
-        if (amountLong <= 1000000) return BigDecimal.valueOf(3000);
-        if (amountLong <= 5000000) return BigDecimal.valueOf(5000);
-        return BigDecimal.valueOf(10000);
+        // This method is no longer used for RRA transactions
+        // RRA now uses range-based percentage system via RraRangeSettingService
+        logger.warn("getRraCharge() is deprecated. RRA now uses range-based percentage system.");
+        return BigDecimal.ZERO;
     }
 
     /**

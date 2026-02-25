@@ -118,6 +118,7 @@ public class SecurityConfig {
                         .requestMatchers("/api/efashe/transactions", "/api/efashe/transactions/**").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .requestMatchers("/api/efashe/electricity/tokens").hasAnyRole("USER", "RECEIVER", "ADMIN")
                         .requestMatchers("/api/efashe/settings", "/api/efashe/settings/**").hasRole("ADMIN")
+                        .requestMatchers("/api/rra/range-settings", "/api/rra/range-settings/**").hasRole("ADMIN")
                         .requestMatchers("/api/qrcode/**").hasAnyRole("RECEIVER", "ADMIN")
                         .requestMatchers("/api/messaging/**").hasAnyRole("RECEIVER", "ADMIN")
                         .requestMatchers("/api/failed-messages/**").hasAnyRole("RECEIVER", "ADMIN")
