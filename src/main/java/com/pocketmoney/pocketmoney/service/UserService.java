@@ -9,6 +9,7 @@ import com.pocketmoney.pocketmoney.dto.UpdateUserRequest;
 import com.pocketmoney.pocketmoney.dto.MerchantBalanceInfo;
 import com.pocketmoney.pocketmoney.dto.UserLoginResponse;
 import com.pocketmoney.pocketmoney.dto.UserResponse;
+import com.pocketmoney.pocketmoney.dto.PhoneNumberResponse;
 import com.pocketmoney.pocketmoney.entity.MerchantUserBalance;
 import com.pocketmoney.pocketmoney.entity.Receiver;
 import com.pocketmoney.pocketmoney.entity.ReceiverStatus;
@@ -178,31 +179,69 @@ public class UserService {
     }
 
     /**
-     * Get all customers who have made transactions (paginated)
-     * Returns distinct users who have at least one transaction in the system
-     * Supports search by name or phone number
+     * Get all unique phone numbers from all transaction sources (paginated)
+     * Collects phone numbers from:
+     * - Transaction table (phone_number)
+     * - EfasheTransaction table (customer_phone, customer_account_number, deliver_to, full_amount_phone, cashback_phone)
+     * Supports search by phone number
      */
     @Transactional(readOnly = true)
-    public PaginatedResponse<UserResponse> getCustomersWithTransactions(int page, int size, String search) {
-        // Build query to get distinct users who have made transactions
+    public PaginatedResponse<PhoneNumberResponse> getCustomersWithTransactions(int page, int size, String search) {
+        // Build native SQL query to union all phone numbers from different sources
         StringBuilder queryBuilder = new StringBuilder();
-        queryBuilder.append("SELECT DISTINCT u FROM User u ");
-        queryBuilder.append("INNER JOIN Transaction t ON t.user.id = u.id ");
+        queryBuilder.append("SELECT DISTINCT phone_number, source FROM (");
+        
+        // Phone numbers from Transaction table
+        queryBuilder.append("SELECT phone_number AS phone_number, 'TRANSACTION' AS source ");
+        queryBuilder.append("FROM transactions ");
+        queryBuilder.append("WHERE phone_number IS NOT NULL AND phone_number != '' ");
+        
+        // Phone numbers from EfasheTransaction - customer_phone
+        queryBuilder.append("UNION ");
+        queryBuilder.append("SELECT customer_phone AS phone_number, 'EFASHE_CUSTOMER_PHONE' AS source ");
+        queryBuilder.append("FROM efashe_transactions ");
+        queryBuilder.append("WHERE customer_phone IS NOT NULL AND customer_phone != '' ");
+        
+        // Phone numbers from EfasheTransaction - customer_account_number (if it's a phone number format)
+        queryBuilder.append("UNION ");
+        queryBuilder.append("SELECT customer_account_number AS phone_number, 'EFASHE_ACCOUNT_NUMBER' AS source ");
+        queryBuilder.append("FROM efashe_transactions ");
+        queryBuilder.append("WHERE customer_account_number IS NOT NULL AND customer_account_number != '' ");
+        queryBuilder.append("AND (LENGTH(customer_account_number) = 12 OR LENGTH(customer_account_number) = 13) ");
+        queryBuilder.append("AND customer_account_number ~ '^250[0-9]+$' ");
+        
+        // Phone numbers from EfasheTransaction - deliver_to
+        queryBuilder.append("UNION ");
+        queryBuilder.append("SELECT deliver_to AS phone_number, 'EFASHE_DELIVER_TO' AS source ");
+        queryBuilder.append("FROM efashe_transactions ");
+        queryBuilder.append("WHERE deliver_to IS NOT NULL AND deliver_to != '' ");
+        queryBuilder.append("AND (LENGTH(deliver_to) = 12 OR LENGTH(deliver_to) = 13) ");
+        queryBuilder.append("AND deliver_to ~ '^250[0-9]+$' ");
+        
+        // Phone numbers from EfasheTransaction - full_amount_phone
+        queryBuilder.append("UNION ");
+        queryBuilder.append("SELECT full_amount_phone AS phone_number, 'EFASHE_FULL_AMOUNT' AS source ");
+        queryBuilder.append("FROM efashe_transactions ");
+        queryBuilder.append("WHERE full_amount_phone IS NOT NULL AND full_amount_phone != '' ");
+        
+        // Phone numbers from EfasheTransaction - cashback_phone
+        queryBuilder.append("UNION ");
+        queryBuilder.append("SELECT cashback_phone AS phone_number, 'EFASHE_CASHBACK' AS source ");
+        queryBuilder.append("FROM efashe_transactions ");
+        queryBuilder.append("WHERE cashback_phone IS NOT NULL AND cashback_phone != '' ");
+        
+        queryBuilder.append(") AS all_phones ");
         queryBuilder.append("WHERE 1=1 ");
         
         // Add search filter if provided
         if (search != null && !search.trim().isEmpty()) {
-            queryBuilder.append("AND (");
-            queryBuilder.append("LOWER(u.fullNames) LIKE LOWER(:search) OR ");
-            queryBuilder.append("LOWER(u.phoneNumber) LIKE LOWER(:search) OR ");
-            queryBuilder.append("LOWER(COALESCE(u.email, '')) LIKE LOWER(:search)");
-            queryBuilder.append(") ");
+            queryBuilder.append("AND LOWER(phone_number) LIKE LOWER(:search) ");
         }
         
-        queryBuilder.append("ORDER BY u.lastTransactionDate DESC NULLS LAST, u.createdAt DESC");
+        queryBuilder.append("ORDER BY phone_number ASC");
         
-        // Create query
-        Query query = entityManager.createQuery(queryBuilder.toString(), User.class);
+        // Create native query
+        Query query = entityManager.createNativeQuery(queryBuilder.toString());
         
         // Set search parameter if provided
         if (search != null && !search.trim().isEmpty()) {
@@ -211,25 +250,49 @@ public class UserService {
         
         // Get total count (for pagination)
         StringBuilder countQueryBuilder = new StringBuilder();
-        countQueryBuilder.append("SELECT COUNT(DISTINCT u.id) FROM User u ");
-        countQueryBuilder.append("INNER JOIN Transaction t ON t.user.id = u.id ");
+        countQueryBuilder.append("SELECT COUNT(DISTINCT phone_number) FROM (");
+        
+        countQueryBuilder.append("SELECT phone_number FROM transactions ");
+        countQueryBuilder.append("WHERE phone_number IS NOT NULL AND phone_number != '' ");
+        
+        countQueryBuilder.append("UNION ");
+        countQueryBuilder.append("SELECT customer_phone AS phone_number FROM efashe_transactions ");
+        countQueryBuilder.append("WHERE customer_phone IS NOT NULL AND customer_phone != '' ");
+        
+        countQueryBuilder.append("UNION ");
+        countQueryBuilder.append("SELECT customer_account_number AS phone_number FROM efashe_transactions ");
+        countQueryBuilder.append("WHERE customer_account_number IS NOT NULL AND customer_account_number != '' ");
+        countQueryBuilder.append("AND (LENGTH(customer_account_number) = 12 OR LENGTH(customer_account_number) = 13) ");
+        countQueryBuilder.append("AND customer_account_number ~ '^250[0-9]+$' ");
+        
+        countQueryBuilder.append("UNION ");
+        countQueryBuilder.append("SELECT deliver_to AS phone_number FROM efashe_transactions ");
+        countQueryBuilder.append("WHERE deliver_to IS NOT NULL AND deliver_to != '' ");
+        countQueryBuilder.append("AND (LENGTH(deliver_to) = 12 OR LENGTH(deliver_to) = 13) ");
+        countQueryBuilder.append("AND deliver_to ~ '^250[0-9]+$' ");
+        
+        countQueryBuilder.append("UNION ");
+        countQueryBuilder.append("SELECT full_amount_phone AS phone_number FROM efashe_transactions ");
+        countQueryBuilder.append("WHERE full_amount_phone IS NOT NULL AND full_amount_phone != '' ");
+        
+        countQueryBuilder.append("UNION ");
+        countQueryBuilder.append("SELECT cashback_phone AS phone_number FROM efashe_transactions ");
+        countQueryBuilder.append("WHERE cashback_phone IS NOT NULL AND cashback_phone != '' ");
+        
+        countQueryBuilder.append(") AS all_phones ");
         countQueryBuilder.append("WHERE 1=1 ");
         
         if (search != null && !search.trim().isEmpty()) {
-            countQueryBuilder.append("AND (");
-            countQueryBuilder.append("LOWER(u.fullNames) LIKE LOWER(:search) OR ");
-            countQueryBuilder.append("LOWER(u.phoneNumber) LIKE LOWER(:search) OR ");
-            countQueryBuilder.append("LOWER(COALESCE(u.email, '')) LIKE LOWER(:search)");
-            countQueryBuilder.append(") ");
+            countQueryBuilder.append("AND LOWER(phone_number) LIKE LOWER(:search) ");
         }
         
-        Query countQuery = entityManager.createQuery(countQueryBuilder.toString(), Long.class);
+        Query countQuery = entityManager.createNativeQuery(countQueryBuilder.toString());
         
         if (search != null && !search.trim().isEmpty()) {
             countQuery.setParameter("search", "%" + search.trim() + "%");
         }
         
-        long totalElements = (Long) countQuery.getSingleResult();
+        long totalElements = ((Number) countQuery.getSingleResult()).longValue();
         
         // Apply pagination
         int offset = page * size;
@@ -237,11 +300,16 @@ public class UserService {
         query.setMaxResults(size);
         
         @SuppressWarnings("unchecked")
-        List<User> users = (List<User>) query.getResultList();
+        List<Object[]> results = (List<Object[]>) query.getResultList();
         
-        // Convert to UserResponse
-        List<UserResponse> content = users.stream()
-                .map(this::mapToResponse)
+        // Convert to PhoneNumberResponse
+        List<PhoneNumberResponse> content = results.stream()
+                .map(row -> {
+                    PhoneNumberResponse response = new PhoneNumberResponse();
+                    response.setPhoneNumber((String) row[0]);
+                    response.setSource((String) row[1]);
+                    return response;
+                })
                 .collect(Collectors.toList());
         
         // Calculate pagination metadata
@@ -249,7 +317,7 @@ public class UserService {
         boolean isFirst = page == 0;
         boolean isLast = page >= totalPages - 1;
         
-        PaginatedResponse<UserResponse> response = new PaginatedResponse<>();
+        PaginatedResponse<PhoneNumberResponse> response = new PaginatedResponse<>();
         response.setContent(content);
         response.setCurrentPage(page);
         response.setPageSize(size);

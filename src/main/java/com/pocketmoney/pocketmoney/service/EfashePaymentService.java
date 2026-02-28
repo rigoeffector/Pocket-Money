@@ -2427,7 +2427,7 @@ public class EfashePaymentService {
         // This method is no longer used for RRA transactions
         // RRA now uses range-based percentage system via RraRangeSettingService
         logger.warn("getRraCharge() is deprecated. RRA now uses range-based percentage system.");
-        return BigDecimal.ZERO;
+            return BigDecimal.ZERO;
     }
 
     /**

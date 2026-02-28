@@ -50,24 +50,26 @@ public class UserController {
     }
 
     /**
-     * Get all customers who have made transactions (paginated)
+     * Get all unique phone numbers from all transaction sources (paginated)
      * GET /api/users/customers
      * 
      * Query parameters:
      *   - page: Page number (default: 0)
      *   - size: Page size (default: 20)
-     *   - search: Optional search term to search by name, phone, or email
+     *   - search: Optional search term to search by phone number
      * 
-     * Returns paginated list of users who have at least one transaction
+     * Returns paginated list of unique phone numbers from:
+     * - Transaction table (phone_number)
+     * - EfasheTransaction table (customer_phone, customer_account_number, deliver_to, full_amount_phone, cashback_phone)
      */
     @GetMapping("/customers")
-    public ResponseEntity<ApiResponse<PaginatedResponse<UserResponse>>> getCustomersWithTransactions(
+    public ResponseEntity<ApiResponse<PaginatedResponse<PhoneNumberResponse>>> getCustomersWithTransactions(
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size,
             @RequestParam(required = false) String search) {
         try {
-            PaginatedResponse<UserResponse> response = userService.getCustomersWithTransactions(page, size, search);
-            return ResponseEntity.ok(ApiResponse.success("Customers retrieved successfully", response));
+            PaginatedResponse<PhoneNumberResponse> response = userService.getCustomersWithTransactions(page, size, search);
+            return ResponseEntity.ok(ApiResponse.success("Phone numbers retrieved successfully", response));
         } catch (RuntimeException e) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                     .body(ApiResponse.error(e.getMessage()));
