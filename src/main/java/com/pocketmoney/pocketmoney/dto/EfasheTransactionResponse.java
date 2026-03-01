@@ -5,8 +5,11 @@ import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
+
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.UUID;
 
 @Data
@@ -42,7 +45,20 @@ public class EfasheTransactionResponse {
     private String kwh; // KWH units for ELECTRICITY
     private String decoderNumber; // Decoder number for TV (same as customerAccountNumber)
     
+    // PAY_CUSTOMER: list of customers paid (names, phones, amounts)
+    @JsonInclude(JsonInclude.Include.ALWAYS)
+    private List<TransferRecipientInfo> transferRecipients;
+    
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
+    
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class TransferRecipientInfo {
+        private String phone;
+        private String name;
+        private BigDecimal amount;
+    }
 }
 

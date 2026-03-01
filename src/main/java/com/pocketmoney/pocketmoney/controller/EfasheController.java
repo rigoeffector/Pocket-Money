@@ -23,9 +23,10 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.time.LocalDateTime;
 import java.util.List;
 import java.util.stream.Collectors;
+
+import java.time.LocalDateTime;
 
 @RestController
 @RequestMapping("/api/efashe")
@@ -249,9 +250,19 @@ public class EfasheController {
                         efashe.setMessage("PAY_CUSTOMER transaction");
                         efashe.setCreatedAt(payment.getCreatedAt());
                         efashe.setUpdatedAt(payment.getCreatedAt());
+                        // Include customer names (transfer recipients) for PAY_CUSTOMER
+                        if (payment.getTransferRecipients() != null && !payment.getTransferRecipients().isEmpty()) {
+                            List<EfasheTransactionResponse.TransferRecipientInfo> recipients = payment.getTransferRecipients().stream()
+                                .map(r -> new EfasheTransactionResponse.TransferRecipientInfo(
+                                    r.getPhone(), r.getName(), r.getAmount()))
+                                .collect(Collectors.toList());
+                            efashe.setTransferRecipients(recipients);
+                        } else {
+                            efashe.setTransferRecipients(List.of());
+                        }
                         return efashe;
                     })
-                    .collect(java.util.stream.Collectors.toList());
+                    .collect(Collectors.toList());
                 
                 PaginatedResponse<EfasheTransactionResponse> response = new PaginatedResponse<>();
                 response.setContent(efasheTransactions);
