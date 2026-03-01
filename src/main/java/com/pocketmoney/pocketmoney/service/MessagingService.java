@@ -49,6 +49,10 @@ public class MessagingService {
     @Value("${sms.bepay.sender.id:BEPAY}")
     private String bepaySenderId;
 
+    /** Delay in seconds between each message in bulk SMS (e.g. 40 or 60 to avoid rate limits). */
+    @Value("${messaging.bulk.delay-between-messages-seconds:40}")
+    private int bulkDelayBetweenMessagesSeconds;
+
     private final RestTemplate restTemplate;
     private final FailedMessageRepository failedMessageRepository;
 
@@ -360,6 +364,19 @@ public class MessagingService {
             }
             
             response.getResults().add(result);
+
+            // Delay before next message to avoid rate limits (e.g. 40s or 1 min between each)
+            if (i < phoneNumbers.size() - 1 && bulkDelayBetweenMessagesSeconds > 0) {
+                long delayMs = bulkDelayBetweenMessagesSeconds * 1000L;
+                logger.info("Bulk SMS - Waiting {}s before next message ({}/{} done)", bulkDelayBetweenMessagesSeconds, i + 1, phoneNumbers.size());
+                try {
+                    Thread.sleep(delayMs);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    logger.warn("Bulk SMS delay interrupted");
+                    break;
+                }
+            }
         }
 
         logger.info("=== END sendBulkSms ===");
